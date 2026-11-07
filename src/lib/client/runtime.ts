@@ -7,8 +7,12 @@
  * switched off again with `?mock=0`) or when the build sets `VITE_FLARION_MOCK=1`.
  */
 
-/** The build, sent as `x-app-version` and in the socket `hello`. `dev` is accepted by dev servers. */
-export const APP_VERSION: string = (import.meta.env?.VITE_APP_VERSION as string | undefined) || 'dev';
+/**
+ * The build, sent as `x-app-version`, in the socket's `v` parameter and in its `hello`. Production builds
+ * get package.json's version from vite.config.ts (`define`); the dev server leaves it unset, so the client
+ * says `dev`, which only development and test servers accept.
+ */
+export const APP_VERSION: string = (import.meta.env.VITE_APP_VERSION as string | undefined) || 'dev';
 
 const MOCK_KEY = 'flarion.mock';
 let cached: boolean | undefined;

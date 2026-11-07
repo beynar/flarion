@@ -10,6 +10,7 @@
  */
 import { createORPCClient, ORPCError } from '@orpc/client';
 import { RPCLink } from '@orpc/client/fetch';
+import { SimpleCsrfProtectionLinkPlugin } from '@orpc/client/plugins';
 import type { ContractRouterClient } from '@orpc/contract';
 import type { Contract } from '../../server/rpc/contract';
 import { APP_VERSION_HEADER, WORKSPACE_HEADER } from '#lib/shared/protocol.ts';
@@ -61,6 +62,8 @@ export function createRpc(options: RpcOptions = {}): Rpc {
 			return headers;
 		},
 		fetch: options.fetch,
+		// `/rpc` refuses requests without oRPC's CSRF header (`x-csrf-token: orpc`, rpc-route.ts).
+		plugins: [new SimpleCsrfProtectionLinkPlugin()],
 		interceptors: [
 			async ({ next }) => {
 				try {

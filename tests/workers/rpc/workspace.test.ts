@@ -199,6 +199,8 @@ describe('workspace settings and delete', () => {
 		const owner = ada.client.rpcWithWorkspace(adaWorkspace.id);
 		const updated = await owner.workspace.settings({ name: 'Acme Corp', icon: '🚀', slug: 'acme-corp' });
 		expect(updated).toMatchObject({ name: 'Acme Corp', icon: '🚀', slug: 'acme-corp', role: 'owner' });
+		// The rename reached the Workspace DO (outbox, delivered right away).
+		expect(world.workspaces.names.get(adaWorkspace.id)).toBe('Acme Corp');
 		await expect(owner.workspace.settings({ slug: 'x' })).rejects.toThrow();
 		const taken = await ada.client.rpc.workspace.create({ name: 'Another' });
 		await expect(owner.workspace.settings({ slug: taken.slug })).rejects.toMatchObject({ code: 'CONFLICT' });

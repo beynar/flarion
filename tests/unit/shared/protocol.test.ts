@@ -29,9 +29,10 @@ const tree: TreeRow = {
 	isDatabase: false,
 	teamspaceId: null,
 	hasChildren: true,
-	access: 'full'
+	access: 'full',
+	createdBy: 'u1'
 };
-const page: PageRow = { ...tree, cover: null, values: { title: 'Home', points: 2, tags: ['a'], due: { start: '2026-11-07' } }, createdBy: 'u1', createdAt: '2026-11-07T10:00:00Z', updatedBy: null, updatedAt: '2026-11-07T10:00:00Z' };
+const page: PageRow = { ...tree, cover: null, values: { title: 'Home', points: 2, tags: ['a'], due: { start: '2026-11-07' } }, createdAt: '2026-11-07T10:00:00Z', updatedBy: null, updatedAt: '2026-11-07T10:00:00Z' };
 const row: ViewRow = { id: 'p2', title: 'Task', icon: null, values: { status: 'todo', done: false, tags: null } };
 
 const client: ClientMessage[] = [

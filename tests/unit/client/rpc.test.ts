@@ -15,6 +15,8 @@ describe('createRpc', () => {
 		expect(request.url).toBe('http://app.test/rpc/mutate');
 		expect(request.headers.get(WORKSPACE_HEADER)).toBe('ws_1');
 		expect(request.headers.get(APP_VERSION_HEADER)).toBe('1.2.3');
+		// oRPC's CSRF header: /rpc refuses a call without it.
+		expect(request.headers.get('x-csrf-token')).toBe('orpc');
 	});
 
 	it('leaves the workspace header off before a workspace is chosen', async () => {

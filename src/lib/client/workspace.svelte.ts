@@ -188,7 +188,7 @@ function entityFromTree(row: TreeRow, prev?: PageEntity): PageEntity {
 		hasChildren: row.hasChildren,
 		access: row.access,
 		values: prev?.values ?? {},
-		createdBy: prev?.createdBy ?? null,
+		createdBy: row.createdBy,
 		createdAt: prev?.createdAt ?? null,
 		updatedBy: prev?.updatedBy ?? null,
 		updatedAt: prev?.updatedAt ?? null,
@@ -233,7 +233,8 @@ function toTreeRow(e: PageEntity): TreeRow {
 		isDatabase: e.isDatabase,
 		teamspaceId: e.teamspaceId,
 		hasChildren: e.hasChildren,
-		access: e.access
+		access: e.access,
+		createdBy: e.createdBy
 	};
 }
 
@@ -242,7 +243,6 @@ function toPageRow(e: PageEntity): PageRow {
 		...toTreeRow(e),
 		cover: e.cover,
 		values: e.values,
-		createdBy: e.createdBy,
 		createdAt: e.createdAt ?? '',
 		updatedBy: e.updatedBy,
 		updatedAt: e.updatedAt ?? ''
@@ -319,7 +319,7 @@ export class WorkspaceStore {
 			if (list) list.push(e);
 			else map.set(k, [e]);
 		}
-		for (const list of map.values()) list.sort((a, b) => compareRank(a.rank, b.rank) || a.id.localeCompare(b.id));
+		for (const list of map.values()) list.sort((a, b) => compareRank(a.rank, b.rank) || compareRank(a.id, b.id));
 		return map;
 	});
 
@@ -1257,13 +1257,11 @@ export class WorkspaceStore {
 	}
 
 	/**
-	 * Root pages outside any teamspace that are mine (Private) or someone else's (Shared). Tree rows
-	 * carry no creator, so until a page row says otherwise a page I hold less than full access to is
-	 * Shared, anything else is mine.
+	 * Root pages outside any teamspace that I created (Private) or someone else shared with me (Shared);
+	 * tree rows carry `createdBy`.
 	 */
 	#isMine(p: PageEntity): boolean {
-		if (p.createdBy) return p.createdBy === this.user.id;
-		return p.access === 'full';
+		return p.createdBy === this.user.id;
 	}
 	privateRoots(): PageEntity[] {
 		return this.children(null).filter((p) => p.teamspaceId === null && this.#isMine(p));

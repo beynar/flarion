@@ -11,7 +11,8 @@ import type { WorkspaceRole } from './session';
 
 export type OutboxJob =
 	| { kind: 'init'; payload: { workspaceId: string; name: string; ownerId: string; ownerName: string } }
-	| { kind: 'syncMember'; payload: { userId: string; role: WorkspaceRole | null; name?: string } };
+	| { kind: 'syncMember'; payload: { userId: string; role: WorkspaceRole | null; name?: string } }
+	| { kind: 'rename'; payload: { name: string } };
 
 const MAX_BACKOFF_MS = 60 * 60 * 1000;
 
@@ -39,6 +40,7 @@ export function outboxInsert(db: DirectoryClient, workspaceId: string, job: Outb
 async function deliver(env: Pick<Env, 'WORKSPACE'>, workspaceId: string, job: OutboxJob): Promise<void> {
 	const rpc = workspaceIdentity(env, workspaceId);
 	if (job.kind === 'init') await rpc.init({ ...job.payload });
+	else if (job.kind === 'rename') await rpc.rename({ ...job.payload });
 	else await rpc.syncMember({ ...job.payload });
 }
 
@@ -89,15 +91,21 @@ export async function pruneOutbox(env: Pick<Env, 'DB'>, now = Date.now()): Promi
  */
 export async function reconcileMemberships(env: Pick<Env, 'DB' | 'WORKSPACE'>): Promise<{ workspaces: number; synced: number; failed: number }> {
 	const db = createDirectoryClient(env.DB);
-	const workspaces = await db.workspace.findMany({ select: { id: true } });
+	const workspaces = await db.workspace.findMany({ select: { id: true, name: true } });
 	let synced = 0;
 	let failed = 0;
-	for (const { id } of workspaces) {
+	for (const { id, name } of workspaces) {
 		const [live, removed] = await Promise.all([
 			db.membership.findMany({ where: { workspaceId: id }, include: { user: { select: { name: true } } } }),
 			db.membership.findMany({ where: { workspaceId: id }, deleted: 'only', select: { userId: true } })
 		]);
 		const rpc = workspaceIdentity(env, id);
+		try {
+			await rpc.rename({ name });
+		} catch (error) {
+			failed++;
+			console.error(`[reconcile] rename failed for ${id}:`, error instanceof Error ? error.message : error);
+		}
 		for (const member of live) {
 			try {
 				await rpc.syncMember({ userId: member.userId, role: member.role as WorkspaceRole, name: member.user?.name });

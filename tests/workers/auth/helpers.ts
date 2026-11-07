@@ -18,6 +18,8 @@ export class FakeWorkspaces {
 	members = new Map<string, Map<string, WorkspaceRole>>();
 	inits: Array<{ workspaceId: string; name: string; ownerId: string; ownerName: string }> = [];
 	syncs: Array<{ workspaceId: string; userId: string; role: WorkspaceRole | null; name?: string }> = [];
+	/** The display name each workspace's DO last heard (`init`, then `rename`). */
+	names = new Map<string, string>();
 	getRoleCalls = 0;
 	failing = false;
 
@@ -35,6 +37,7 @@ export class FakeWorkspaces {
 			init: async (args: { workspaceId: string; name: string; ownerId: string; ownerName: string }) => {
 				guard();
 				this.inits.push(args);
+				this.names.set(workspaceId, args.name);
 				this.ws(workspaceId).set(args.ownerId, 'owner');
 			},
 			syncMember: async (args: { userId: string; role: WorkspaceRole | null; name?: string }) => {
@@ -42,6 +45,10 @@ export class FakeWorkspaces {
 				this.syncs.push({ workspaceId, ...args });
 				if (args.role) this.ws(workspaceId).set(args.userId, args.role);
 				else this.ws(workspaceId).delete(args.userId);
+			},
+			rename: async (args: { name: string }) => {
+				guard();
+				this.names.set(workspaceId, args.name);
 			},
 			getMemberRole: async (userId: string) => {
 				guard();

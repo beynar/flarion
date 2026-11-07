@@ -121,13 +121,24 @@
 </div>
 
 <style>
+	/* The same column as the page header: the document lines up with the title. */
 	.flarion-editor {
+		--column-pad: var(--app-page-padding-x-narrow);
 		position: relative;
+		box-sizing: border-box;
 		width: 100%;
+		max-width: calc(var(--app-page-width) + 2 * var(--column-pad));
+		margin-inline: auto;
+		padding-inline: var(--column-pad);
 		min-height: 40vh;
 		background: var(--app-page);
 		color: var(--app-text);
 		font-size: var(--app-font-size-document);
+	}
+	@media (min-width: 768px) {
+		.flarion-editor {
+			--column-pad: var(--app-page-padding-x);
+		}
 	}
 	.flarion-editor-banner {
 		margin: 0 0 8px;

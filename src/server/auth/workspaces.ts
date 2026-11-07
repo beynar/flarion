@@ -125,11 +125,12 @@ export async function createWorkspace(
 }
 
 export async function updateWorkspace(
-	env: Env,
+	services: Services,
 	workspaceId: string,
 	role: WorkspaceRole,
 	input: { name?: string; slug?: string; icon?: string | null }
 ): Promise<WorkspaceDto> {
+	const { env } = services;
 	if (role !== 'owner' && role !== 'admin') throw new ORPCError('FORBIDDEN', { message: 'Only owners and admins can change workspace settings' });
 	const db = createDirectoryClient(env.DB);
 	const data: { name?: string; slug?: string; icon?: string | null } = {};
@@ -142,9 +143,18 @@ export async function updateWorkspace(
 		data.slug = input.slug;
 	}
 	if (Object.keys(data).length > 0) {
+		// A rename also goes to the Workspace DO (which keeps the name in its meta), through the outbox.
+		const outbox = data.name !== undefined ? outboxInsert(db, workspaceId, { kind: 'rename', payload: { name: data.name } }) : null;
 		try {
-			const result = await db.workspace.updateMany({ where: { id: workspaceId }, data });
-			if (result.count === 0) throw new ORPCError('NOT_FOUND', { message: 'Workspace not found' });
+			const update = db.workspace.updateMany({ where: { id: workspaceId }, data });
+			if (outbox) {
+				const [result] = await db.$transaction([update, outbox.operation]);
+				if (result.count === 0) throw new ORPCError('NOT_FOUND', { message: 'Workspace not found' });
+				await deliver(services, [outbox.id]);
+			} else {
+				const result = await update;
+				if (result.count === 0) throw new ORPCError('NOT_FOUND', { message: 'Workspace not found' });
+			}
 		} catch (error) {
 			if (isUniqueViolation(error)) throw new ORPCError('CONFLICT', { message: 'That workspace address is taken' });
 			throw error;

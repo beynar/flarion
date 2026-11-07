@@ -1,0 +1,11 @@
+# Local secrets for `pnpm dev` (wrangler/Vite read .dev.vars). Copy to .dev.vars; the real file is gitignored.
+# Never reuse these values outside local development: production secrets go through `wrangler secret put`.
+
+# Signs edytor room tokens (rt1.* HMAC, 600 s). 32+ characters.
+ROOM_TOKEN_KEY=dev-room-token-key-0123456789abcdef
+# better-auth session and registration-token secret. 32+ characters.
+BETTER_AUTH_SECRET=dev-better-auth-secret-0123456789abcdef-flarion
+# Pepper for hashing API tokens.
+API_TOKEN_PEPPER=dev-api-token-pepper-0123456789abcdef
+# Cloudflare's always-pass Turnstile test secret (pairs with the always-pass site key in wrangler.jsonc).
+TURNSTILE_SECRET=1x0000000000000000000000000000000AA

@@ -138,7 +138,8 @@ const toTree = (p: PageRow): TreeRow => ({
 	isDatabase: p.isDatabase,
 	teamspaceId: p.teamspaceId,
 	hasChildren: p.hasChildren,
-	access: p.access
+	access: p.access,
+	createdBy: p.createdBy
 });
 
 // ───────────────────────────── server ─────────────────────────────

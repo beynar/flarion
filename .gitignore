@@ -7,7 +7,9 @@ dist
 .env
 .env.*
 .dev.vars*
+!.dev.vars.example
 test-results
 playwright-report
 wrangler.dev.jsonc
+wrangler.dev-*.jsonc
 .sveltekit-cloudflare-worker

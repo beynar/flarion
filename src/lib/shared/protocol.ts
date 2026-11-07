@@ -110,16 +110,17 @@ export function compareAppVersions(a: string, b: string): -1 | 0 | 1 | null {
 
 /**
  * Whether a client may talk to this server: `ok`, or `reload` when its version is below `min`.
- * A non-numeric version (a dev build, a git sha) is accepted only when it equals `current` or is
- * literally `dev`.
+ * A non-numeric version (a git sha) is accepted only when it equals `current`; the literal `dev` (the
+ * dev server's build) is accepted when `allowDev` is true (the default for this pure helper: servers
+ * pass `false` outside development and test, see `objects/workspace/versions.ts`).
  */
 export function checkClientVersion(
 	client: string | null | undefined,
-	versions: { min: string; current: string }
+	versions: { min: string; current: string; allowDev?: boolean }
 ): 'ok' | 'reload' {
 	if (!client) return 'reload';
 	const c = compareAppVersions(client, versions.min);
-	if (c === null) return client === versions.current || client === 'dev' ? 'ok' : 'reload';
+	if (c === null) return client === versions.current || (client === 'dev' && versions.allowDev !== false) ? 'ok' : 'reload';
 	return c < 0 ? 'reload' : 'ok';
 }
 
@@ -143,7 +144,9 @@ export const treeRowSchema = v.object({
 	isDatabase: v.boolean(),
 	teamspaceId: v.nullable(idSchema),
 	hasChildren: v.boolean(),
-	access: accessLevelSchema
+	access: accessLevelSchema,
+	/** Who created the page (null for pages made by the system): Private and Shared in the sidebar. */
+	createdBy: v.nullable(v.string())
 });
 export type TreeRow = v.InferOutput<typeof treeRowSchema>;
 
@@ -152,7 +155,6 @@ export const pageRowSchema = v.object({
 	...treeRowSchema.entries,
 	cover: v.nullable(v.string()),
 	values: valuesSchema,
-	createdBy: v.nullable(v.string()),
 	createdAt: iso,
 	updatedBy: v.nullable(v.string()),
 	updatedAt: iso

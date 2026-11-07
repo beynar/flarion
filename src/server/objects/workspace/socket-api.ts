@@ -27,7 +27,7 @@ import { checkVersions, MIN_APP_VERSION } from './versions';
 export const RAW_STREAM = '';
 
 export interface SocketApiDeps {
-	env: Pick<Env, 'APP_VERSION'>;
+	env: Pick<Env, 'APP_VERSION'> & { ENVIRONMENT?: string };
 	hub: LiveHub;
 	presence: Presence;
 	/** Pushes a message on a socket's stream (false: gone). */

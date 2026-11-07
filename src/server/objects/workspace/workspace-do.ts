@@ -3,7 +3,7 @@
  * the change log and the live subscriptions (docs/PLAN.md "Data model", "Real-time sync").
  *
  * RPC surface (called from `src/worker.ts`-side code, never from SvelteKit server code):
- *   Lifecycle   init, syncMember, getMemberRole
+ *   Lifecycle   init, syncMember, rename, getMemberRole
  *   Writes      apply, createPage, create/update/archive teamspaces and their members
  *   Reads       getPage, nextRank, listTrash, teamspaces, teamspace members
  *   Index       ingestPages, openRoom, closeRoom
@@ -409,6 +409,17 @@ export class WorkspaceDO extends DurableObject<Env> {
 			socket.ws.serializeAttachment({ socketId: socket.socketId, actor: { ...socket.actor, role, name } });
 		}
 		this.#socketCache = null;
+	}
+
+	/** The workspace was renamed in D1 (`workspace.settings`): keeps the display name in `meta`. Idempotent. */
+	async rename(args: { name: string }): Promise<void> {
+		const current = await this.#db.meta.findUnique({ where: { key: META_WORKSPACE } });
+		const value = (current?.value && typeof current.value === 'object' ? current.value : {}) as { id?: string; name?: string };
+		await this.#db.meta.upsert({
+			where: { key: META_WORKSPACE },
+			create: { key: META_WORKSPACE, value: { id: this.ctx.id.name ?? '', name: args.name } },
+			update: { value: { ...value, name: args.name } }
+		});
 	}
 
 	/** The member's role, or null for an unknown or removed user. Accounts uses it as the membership cache. */

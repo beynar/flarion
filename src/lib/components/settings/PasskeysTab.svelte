@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
 	import { Button } from 'entasis/button';
+	import { TextInput } from 'entasis/text-input';
 	import { toast } from 'entasis/toast';
 	import { fingerprintIcon } from 'entasis/icons/fingerprint';
 	import { isMock } from '#lib/client/runtime.ts';
@@ -59,6 +60,36 @@
 		}
 	}
 
+	// Renaming one passkey at a time: its id and the draft name.
+	let editing = $state<string | null>(null);
+	let draft = $state<string | null>('');
+	let saving = $state(false);
+
+	function startRename(key: PasskeyInfo) {
+		editing = key.id;
+		draft = key.name || '';
+	}
+
+	async function saveRename(event: SubmitEvent) {
+		event.preventDefault();
+		const id = editing;
+		const name = draft?.trim();
+		if (!id || !name) return;
+		saving = true;
+		try {
+			if (!isMock()) {
+				const { error } = await authClient.passkey.updatePasskey({ id, name });
+				if (error) throw new Error(error.message ?? 'Request failed');
+			}
+			passkeys = passkeys.map((p) => (p.id === id ? { ...p, name } : p));
+			editing = null;
+		} catch (e) {
+			toast.danger({ title: 'Could not rename the passkey', description: (e as Error).message });
+		} finally {
+			saving = false;
+		}
+	}
+
 	async function remove(id: string) {
 		try {
 			if (!isMock()) {
@@ -92,11 +123,29 @@
 			{#each passkeys as key (key.id)}
 				<li class="flex items-center gap-3 border-b border-[color:var(--app-hairline)] text-sm" style="min-height: var(--app-table-row-height)">
 					<span class="text-[color:var(--app-text-tertiary)]">{@render fingerprintIcon({ size: 16 })}</span>
-					<span class="min-w-0 flex-1 truncate">{key.name || 'Passkey'}</span>
-					<span class="hidden text-xs text-[color:var(--app-text-tertiary)] md:inline">
-						{key.backedUp ? 'Synced' : 'This device only'}{key.createdAt ? ` · added ${when(key.createdAt)}` : ''}
-					</span>
-					<Button variant="ghost" size="small" color="danger" disabled={passkeys.length < 2} onclick={() => remove(key.id)}>Remove</Button>
+					{#if editing === key.id}
+						<form class="flex min-w-0 flex-1 items-center gap-2 py-1" onsubmit={saveRename}>
+							<div class="min-w-0 flex-1">
+								<TextInput placeholder="Passkey name" bind:value={draft} inputAttrs={{ 'aria-label': 'Passkey name' }} />
+							</div>
+							<Button type="submit" size="small" loading={saving} disabled={!draft?.trim()}>Save</Button>
+							<Button type="button" variant="ghost" size="small" onclick={() => (editing = null)}>Cancel</Button>
+						</form>
+					{:else}
+						<span class="min-w-0 flex-1 truncate" data-testid="passkey-name">{key.name || 'Passkey'}</span>
+						<span class="hidden text-xs text-[color:var(--app-text-tertiary)] md:inline">
+							{key.backedUp ? 'Synced' : 'This device only'}{key.createdAt ? ` · added ${when(key.createdAt)}` : ''}
+						</span>
+						<Button variant="ghost" size="small" onclick={() => startRename(key)}>Rename</Button>
+						<Button
+							variant="ghost"
+							size="small"
+							color="danger"
+							disabled={passkeys.length < 2}
+							label={passkeys.length < 2 ? 'Your last passkey cannot be removed' : `Remove ${key.name || 'passkey'}`}
+							onclick={() => remove(key.id)}>Remove</Button
+						>
+					{/if}
 				</li>
 			{:else}
 				<li class="py-3 text-sm text-[color:var(--app-text-tertiary)]">No passkeys yet.</li>

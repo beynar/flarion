@@ -7,11 +7,13 @@ export const MIN_APP_VERSION = '0.0.1';
 
 /** `ok`, or `reload`: the client is outdated and must reload the page. */
 export function checkVersions(
-	env: Pick<Env, 'APP_VERSION'>,
+	env: Pick<Env, 'APP_VERSION'> & { ENVIRONMENT?: string },
 	appVersion: string | null | undefined,
 	kindsVersion?: number
 ): 'ok' | 'reload' {
-	if (checkClientVersion(appVersion, { min: MIN_APP_VERSION, current: String(env.APP_VERSION) }) === 'reload') return 'reload';
+	// `dev` is what the Vite dev server's client sends (no build version embedded): only local servers take it.
+	const allowDev = env.ENVIRONMENT === 'development' || env.ENVIRONMENT === 'test';
+	if (checkClientVersion(appVersion, { min: MIN_APP_VERSION, current: String(env.APP_VERSION), allowDev }) === 'reload') return 'reload';
 	if (kindsVersion !== undefined && checkKindsVersion(kindsVersion) === 'reload') return 'reload';
 	return 'ok';
 }

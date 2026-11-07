@@ -66,3 +66,27 @@ Rules for parallel work:
 4. Every module gets tests. A track is done only when its tests pass and `pnpm check` has no errors in
    its files.
 5. Report honestly: what works, what is stubbed, what deviates from the plan and why.
+
+## Integration notes (P1 gate)
+- **Gate e2e**: `tests/e2e/p1-gate.spec.ts` (two contexts, virtual authenticators, real dev server, no mocks). Run
+  `E2E_PORT=5373 pnpm exec playwright test` (any free port; `vite.config.ts` derives `APP_ORIGIN` and a per-port
+  `wrangler.dev-<port>.jsonc` from `--port`). `E2E_CHROMIUM` points at a Chromium build when needed. Editor specs:
+  `pnpm exec playwright test -c tests/e2e/editor/playwright.config.ts`. The dev database persists between runs
+  (emails and slugs must be unique per run). Do not edit `src/` while an e2e run is going: HMR reloads the app.
+- **Dev secrets**: copy `.dev.vars.example` to `.dev.vars` (gitignored): `ROOM_TOKEN_KEY`, `BETTER_AUTH_SECRET`,
+  `API_TOKEN_PEPPER`, `TURNSTILE_SECRET` (Cloudflare's always-pass test secret).
+- **Build version**: `vite build` embeds package.json's `version` as `VITE_APP_VERSION`; every client sends it (`x-app-version`,
+  socket `?v=`). The dev server embeds nothing and the client says `dev`, accepted only when `ENVIRONMENT` is
+  `development`/`test`. `APP_VERSION` in wrangler.jsonc (all three places) must equal package.json's version
+  (`tests/unit/app-version.test.ts` checks it): bump them together, and raise `MIN_APP_VERSION` (`objects/workspace/versions.ts`)
+  when the protocol breaks.
+- **`/rpc` CSRF**: every client uses `SimpleCsrfProtectionLinkPlugin` (`x-csrf-token: orpc`).
+- **D1 in `pnpm dev`**: batches (`$transaction([...])`) are NOT atomic behind Distilled's D1 proxy (dev only; workerd tests,
+  staging and production run the real atomic batch). See `src/server/db/global.client.ts`.
+- **Workers-test noise**: `uncaught exception; source = Uncaught (in promise); stack = WorkspaceError ...` lines in
+  `vitest --project workers` come from `@cloudflare/vitest-plugin` 1.6.0's DO stub wrapper, not from our code: a trivial
+  Durable Object whose async method does `throw new Error('x')` prints the same, while the real dev server (workerd) returns
+  the decoded oRPC error (422 `VALIDATION_FAILED`) and logs nothing. The tests pass; ignore the lines.
+- **Workspace rename**: `workspace.settings` writes D1 and a `rename` outbox job; the Workspace DO keeps the name in `meta`
+  (`WorkspaceDO.rename`). Clients read the name from `rpc.me` (no live push yet).
+- **Tree rows carry `createdBy`**: the sidebar's Private/Shared sections use it (`WorkspaceStore.privateRoots/sharedRoots`).

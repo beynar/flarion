@@ -1,10 +1,16 @@
 import { defineConfig, devices } from '@playwright/test';
 
 /**
- * End-to-end tests run against `pnpm dev` (vite dev + workerd). APP_ORIGIN and RP_ID in wrangler.jsonc are
- * `http://localhost:5173` / `localhost`, so the port is fixed. Passkeys use Chrome's virtual WebAuthn
- * authenticator (CDP), see tests/e2e/webauthn.ts.
+ * End-to-end tests run against `pnpm dev` (vite dev + workerd). The server listens on `E2E_PORT` (default
+ * 5173); vite.config.ts derives APP_ORIGIN from `--port`, so any free port works, e.g.
+ *   E2E_PORT=5373 pnpm exec playwright test
+ * `E2E_CHROMIUM` points at a Chromium build when the one this Playwright version wants is not installed.
+ * Passkeys use Chrome's virtual WebAuthn authenticator (CDP), see tests/e2e/webauthn.ts.
+ * The editor specs have their own config (tests/e2e/editor/playwright.config.ts).
  */
+const port = Number(process.env.E2E_PORT ?? 5173);
+const origin = `http://localhost:${port}`;
+
 export default defineConfig({
 	testDir: './tests/e2e',
 	testIgnore: '**/editor/**', // the Editor track has its own config (tests/e2e/editor/playwright.config.ts)
@@ -16,14 +22,22 @@ export default defineConfig({
 	retries: 0,
 	reporter: [['list']],
 	use: {
-		baseURL: 'http://localhost:5173',
+		baseURL: origin,
 		trace: 'retain-on-failure',
 		screenshot: 'only-on-failure'
 	},
-	projects: [{ name: 'chromium', use: { ...devices['Desktop Chrome'] } }],
+	projects: [
+		{
+			name: 'chromium',
+			use: {
+				...devices['Desktop Chrome'],
+				launchOptions: process.env.E2E_CHROMIUM ? { executablePath: process.env.E2E_CHROMIUM } : {}
+			}
+		}
+	],
 	webServer: {
-		command: 'pnpm exec vite dev --port 5173 --strictPort',
-		url: 'http://localhost:5173/healthz',
+		command: `pnpm exec vite dev --port ${port} --strictPort`,
+		url: `${origin}/healthz`,
 		reuseExistingServer: !process.env.CI,
 		timeout: 180_000,
 		stdout: 'pipe'

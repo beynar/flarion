@@ -112,7 +112,7 @@ test('a passkey from another browser profile is not accepted: sign-in without a 
 	await context.close();
 });
 
-test('lost passkey: a recovery link adds a new passkey, then the new passkey signs in', async ({ browser, request }) => {
+test('lost passkey: a recovery link adds a new passkey, then the new passkey signs in', async ({ browser, request, baseURL }) => {
 	const { page, context, authenticator } = await newPerson(browser);
 	const email = `grace-${stamp}@example.com`;
 
@@ -142,7 +142,7 @@ test('lost passkey: a recovery link adds a new passkey, then the new passkey sig
 	await page.screenshot({ path: `${SCREENS}/auth-recovery-register.png` });
 	// The link is single use: a second visitor (no cookies) finds it spent.
 	const replay = await request.post('/api/auth/recovery/redeem', {
-		headers: { origin: 'http://localhost:5173' },
+		headers: { origin: baseURL! },
 		data: { token: new URL(recovery.link).searchParams.get('token') }
 	});
 	expect(replay.status()).toBe(400);

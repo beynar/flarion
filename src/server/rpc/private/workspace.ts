@@ -28,7 +28,7 @@ export const workspaceHandlers = {
 		.handler(({ context }) => getWorkspace(context.env, context.actor.workspaceId, context.actor.role)),
 	settings: os.workspace.settings
 		.use(requireWorkspace)
-		.handler(({ context, input }) => updateWorkspace(context.env, context.actor.workspaceId, context.actor.role, input)),
+		.handler(({ context, input }) => updateWorkspace(context, context.actor.workspaceId, context.actor.role, input)),
 	delete: os.workspace.delete
 		.use(requireWorkspace)
 		.handler(({ context, input }) => deleteWorkspace(context, context.actor, input.confirmName)),

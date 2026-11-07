@@ -40,7 +40,7 @@ export function setup(opts: { server?: MockServerOptions; store?: Partial<Worksp
 export const tick = (ms = 0) => new Promise((r) => setTimeout(r, ms));
 
 export function treeRow(id: string, parentId: string | null, rank: string, title = id, extra: Partial<TreeRow> = {}): TreeRow {
-	return { id, parentId, rank, title, icon: null, isDatabase: false, teamspaceId: null, hasChildren: false, access: 'full', ...extra };
+	return { id, parentId, rank, title, icon: null, isDatabase: false, teamspaceId: null, hasChildren: false, access: 'full', createdBy: 'u_ada', ...extra };
 }
 
 export function pageRow(id: string, extra: Partial<PageRow> = {}): PageRow {
@@ -48,7 +48,6 @@ export function pageRow(id: string, extra: Partial<PageRow> = {}): PageRow {
 		...treeRow(id, null, '01', id),
 		cover: null,
 		values: { title: id },
-		createdBy: 'u_ada',
 		createdAt: '2026-01-01T00:00:00Z',
 		updatedBy: 'u_ada',
 		updatedAt: '2026-01-01T00:00:00Z',

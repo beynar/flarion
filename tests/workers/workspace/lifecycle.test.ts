@@ -55,6 +55,17 @@ describe('init', () => {
 	});
 });
 
+describe('rename', () => {
+	test('keeps the display name in meta, idempotently', async () => {
+		const ws = await createWorkspace('rename');
+		const name = async () => JSON.parse((await rows<{ value: string }>(ws.stub, "SELECT value FROM meta WHERE key = 'workspace'"))[0]!.value);
+		expect(await name()).toEqual({ id: ws.id, name: 'Test' });
+		await ws.stub.rename({ name: 'Acme Corp' });
+		await ws.stub.rename({ name: 'Acme Corp' });
+		expect(await name()).toEqual({ id: ws.id, name: 'Acme Corp' });
+	});
+});
+
 describe('membership mirror', () => {
 	test('syncMember mirrors role changes and removals; getMemberRole answers from the mirror', async () => {
 		const ws = await createWorkspace('members');

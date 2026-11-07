@@ -147,7 +147,6 @@ export class RowReader {
 				...toTreeRow(r, access),
 				cover: r.cover,
 				values: parseValues(r.props_json),
-				createdBy: r.created_by,
 				createdAt: r.created_at ?? '',
 				updatedBy: r.updated_by ?? r.created_by,
 				updatedAt: r.updated_at ?? r.created_at ?? ''
@@ -271,6 +270,7 @@ function toTreeRow(r: PageSqlRow, access: Access): TreeRow {
 		isDatabase: !!r.is_database,
 		teamspaceId: r.teamspace_id,
 		hasChildren: !!r.has_children,
-		access
+		access,
+		createdBy: r.created_by
 	};
 }
