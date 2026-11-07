@@ -57,7 +57,7 @@ It includes the DO call but no network (target: 150 ms p95 in the same region). 
   Relation cells follow the Databases rules (dead targets drop out, none left reads `null`) and the loop sends the
   `update` ops on trash and restore (also the reverse side of two-way relations).
 - `restore` (root only): clears the marker on the rows of that entry; a parent still in Trash means the teamspace
-  root. Undo is the restore. Archiving a teamspace stamps its pages with one timestamp (no trash entry).
+  root. Undo is the restore. Archiving a teamspace stamps its pages with one timestamp and no trash entry: it is restored from Settings > Teamspaces (`workspace.teamspaces.archived` / `.restore`, owners), not from Trash.
 - Purge path (`purgePlan` -> `purgePages` -> `removeIndexRows` -> `PageDO.purge` -> `filesPurgePages` ->
   `deletePageVectors`): rows of EAV, relation cells of other pages, links, indexed text, grants, collections,
   views and members go; the change log keeps its rows (sequence numbers never move) without their values.

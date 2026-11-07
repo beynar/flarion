@@ -91,7 +91,14 @@ export const createOpSchema = v.object({
 	cover: v.optional(v.nullable(v.pipe(v.string(), v.maxLength(2048)))),
 	isDatabase: v.optional(v.boolean()),
 	/** Initial values by property id, the title included (`TITLE_PROP_ID`). */
-	values: v.optional(v.record(idSchema, v.nullable(propValueSchema)))
+	values: v.optional(v.record(idSchema, v.nullable(propValueSchema))),
+	/**
+	 * A row created from this view: the server derives the values that satisfy the collection's filter, the view's
+	 * and `localFilter` (a `database_view` block's), plus the collection's defaults (`defaultsForView`); `values`
+	 * override them. The parent stays `parentId`'s (placement is authorized on the op); `page.create` resolves it.
+	 */
+	viewId: v.optional(idSchema),
+	localFilter: v.optional(filterGroupSchema)
 });
 
 export const trashOpSchema = v.object({ op: v.literal('trash'), page });
@@ -290,6 +297,7 @@ export function validateOp(input: unknown, registry: PropertyRegistry): Result<O
 				if (isReadOnlyProperty(def)) issues.push(issue(`/values/${id}`, 'read_only', `${def.type} properties cannot be written`));
 				else sub(validateValue(def, value), `/values/${id}`);
 			}
+			if (op.localFilter) sub(validateFilter(op.localFilter, registry), '/localFilter');
 			break;
 		}
 		case 'createProperty': {

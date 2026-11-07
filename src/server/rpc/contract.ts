@@ -90,6 +90,7 @@ import {
 	teamspaceCreateSchema,
 	teamspaceMemberSchema,
 	teamspaceSchema,
+	archivedTeamspaceSchema,
 	teamspaceUpdateSchema,
 	tokenCreateInputSchema,
 	tokenCreateResultSchema,
@@ -147,6 +148,10 @@ const workspaceRouter = {
 		update: priv.input(teamspaceUpdateSchema).output(teamspaceSchema),
 		/** Tombstones the teamspace and all its pages with one shared timestamp. */
 		archive: priv.input(idOnly('id')).output(seqSchema),
+		/** Archived teamspaces the caller owns, newest first: Settings lists them with a restore button. */
+		archived: priv.output(v.array(archivedTeamspaceSchema)),
+		/** Brings an archived teamspace and the pages its archive took back (an owner of it). */
+		restore: priv.input(idOnly('id')).output(seqSchema),
 		members: {
 			list: priv.input(idOnly('teamspaceId')).output(v.array(teamspaceMemberSchema)),
 			add: priv

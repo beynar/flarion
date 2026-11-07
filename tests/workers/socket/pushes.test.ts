@@ -58,7 +58,39 @@ test('registryScopesOf maps change kinds to scopes', () => {
 	expect(registryScopesOf(['updateProperty', 'teamspace.member'])).toEqual(['properties', 'directory']);
 	expect(registryScopesOf(['archiveTeamspace'])).toEqual(['directory']);
 	expect(registryScopesOf(['member.sync', 'deleteProperty'])).toEqual(['properties', 'directory']);
-	expect(registryScopesOf(['createCollection', 'updateView'])).toEqual([]);
+	expect(registryScopesOf(['createCollection', 'updateView'])).toEqual(['collections']);
+	expect(registryScopesOf(['createView', 'moveView', 'deleteView', 'updateCollection', 'deleteCollection'])).toEqual(['collections']);
+	expect(registryScopesOf(['restoreTeamspace'])).toEqual(['directory']);
+	// Members and values flow through the live loop, not through a definition push.
+	expect(registryScopesOf(['addMember', 'moveMember', 'removeMember'])).toEqual([]);
+});
+
+test('a view or collection definition change reaches every connected tab as a collections frame', async () => {
+	const ws = await createWorkspace('push-collections');
+	const owner = await connect(ws.id, dev('owner-1', 'owner'));
+	const bob = await connect(ws.id, dev('bob'));
+	const ownerLog = owner.rawHello({});
+	const bobLog = bob.rawHello({});
+	await ownerLog.wait((m) => m.t === 'head');
+	await bobLog.wait((m) => m.t === 'head');
+	const [r1, r2] = ranks(2);
+	await ws.stub.apply(ws.owner, batch([createOp('db', null, r1!, { teamspaceId: ws.generalId, isDatabase: true, values: { title: 'DB' } })]));
+
+	const made = await ws.stub.apply(ws.owner, batch([{ op: 'createCollection', id: 'db', pageId: 'db', sourceAst: { and: [] } }]));
+	for (const log of [ownerLog, bobLog]) expect(await log.wait((m) => m.t === 'registry' && m.seq === made.seq)).toEqual({ t: 'registry', scopes: ['collections'], seq: made.seq });
+
+	for (const op of [
+		{ op: 'createView', id: 'v1', collectionId: 'db', type: 'table', name: 'Table', rank: r1! },
+		{ op: 'updateView', id: 'v1', name: 'Renamed' },
+		{ op: 'moveView', id: 'v1', rank: r2! },
+		{ op: 'deleteView', id: 'v1' }
+	] as const) {
+		const { seq } = await ws.stub.apply(ws.owner, batch([op as never]));
+		expect(await bobLog.wait((m) => m.t === 'registry' && m.seq === seq)).toMatchObject({ scopes: ['collections'] });
+	}
+	for (const m of bobLog.messages) expect(v.safeParse(serverMessageSchema, m).success, JSON.stringify(m)).toBe(true);
+	owner.ws.close();
+	bob.ws.close();
 });
 
 test('a lock change is pushed to the tabs that can read the page, and to nobody else', async () => {

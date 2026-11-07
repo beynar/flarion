@@ -65,9 +65,10 @@ import type {
 	Values,
 	ViewRow
 } from '#lib/shared/protocol.ts';
-import type { Member, Teamspace, TeamspaceMember, Workspace } from '#lib/shared/schemas.ts';
+import { MAX_WINDOW } from '#lib/shared/protocol.ts';
+import type { ArchivedTeamspace, Member, Teamspace, TeamspaceMember, Workspace } from '#lib/shared/schemas.ts';
 import type { CollectionDef, ViewDef } from '#lib/shared/definitions.ts';
-import { GROUP_EMPTY, type GroupBySpec } from '#lib/shared/filter-ast.ts';
+import { GROUP_EMPTY, type FilterGroup, type GroupBySpec } from '#lib/shared/filter-ast.ts';
 import { compareRank, placeAt, rankAfter } from '#lib/shared/sort-keys.ts';
 
 // ───────────────────────────── types ─────────────────────────────
@@ -632,6 +633,19 @@ export class WorkspaceStore {
 		this.#send({ t: 'window', id, limit, ...(group !== undefined ? { group } : {}) });
 	}
 
+	/**
+	 * Grows a flat view window to `want` rows, at most `MAX_WINDOW` (the protocol's cap, 1000 rows per view or group:
+	 * past it a view is searched or filtered, not scrolled). A request that is not larger than the one already out
+	 * is dropped, so a scroll handler may call it on every event.
+	 */
+	growWindow(id: string, want: number): void {
+		const held = this.#subs.get(id);
+		if (!held || held.sub.kind !== 'view') return;
+		const target = Math.min(MAX_WINDOW, want);
+		if (target <= held.sub.limit) return;
+		this.setWindow(id, target);
+	}
+
 	/** Asks the server for a fresh snapshot of a held subscription (a view's definition changed). */
 	resubscribe(id: string): void {
 		const held = this.#subs.get(id);
@@ -748,8 +762,8 @@ export class WorkspaceStore {
 				this.#o.onLock?.({ pageId: msg.pageId, locked: msg.locked, lockedBy: msg.lockedBy, lockedAt: msg.lockedAt });
 				return;
 			case 'registry':
-				// Property and option edits, and (the frame's other reason) a view or collection definition change.
-				this.#scheduleCollectionsRefresh();
+				// A view or collection definition changed (a view made in another tab shows up here without a refocus).
+				if (msg.scopes.includes('collections')) this.#scheduleCollectionsRefresh();
 				if (msg.scopes.includes('properties')) this.#scheduleRegistryRefresh();
 				if (msg.scopes.includes('directory')) this.#scheduleDirectoryRefresh();
 				return;
@@ -1075,6 +1089,9 @@ export class WorkspaceStore {
 					if (op.prop === SYSTEM_TITLE) rows.set(op.id, { ...row, title: typeof op.value === 'string' ? op.value : '' });
 					else if (op.prop === '$icon') rows.set(op.id, { ...row, icon: (op.value as string | null) ?? null });
 					else if (op.prop === '$cover') rows.set(op.id, { ...row, cover: (op.value as string | null) ?? null });
+					else if (op.prop === '$rank') rows.set(op.id, typeof op.value === 'string' ? { ...row, rank: op.value } : row);
+					else if (op.prop === '$parent') rows.set(op.id, { ...row, parentId: (op.value as string | null) ?? null });
+					else if (op.prop === '$access') rows.set(op.id, { ...row, access: op.value as AccessLevel });
 					else if (op.prop.startsWith('$')) break;
 					else rows.set(op.id, { ...row, values: { ...row.values, [op.prop]: op.value } });
 					break;
@@ -1397,6 +1414,36 @@ export class WorkspaceStore {
 		return id;
 	}
 
+	/**
+	 * Creates a row of a database view. The server derives what it starts with (`page.create` with `viewId`: the
+	 * collection's defaults and the values that keep the row in the view and its local filter); `predicted` is the
+	 * client's guess (`newRowInit`), shown as the optimistic layer until the server's answer, and `extra` (a board
+	 * column's group value) is sent as explicit values that win over the derived ones.
+	 */
+	async createViewRow(opts: {
+		id: string;
+		viewId: string;
+		localFilter?: FilterGroup | null;
+		predicted: { parentId: string | null; values: Values };
+		extra?: Values;
+	}): Promise<string> {
+		const { id, predicted } = opts;
+		const siblings = this.byParent.get(key(predicted.parentId)) ?? [];
+		const rank = rankAfter(siblings.at(-1)?.rank ?? null);
+		const op: CreateOp = { op: 'create', id, parentId: predicted.parentId, rank, values: predicted.values };
+		if (predicted.parentId) this.expand(predicted.parentId);
+		await this.mutate([op], async () => {
+			const ref = await this.#rpc.page.create({
+				id,
+				viewId: opts.viewId,
+				...(opts.localFilter ? { localFilter: opts.localFilter } : {}),
+				values: { [TITLE_PROP_ID]: '', ...(opts.extra ?? {}) }
+			});
+			return { seq: ref.seq };
+		});
+		return id;
+	}
+
 	// ───────────────────────────── moving, trashing, duplicating ─────────────────────────────
 
 	/** Re-sends the tree subscription: a fresh snapshot (after my access changed). */
@@ -1612,6 +1659,8 @@ export class WorkspaceStore {
 
 	#collectionLoads = new Map<string, Promise<CollectionBundle | null>>();
 	#collectionsTimer: unknown = null;
+	/** Collections a view asked for that did not exist (yet): a `collections` push fetches them again. */
+	#missingCollections = new Set<string>();
 
 	/** Fetches a collection and its views (cached in `collections` and `views`). `force` fetches again. */
 	loadCollection(id: string, force = false): Promise<CollectionBundle | null> {
@@ -1622,11 +1671,23 @@ export class WorkspaceStore {
 		if (inflight) return inflight;
 		const run = (async () => {
 			try {
-				const found = await this.#rpc.collection.get({ id });
-				this.collections.set(id, found.collection);
-				this.views.set(id, found.views);
+				const fetched = await this.#rpc.collection.get({ id });
+				this.#missingCollections.delete(id);
+				// What did not change keeps its object: a definition push also echoes this tab's own edits, and replacing
+				// equal objects would re-render the open view (and close its menus) for nothing.
+				const before = this.views.get(id);
+				const found: CollectionBundle = {
+					collection: sameData(this.collections.get(id), fetched.collection) ? (this.collections.get(id) as CollectionDef) : fetched.collection,
+					views: fetched.views.map((v) => {
+						const held = before?.find((x) => x.id === v.id);
+						return held && sameData(held, v) ? held : v;
+					})
+				};
+				if (this.collections.get(id) !== found.collection) this.collections.set(id, found.collection);
+				if (!before || before.length !== found.views.length || found.views.some((v, i) => v !== before[i])) this.views.set(id, found.views);
 				return found;
 			} catch {
+				this.#missingCollections.add(id);
 				return null;
 			} finally {
 				this.#collectionLoads.delete(id);
@@ -1637,10 +1698,10 @@ export class WorkspaceStore {
 	}
 
 	#scheduleCollectionsRefresh(): void {
-		if (this.#collectionsTimer || this.#disposed || this.collections.size === 0) return;
+		if (this.#collectionsTimer || this.#disposed || (this.collections.size === 0 && this.#missingCollections.size === 0)) return;
 		this.#collectionsTimer = this.#clock.setTimeout(() => {
 			this.#collectionsTimer = null;
-			for (const id of [...this.collections.keys()]) void this.loadCollection(id, true);
+			for (const id of new Set([...this.collections.keys(), ...this.#missingCollections])) void this.loadCollection(id, true);
 		}, 150);
 	}
 
@@ -1763,6 +1824,16 @@ export class WorkspaceStore {
 
 	archiveTeamspace(id: string): Promise<{ seq: number }> {
 		return this.#teamspaceCall(() => this.#rpc.workspace.teamspaces.archive({ id }), true);
+	}
+
+	/** Archived teamspaces I own (Settings lists them with a restore button). */
+	archivedTeamspaces(): Promise<ArchivedTeamspace[]> {
+		return this.#rpc.workspace.teamspaces.archived();
+	}
+
+	/** Brings an archived teamspace and the pages its archive took back; the tree refreshes for them. */
+	restoreTeamspace(id: string): Promise<{ seq: number }> {
+		return this.#teamspaceCall(() => this.#rpc.workspace.teamspaces.restore({ id }), true);
 	}
 
 	/** Joins an open teamspace (or adds a member when `userId` is given); the tree refreshes for the pages it brings. */
@@ -2212,6 +2283,16 @@ function entityFromCreate(op: CreateOp, userId: string): PageEntity {
 		updatedAt: now,
 		partial: false
 	};
+}
+
+/** Structural equality of plain JSON data (key order does not matter). */
+function sameData(a: unknown, b: unknown): boolean {
+	if (a === b) return true;
+	if (typeof a !== 'object' || typeof b !== 'object' || a === null || b === null) return false;
+	if (Array.isArray(a) !== Array.isArray(b)) return false;
+	const ka = Object.keys(a);
+	if (ka.length !== Object.keys(b).length) return false;
+	return ka.every((k) => k in b && sameData((a as Record<string, unknown>)[k], (b as Record<string, unknown>)[k]));
 }
 
 function sameEntity(a: PageEntity, b: PageEntity): boolean {

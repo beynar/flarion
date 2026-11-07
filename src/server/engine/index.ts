@@ -47,7 +47,7 @@ interface CollectionRow {
 	source_ast: string | null;
 }
 
-function parseSource(text: string | null): FilterGroup | null {
+export function parseSource(text: string | null): FilterGroup | null {
 	if (text === null || text === undefined) return null;
 	try {
 		const ast = JSON.parse(text) as unknown;

@@ -36,6 +36,7 @@ import type { CollectionDef, ViewDef } from '#lib/shared/definitions.ts';
 import type { Grant, Invite, Member, Me, Teamspace, TeamspaceMember, Workspace } from '#lib/shared/schemas.ts';
 import { installMockRpc, type Rpc } from '#lib/client/rpc.ts';
 import * as mock from '#lib/client/mock.ts';
+import { newRowInit } from '#lib/components/views/view-model.ts';
 import { WS_CLOSED, WS_CONNECTING, WS_OPEN, type Transport, type TransportFactory } from '#lib/client/socket.ts';
 
 // ───────────────────────────── data ─────────────────────────────
@@ -205,6 +206,7 @@ export class MockServer {
 	readonly invites: Invite[] = [];
 	teamspaces: StoredTeamspace[] = structuredClone(STORED_TEAMSPACES);
 	teamspaceMembers: TeamspaceMember[] = structuredClone(STORED_TEAMSPACE_MEMBERS);
+	archivedTeamspaces: { teamspace: StoredTeamspace; archivedAt: string }[] = [];
 	grants: Grant[] = [];
 	properties: PropertyDef[] = structuredClone(PROPERTIES);
 	/** Databases: a collection and its views by collection id. */
@@ -324,7 +326,7 @@ export class MockServer {
 		const toRow = (r: (typeof rows)[number]): ViewRow => {
 			const values: Values = {};
 			for (const [k, val] of Object.entries(r.page.values)) if (k !== TITLE_PROP_ID && (!sub.props || sub.props.includes(k))) values[k] = val ?? null;
-			return { id: r.id, title: r.page.title, icon: r.page.icon, cover: r.page.cover, values };
+			return { id: r.id, title: r.page.title, icon: r.page.icon, cover: r.page.cover, values, rank: r.page.rank, parentId: r.page.parentId };
 		};
 		const groupBy = sub.groupBy !== undefined ? sub.groupBy : (view?.groupBy ?? null);
 		if (!groupBy) return { rows: rows.slice(0, limits.limit).map(toRow), total: rows.length };
@@ -817,9 +819,24 @@ function teamspacesRpc(server: MockServer, delay: Delay) {
 			}),
 		archive: (input: { id: string }) =>
 			delay(() => {
-				live(input.id);
-				server.teamspaces = server.teamspaces.filter((t) => t.id !== input.id);
-				server.teamspaceMembers = server.teamspaceMembers.filter((m) => m.teamspaceId !== input.id);
+				const t = live(input.id);
+				server.teamspaces = server.teamspaces.filter((x) => x.id !== input.id);
+				// The members stay: restoring the teamspace brings its people back with it.
+				server.archivedTeamspaces.push({ teamspace: t, archivedAt: new Date().toISOString() });
+				return { seq: server.commit([]) };
+			}),
+		archived: () =>
+			delay(() =>
+				server.archivedTeamspaces
+					.filter((a) => server.teamspaceMembers.some((m) => m.teamspaceId === a.teamspace.id && m.userId === me && m.role === 'owner'))
+					.map((a) => ({ id: a.teamspace.id, name: a.teamspace.name, icon: a.teamspace.icon, archivedAt: a.archivedAt, pageCount: 0 }))
+			),
+		restore: (input: { id: string }) =>
+			delay(() => {
+				const found = server.archivedTeamspaces.find((a) => a.teamspace.id === input.id);
+				if (!found) throw mockError('NOT_FOUND', `Archived teamspace "${input.id}" not found`);
+				server.archivedTeamspaces = server.archivedTeamspaces.filter((a) => a !== found);
+				server.teamspaces.push(found.teamspace);
 				return { seq: server.commit([]) };
 			}),
 		members: {
@@ -982,10 +999,22 @@ export function createMockRpc(server: MockServer): Rpc {
 				})
 		},
 		page: {
-			create: (input: { id?: string; parentId: string | null; rank?: string; teamspaceId?: string | null; icon?: string | null; values?: Values; isDatabase?: boolean }) =>
+			create: (input: { id?: string; parentId?: string | null; rank?: string; teamspaceId?: string | null; icon?: string | null; values?: Values; isDatabase?: boolean; viewId?: string; localFilter?: FilterGroup }) =>
 				delay(() => {
 					const id = input.id ?? `pg_${Date.now().toString(36)}`;
-					const seq = server.commit([{ op: 'create', id, parentId: input.parentId, rank: input.rank, teamspaceId: input.teamspaceId, icon: input.icon, isDatabase: input.isDatabase, values: input.values } as Op]);
+					let parentId = input.parentId;
+					let values = input.values;
+					if (input.viewId) {
+						// What `defaultsForView` does on the real object (here with the client's own derivation).
+						const found = [...server.collections.values()].find((c) => c.views.some((v) => v.id === input.viewId));
+						const view = found?.views.find((v) => v.id === input.viewId);
+						if (!found || !view) throw Object.assign(new Error('Not found'), { code: 'NOT_FOUND' });
+						const init = newRowInit({ collection: found.collection, view, localFilter: input.localFilter ?? null, registry: createRegistry(server.properties), meId: server.userId });
+						if (parentId === undefined) parentId = init.parentId;
+						values = { ...init.values, ...(input.values ?? {}) };
+					}
+					if (parentId === undefined) throw Object.assign(new Error('A page needs a parent'), { code: 'VALIDATION_FAILED' });
+					const seq = server.commit([{ op: 'create', id, parentId, rank: input.rank, teamspaceId: input.teamspaceId, icon: input.icon, isDatabase: input.isDatabase, values } as Op]);
 					return { id, num: server.pages.size, seq };
 				}),
 			get: (input: { id: string }) => delay(() => {

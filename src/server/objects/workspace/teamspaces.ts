@@ -159,6 +159,58 @@ export async function archiveTeamspaceRecords(tx: WorkspaceTx, id: string, actor
 	return [{ kind: 'archiveTeamspace', page: null, prop: id, old: null, new: { deletedAt: stamp, pages } }];
 }
 
+/** An archived teamspace the caller may restore (it owns it), with how many pages the archive took along. */
+export interface ArchivedTeamspace {
+	id: string;
+	name: string;
+	icon: string | null;
+	archivedAt: string;
+	pageCount: number;
+}
+
+/**
+ * Archived teamspaces the actor owns, newest first. Reads with the governed client (a teamspace the policy hides
+ * stays hidden) and keeps those whose `update` rule holds, the one `restoreTeamspaceRecords` asks.
+ */
+export async function listArchivedTeamspaces(db: WorkspaceDb, sql: SqlStorage): Promise<ArchivedTeamspace[]> {
+	const candidates = sql
+		.exec<{ id: string }>('SELECT id FROM teamspace WHERE deleted_at IS NOT NULL ORDER BY deleted_at DESC, id')
+		.toArray();
+	const out: ArchivedTeamspace[] = [];
+	for (const { id } of candidates) {
+		const row = await db.teamspace.findUnique({ where: { id } });
+		if (!row?.deletedAt) continue;
+		const can = await (db.teamspace as unknown as { can(a: string, w: unknown): Promise<boolean> }).can('update', { id });
+		if (!can) continue;
+		const count = sql
+			.exec<{ n: number }>('SELECT COUNT(*) AS n FROM page WHERE teamspace_id = ? AND deleted_at = ? AND trash_root IS NULL', id, isoTime(row.deletedAt.getTime()))
+			.one().n;
+		out.push({ id, name: row.name, icon: row.icon, archivedAt: isoTime(row.deletedAt.getTime()), pageCount: count });
+	}
+	return out;
+}
+
+/**
+ * Brings an archived teamspace back: clears its tombstone and the one the archive stamped on its pages (the pages
+ * that carry the archive's timestamp and no trash entry of their own: what was trashed earlier stays in Trash).
+ * Membership, grants, values and bodies were never touched, so nothing is lost. Needs the teamspace's `update` rule
+ * (an owner), like archiving it.
+ */
+export async function restoreTeamspaceRecords(tx: WorkspaceTx, id: string): Promise<ChangeRecord[]> {
+	const row = await tx.teamspace.findUnique({ where: { id } });
+	if (!row?.deletedAt) throw notFound(`Archived teamspace "${id}"`);
+	await assertCan(tx.teamspace, 'update', { id: row.id }, 'restore it');
+	const stamp = isoTime(row.deletedAt.getTime());
+	await tx.teamspace.update({ where: { id: row.id }, data: { deletedAt: null } });
+	const pages = await rawRun(
+		tx,
+		'UPDATE page SET deleted_at = NULL, deleted_by = NULL WHERE teamspace_id = ? AND deleted_at = ? AND trash_root IS NULL',
+		id,
+		stamp
+	);
+	return [{ kind: 'restoreTeamspace', page: null, prop: id, old: { deletedAt: stamp }, new: { pages } }];
+}
+
 // ───────────────────────── members ─────────────────────────
 
 const toMember = (r: { teamspaceId: string; userId: string; role: string; rank: string }): TeamspaceMember => ({

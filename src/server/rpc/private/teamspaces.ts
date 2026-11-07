@@ -12,6 +12,10 @@ export const teamspacesHandlers = {
 	archive: os.workspace.teamspaces.archive
 		.use(requireWorkspace)
 		.handler(({ input, context }) => context.workspace.archiveTeamspace(context.actor, input.id)),
+	archived: os.workspace.teamspaces.archived.use(requireWorkspace).handler(({ context }) => context.workspace.archivedTeamspaces(context.actor)),
+	restore: os.workspace.teamspaces.restore
+		.use(requireWorkspace)
+		.handler(({ input, context }) => context.workspace.restoreTeamspace(context.actor, input.id)),
 	members: {
 		list: os.workspace.teamspaces.members.list
 			.use(requireWorkspace)

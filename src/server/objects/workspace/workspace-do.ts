@@ -42,6 +42,7 @@ import { runCommit, type CommitResult } from './commit';
 import {
 	afterWrite,
 	applyEavOp,
+	defaultsForView,
 	invalidateRegistry,
 	isEavOp,
 	isEavError,
@@ -54,6 +55,7 @@ import {
 	readViews,
 	type ChangeRecord
 } from './eav';
+import { validateFilter } from '../../../lib/shared/filter-ast';
 import { invalid, notFound, WorkspaceError } from './errors';
 import { ingestInTransaction, type IngestResult } from './ingest';
 import { LiveHub, unitEvaluations, type CommitInfo } from './live';
@@ -73,6 +75,9 @@ import { socketRouter, type SocketContext } from './socket-router';
 import {
 	addTeamspaceMemberRecords,
 	archiveTeamspaceRecords,
+	listArchivedTeamspaces,
+	restoreTeamspaceRecords,
+	type ArchivedTeamspace,
 	assertNotGuest,
 	insertTeamspace,
 	listTeamspaceMembers,
@@ -728,13 +733,40 @@ export class WorkspaceDO extends DurableObject<Env> {
 		throw new WorkspaceError('BAD_REQUEST', `Unknown op "${(op as { op: string }).op}"`);
 	}
 
-	/** `page.create`: a `create` op with a title. Returns the new page's id, dense number and the commit's seq. */
+	/**
+	 * `page.create`: a `create` op with a title. Returns the new page's id, dense number and the commit's seq. With a
+	 * `viewId` the row starts with the values that satisfy the view (`defaultsForView`: the collection's defaults,
+	 * its filter, the view's and `localFilter`), and sits under the view's default parent unless `parentId` is given.
+	 * The op that is authorized and applied is a plain `create`: placement is checked on the resolved parent.
+	 */
 	async createPage(
 		actor: Actor,
 		input: PageCreate & { appVersion: string; mid?: string }
 	): Promise<{ id: string; num: number; seq: number }> {
 		const id = input.id ?? crypto.randomUUID();
-		const rank = input.rank ?? rankAfter(this.#lastRank(input.parentId));
+		let parentId = input.parentId;
+		let teamspaceId = input.teamspaceId;
+		let values = input.values;
+		if (input.viewId) {
+			if (input.localFilter) {
+				const checked = validateFilter(input.localFilter, await loadRegistry(this.#db));
+				if (!checked.ok) throw new WorkspaceError('VALIDATION_FAILED', 'Validation failed', checked.issues.map((i) => ({ ...i, path: `/localFilter${i.path}` })));
+			}
+			const defaults = await defaultsForView(this.#db, input.viewId, {
+				meId: actor.userId,
+				now: Date.now(),
+				localFilter: input.localFilter ?? null
+			});
+			// A database the caller cannot read does not exist for them, and neither does its view.
+			if (!defaults || !(await this.#access.pageAccess(actor, defaults.collectionPageId as string))) throw notFound(`View "${input.viewId}"`);
+			if (parentId === undefined) {
+				parentId = defaults.parentId;
+				if (parentId === null && teamspaceId === undefined && defaults.teamspaceId !== undefined) teamspaceId = defaults.teamspaceId;
+			}
+			values = { ...defaults.values, ...(input.values ?? {}) };
+		}
+		if (parentId === undefined) throw invalid('/parentId', 'required', 'A page needs a parent (null for the root level) unless it is created from a view');
+		const rank = input.rank ?? rankAfter(this.#lastRank(parentId));
 		const { seq } = await this.apply(actor, {
 			mid: input.mid ?? `create:${id}`,
 			appVersion: input.appVersion,
@@ -742,13 +774,13 @@ export class WorkspaceDO extends DurableObject<Env> {
 				{
 					op: 'create',
 					id,
-					parentId: input.parentId,
+					parentId,
 					rank,
-					...(input.teamspaceId !== undefined ? { teamspaceId: input.teamspaceId } : {}),
+					...(teamspaceId !== undefined ? { teamspaceId } : {}),
 					...(input.icon !== undefined ? { icon: input.icon } : {}),
 					...(input.cover !== undefined ? { cover: input.cover } : {}),
 					...(input.isDatabase !== undefined ? { isDatabase: input.isDatabase } : {}),
-					...(input.values ? { values: input.values } : {})
+					...(values ? { values } : {})
 				}
 			]
 		});
@@ -911,10 +943,33 @@ export class WorkspaceDO extends DurableObject<Env> {
 
 	/** Tombstones the teamspace and all its pages with one shared timestamp. */
 	async archiveTeamspace(actor: Actor, id: string): Promise<{ seq: number }> {
-		const { seq } = await this.#commit(this.#writeDb(actor), actor.userId, (tx, env) =>
-			archiveTeamspaceRecords(tx, id, env.actorId, env.now)
-		);
+		const { seq } = await this.#commit(this.#writeDb(actor), actor.userId, async (tx, env) => {
+			const records = await archiveTeamspaceRecords(tx, id, env.actorId, env.now);
+			// Rollups and formulas elsewhere that read the archived pages through a relation drop them.
+			return [...records, ...(await this.#computedAfter(tx, records, env))];
+		});
 		return { seq };
+	}
+
+	/** Archived teamspaces the caller owns (Settings lists them with a restore button). */
+	async archivedTeamspaces(actor: Actor): Promise<ArchivedTeamspace[]> {
+		return listArchivedTeamspaces(this.#writeDb(actor), this.ctx.storage.sql);
+	}
+
+	/** Brings an archived teamspace and the pages its archive took back (owners only). */
+	async restoreTeamspace(actor: Actor, id: string): Promise<{ seq: number }> {
+		const { seq } = await this.#commit(this.#writeDb(actor), actor.userId, async (tx, env) => {
+			const records = await restoreTeamspaceRecords(tx, id);
+			return [...records, ...(await this.#computedAfter(tx, records, env))];
+		});
+		return { seq };
+	}
+
+	/** The rollup and formula records `afterWrite` derives from `records`; their pages are not "edited" by it. */
+	async #computedAfter(tx: WorkspaceTx, records: ChangeRecord[], env: { actorId: string; now: number; unstamped: Set<string> }): Promise<ChangeRecord[]> {
+		const computed = await afterWrite(tx, records, { actorId: env.actorId, now: env.now });
+		for (const r of computed) if (r.page) env.unstamped.add(r.page);
+		return computed;
 	}
 
 	async teamspaceMembers(actor: Actor, teamspaceId: string): Promise<TeamspaceMember[]> {
@@ -1261,7 +1316,8 @@ export class WorkspaceDO extends DurableObject<Env> {
 		await this.#commit(this.#db, actorId, async (tx, env) => {
 			const out = await purgePageRows(tx, pages.map((p) => p.id), { actorId, now: env.now });
 			for (const r of out.records) if (r.page) env.unstamped.add(r.page);
-			return out.records;
+			// Pages that lost a relation target (their cell is rewritten) get their rollups and formulas recomputed too.
+			return [...out.records, ...(await this.#computedAfter(tx, out.records, env))];
 		});
 		const left = new Set<string>();
 		for (const part of chunks(pages, 90)) {

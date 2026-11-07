@@ -104,3 +104,59 @@ test('the sidebar Trash popover lists the latest deletions', async () => {
 	await page.getByTestId('trash-popover-row').filter({ hasText: 'Scratch notes' }).getByTestId('trash-popover-restore').click();
 	await expect(row(page, 'Scratch notes')).toBeVisible({ timeout: 20_000 });
 });
+
+test('an archived teamspace is not in Trash: its owner restores it, with its pages, from Settings', async () => {
+	const { page } = ada;
+	const NAME = 'Doomed team';
+	await page.goto(`/${slug}`);
+	await expectLive(page);
+	// A teamspace with a page, and Bob in it.
+	await page.getByTestId('section-teamspaces').getByTestId('section-header').first().hover();
+	await page.getByTestId('section-teamspaces').getByRole('button', { name: 'New teamspace' }).click();
+	const dialog = page.getByTestId('create-teamspace-dialog');
+	await dialog.getByTestId('teamspace-name-input').fill(NAME);
+	await page.getByTestId('teamspace-create-submit').click();
+	const teamspace = page.getByTestId('teamspace').filter({ hasText: NAME });
+	await expect(teamspace).toBeVisible();
+	await teamspace.getByTestId('section-header').hover();
+	await teamspace.getByRole('button', { name: new RegExp(`More actions for ${NAME}`) }).click();
+	await page.getByRole('menuitem', { name: 'Teamspace settings' }).click();
+	const settings = page.getByTestId('teamspace-settings-dialog');
+	await settings.getByTestId('teamspace-add-member').fill('Bob');
+	await settings.getByTestId('teamspace-candidate').filter({ hasText: 'Bob Babbage' }).click();
+	await expect(settings.getByTestId('teamspace-member-row').filter({ hasText: 'Bob Babbage' })).toBeVisible();
+	await page.keyboard.press('Escape');
+	await newTeamspacePage(page, NAME, 'Roadmap');
+	await expect(bob.page.getByTestId('teamspace').filter({ hasText: NAME }).getByTestId('tree-row').filter({ hasText: 'Roadmap' })).toBeVisible({ timeout: 20_000 });
+
+	// Archive it from its settings: it and its page leave both sidebars.
+	await teamspace.getByTestId('section-header').hover();
+	await teamspace.getByRole('button', { name: new RegExp(`More actions for ${NAME}`) }).click();
+	await page.getByRole('menuitem', { name: 'Teamspace settings' }).click();
+	await settings.getByTestId('teamspace-archive').click();
+	await page.getByTestId('teamspace-archive-confirm').click();
+	await expect(page.getByTestId('teamspace').filter({ hasText: NAME })).toHaveCount(0, { timeout: 20_000 });
+	await expect(bob.page.getByTestId('teamspace').filter({ hasText: NAME })).toHaveCount(0, { timeout: 20_000 });
+
+	// It is not a Trash entry; Settings > Teamspaces lists it for its owner (not for Bob) with a Restore button.
+	await page.goto(`/${slug}/trash`);
+	await expect(page.getByTestId('trash-table')).toBeVisible();
+	await expect(page.getByTestId('trash-row').filter({ hasText: 'Roadmap' })).toHaveCount(0);
+	await page.goto(`/${slug}/settings/teamspaces`);
+	const archived = page.getByTestId('archived-teamspace-row').filter({ hasText: NAME });
+	await expect(archived).toBeVisible({ timeout: 20_000 });
+	await expect(archived).toContainText('1 page');
+	await shotsP3(page, 'teamspace-archived');
+	await bob.page.goto(`/${slug}/settings/teamspaces`);
+	await expect(bob.page.getByTestId('teamspaces-tab')).toBeVisible();
+	await expect(bob.page.getByTestId('archived-teamspace-row')).toHaveCount(0);
+
+	await archived.getByTestId('teamspace-restore').click();
+	await expect(page.getByTestId('archived-teamspace-row')).toHaveCount(0, { timeout: 20_000 });
+	await page.goto(`/${slug}`);
+	await expectLive(page);
+	await expect(page.getByTestId('teamspace').filter({ hasText: NAME }).getByTestId('tree-row').filter({ hasText: 'Roadmap' })).toBeVisible({ timeout: 20_000 });
+	await bob.page.goto(`/${slug}`);
+	await expectLive(bob.page);
+	await expect(bob.page.getByTestId('teamspace').filter({ hasText: NAME }).getByTestId('tree-row').filter({ hasText: 'Roadmap' })).toBeVisible({ timeout: 20_000 });
+});

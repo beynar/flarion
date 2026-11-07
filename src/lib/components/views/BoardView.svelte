@@ -8,6 +8,7 @@
 <script lang="ts">
 	import { Kanban, type KanbanCardMove, type KanbanColumnData, type KanbanColumnMove } from 'entasis/kanban';
 	import { Popover } from 'entasis/popover';
+	import { MAX_WINDOW } from '#lib/shared/protocol.ts';
 	import { dotsThreeIcon } from 'entasis/icons/dotsThree';
 	import { plusIcon } from 'entasis/icons/plus';
 	import { eyeSlashIcon } from 'entasis/icons/eyeSlash';
@@ -177,8 +178,10 @@
 			{/snippet}
 			{#snippet columnFooter({ column })}
 				{@const g = info(column.id)}
-				{#if g && g.loaded < g.total}
+				{#if g && g.loaded < g.total && g.loaded < MAX_WINDOW}
 					<button type="button" class="more" data-testid="board-load-more" onclick={() => env.loadMore(column.id)}>Load more ({g.total - g.loaded})</button>
+				{:else if g && g.loaded < g.total}
+					<div class="more capped" data-testid="board-window-cap">Showing the first {g.loaded.toLocaleString('en-US')} cards. Filter this view to see the rest.</div>
 				{/if}
 				{#if env.editable}
 					<button type="button" class="new" data-testid="board-new" onclick={() => addCard(column.id)}>
@@ -313,7 +316,13 @@
 		cursor: pointer;
 		font-size: 14px;
 	}
-	.more:hover,
+	.more.capped {
+		height: auto;
+		padding: 6px 8px;
+		cursor: default;
+		line-height: 1.35;
+	}
+	.more:hover:not(.capped),
 	.new:hover {
 		background: var(--app-hover);
 		color: var(--app-text-secondary);

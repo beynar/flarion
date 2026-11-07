@@ -292,7 +292,7 @@
 					<section class="flex items-center justify-between gap-3 border-t border-[color:var(--app-hairline)] pt-3" aria-label="Danger zone">
 						<span class="flex flex-col text-sm">
 							<span class="font-medium">Archive teamspace</span>
-							<span class="text-xs text-[color:var(--app-text-secondary)]">Moves the teamspace and all its pages to the trash.</span>
+							<span class="text-xs text-[color:var(--app-text-secondary)]">Archives the teamspace and all its pages. An owner can restore it from Settings within 30 days.</span>
 						</span>
 						<Button variant="outline" color="danger" size="small" onclick={() => (confirmOpen = true)} data-testid="teamspace-archive">Archive</Button>
 					</section>
@@ -304,7 +304,7 @@
 
 <Dialog bind:open={confirmOpen} type="alert" size="small">
 	{#snippet title()}Archive {ts?.name ?? 'this teamspace'}?{/snippet}
-	{#snippet description()}The teamspace and every page in it move to the trash. Members lose access to them until it is restored.{/snippet}
+	{#snippet description()}The teamspace and every page in it are archived. Members lose access to them until an owner restores the teamspace from Settings, and everything is deleted for good after 30 days.{/snippet}
 	{#snippet footer()}
 		<div class="flex justify-end gap-2 pt-2 pb-1">
 			<Button variant="ghost" onclick={() => (confirmOpen = false)}>Cancel</Button>

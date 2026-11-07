@@ -5,7 +5,7 @@
  */
 import * as v from 'valibot';
 import { collectionDefSchema, rankSchema, viewDefSchema } from './definitions.js';
-import { querySpecSchema } from './filter-ast.js';
+import { filterGroupSchema, querySpecSchema } from './filter-ast.js';
 import { idSchema } from './property-types.js';
 import { accessLevelSchema, valuesSchema, viewRowSchema } from './protocol.js';
 
@@ -82,6 +82,17 @@ export const teamspaceSchema = v.object({
 });
 export type Teamspace = v.InferOutput<typeof teamspaceSchema>;
 
+/** An archived teamspace its owner may restore: what Settings lists (a teamspace is not in Trash). */
+export const archivedTeamspaceSchema = v.object({
+	id: idSchema,
+	name: v.string(),
+	icon: v.nullable(v.string()),
+	archivedAt: isoSchema,
+	/** Pages the archive took along (pages trashed earlier stay in Trash and are not counted). */
+	pageCount: nonNegativeInt
+});
+export type ArchivedTeamspace = v.InferOutput<typeof archivedTeamspaceSchema>;
+
 const tsText = v.pipe(v.string(), v.trim(), v.minLength(1), v.maxLength(100));
 export const teamspaceCreateSchema = v.object({
 	name: tsText,
@@ -118,7 +129,8 @@ export const pageIdSchema = v.object({ id: idSchema });
 export const pageCreateSchema = v.object({
 	/** Chosen by the client for optimistic UI; generated when absent. */
 	id: v.optional(idSchema),
-	parentId: v.nullable(idSchema),
+	/** Required unless `viewId` is given: then the view's default parent (a `$parent is X` filter's X, else the database's page). */
+	parentId: v.optional(v.nullable(idSchema)),
 	/** Appended after the last sibling when absent. */
 	rank: v.optional(rankSchema),
 	teamspaceId: v.optional(v.nullable(idSchema)),
@@ -127,7 +139,14 @@ export const pageCreateSchema = v.object({
 	isDatabase: v.optional(v.boolean()),
 	values: v.optional(valuesSchema),
 	/** Seeds the body from this page's content. */
-	templateId: v.optional(idSchema)
+	templateId: v.optional(idSchema),
+	/**
+	 * A row created from a database view: the server derives the values (and the parent, when `parentId` is absent)
+	 * that satisfy the collection's and the view's filters and `localFilter` (a `database_view` block's), starting
+	 * from the collection's defaults. `values` override what it derives.
+	 */
+	viewId: v.optional(idSchema),
+	localFilter: v.optional(filterGroupSchema)
 });
 export type PageCreate = v.InferOutput<typeof pageCreateSchema>;
 

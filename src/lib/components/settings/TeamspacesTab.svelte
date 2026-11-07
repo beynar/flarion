@@ -4,7 +4,7 @@
 	import { toast } from 'entasis/toast';
 	import { plusIcon } from 'entasis/icons/plus';
 	import { useWorkspace } from '#lib/client/workspace.svelte.ts';
-	import type { Teamspace, TeamspaceMember } from '#lib/shared/schemas.ts';
+	import type { ArchivedTeamspace, Teamspace, TeamspaceMember } from '#lib/shared/schemas.ts';
 	import OptionTag from '#lib/components/shell/OptionTag.svelte';
 	import CreateTeamspaceDialog from '#lib/components/teamspaces/CreateTeamspaceDialog.svelte';
 	import TeamspaceSettingsDialog from '#lib/components/teamspaces/TeamspaceSettingsDialog.svelte';
@@ -19,6 +19,8 @@
 	let settingsOpen = $state(false);
 	let joining = $state<string | null>(null);
 	let rosters = $state.raw<Record<string, TeamspaceMember[]>>({});
+	let archived = $state.raw<ArchivedTeamspace[]>([]);
+	let restoring = $state<string | null>(null);
 
 	const lists = $derived(splitTeamspaces(store.teamspaces, store.myTeamspaces));
 	const nameOf = (id: string) => store.members.find((m) => m.userId === id)?.name ?? 'Someone';
@@ -34,17 +36,39 @@
 		rosters = next;
 	}
 
+	/** Archived teamspaces are not in Trash: the ones I own are listed here, with a restore button. */
+	async function loadArchived() {
+		try {
+			archived = await store.archivedTeamspaces();
+		} catch {
+			archived = [];
+		}
+	}
+
 	onMount(async () => {
 		await store.refreshDirectory();
 		loading = false;
-		await loadRosters();
+		await Promise.all([loadRosters(), loadArchived()]);
 	});
 
 	// Memberships changed elsewhere in the app (joined, left, archived): keep the counts in step.
 	$effect(() => {
 		void store.teamspaces;
-		if (!loading) void loadRosters();
+		if (!loading) void Promise.all([loadRosters(), loadArchived()]);
 	});
+
+	async function restore(ts: ArchivedTeamspace) {
+		restoring = ts.id;
+		try {
+			await store.restoreTeamspace(ts.id);
+			toast.success({ title: `Restored ${ts.name}` });
+			await loadArchived();
+		} catch {
+			// the store has raised the toast
+		} finally {
+			restoring = null;
+		}
+	}
 
 	async function join(ts: Teamspace) {
 		joining = ts.id;
@@ -137,6 +161,29 @@
 				<li class="py-3 text-sm text-[color:var(--app-text-tertiary)]">No other teamspaces to join.</li>
 			{/each}
 		</ul>
+
+		{#if archived.length}
+			<h3 class="mt-8 mb-1 text-xs font-medium text-[color:var(--app-text-tertiary)]">Archived teamspaces</h3>
+			<ul class="m-0 flex list-none flex-col border-t border-[color:var(--app-hairline)] p-0" data-testid="archived-teamspaces">
+				{#each archived as ts (ts.id)}
+					<li
+						class="flex items-center gap-3 border-b border-[color:var(--app-hairline)] text-sm"
+						style="min-height: var(--app-table-row-height); padding-block: 4px"
+						data-testid="archived-teamspace-row"
+						data-teamspace-id={ts.id}
+					>
+						<span class="grid size-6 shrink-0 place-items-center text-lg leading-none">{ts.icon ?? '👥'}</span>
+						<span class="flex min-w-0 flex-1 flex-col leading-snug">
+							<span class="truncate font-medium">{ts.name}</span>
+							<span class="truncate text-xs text-[color:var(--app-text-secondary)]">
+								Archived {new Date(ts.archivedAt).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}, {ts.pageCount} page{ts.pageCount === 1 ? '' : 's'} (deleted for good after 30 days)
+							</span>
+						</span>
+						<Button variant="outline" size="small" loading={restoring === ts.id} onclick={() => restore(ts)} data-testid="teamspace-restore">Restore</Button>
+					</li>
+				{/each}
+			</ul>
+		{/if}
 	{/if}
 </section>
 

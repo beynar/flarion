@@ -27,6 +27,8 @@ export interface ViewDefaults {
 	teamspaceId?: string | null;
 	/** Whether the derived row satisfies the whole filter (false for contradictions or underivable conditions). */
 	satisfies: boolean;
+	/** Set by {@link defaultsForView}: the page of the view's collection, what reading it is gated on. */
+	collectionPageId?: string;
 }
 
 export interface DeriveOptions {
@@ -162,6 +164,8 @@ export function deriveDefaults(filter: FilterNode | null | undefined, opts: Deri
 export interface DefaultsOptions {
 	meId?: string;
 	now?: number;
+	/** A `database_view` block's extra filter, ANDed with the collection's and the view's. */
+	localFilter?: FilterGroup | null;
 }
 
 /**
@@ -177,12 +181,13 @@ export async function defaultsForView(db: WorkspaceDb, viewId: string, options: 
 	if (!collRow) return null;
 	const collection = collectionDefOf(collRow);
 	const registry = await loadEavRegistry(db);
-	const d = deriveDefaults(andFilters(collection.sourceAst, view.filter), {
+	const { localFilter, ...rest } = options;
+	const d = deriveDefaults(andFilters(collection.sourceAst, view.filter, localFilter), {
 		registry,
 		base: collection.defaults,
-		...options
+		...rest
 	});
-	return { ...d, parentId: d.parentId ?? collection.pageId };
+	return { ...d, parentId: d.parentId ?? collection.pageId, collectionPageId: collection.pageId };
 }
 
 /** Same as {@link defaultsForView} for a collection with no view in hand (its own filter and defaults). */

@@ -21,7 +21,6 @@
 	import { untrack } from 'svelte';
 	import { toast } from 'entasis/toast';
 	import { goto } from '$app/navigation';
-	import { rpc } from '#lib/client/rpc.ts';
 	import { subKey, tryWorkspace, type ViewData } from '#lib/client/workspace.svelte.ts';
 	import { newId } from '#lib/client/runtime.ts';
 	import { fileCoverPath } from '#lib/components/editor/uploads.ts';
@@ -29,6 +28,7 @@
 	import { createRegistry, TITLE_PROP_ID, type PropValue, type PropertyDef } from '#lib/shared/property-types.ts';
 	import type { FilterGroup } from '#lib/shared/filter-ast.ts';
 	import type { Values, ViewRow } from '#lib/shared/protocol.ts';
+	import { MAX_WINDOW } from '#lib/shared/protocol.ts';
 	import { rankBetween } from '#lib/shared/sort-keys.ts';
 	import { cellActions } from './cell-actions.ts';
 	import type { ViewEnv } from './env.ts';
@@ -244,10 +244,11 @@
 
 	async function newRow(extra: Values = {}, opts: { open?: boolean } = {}): Promise<string | null> {
 		if (!store || !collection || !view || !editable) return null;
-		const init = newRowInit({ collection, view, localFilter, registry, meId: store.user.id, extra });
+		// The server derives the starting values (`viewId`); this prediction is the optimistic layer's.
+		const predicted = newRowInit({ collection, view, localFilter, registry, meId: store.user.id, extra });
 		const id = newId('p');
 		try {
-			await rpc.page.create({ id, parentId: init.parentId, values: { [TITLE_PROP_ID]: '', ...init.values } });
+			await store.createViewRow({ id, viewId: view.id, localFilter, predicted, extra });
 			focusId = id;
 			if (opts.open) await goto(link(id));
 			return id;
@@ -261,22 +262,34 @@
 
 	let focusId = $state<string | null>(null);
 
+	/**
+	 * Manual reordering: the rows carry their ordering `rank` and `parentId` (the server keeps them current), so the
+	 * new rank sits between the neighbours' without reading them. A hand-picked collection ranks its members
+	 * (`moveMember`), any other keeps the page under its parent and ranks it among its siblings (`move`).
+	 */
 	async function moveRow(rowId: string, place: { before?: string | null; after?: string | null }) {
-		if (!store) return;
-		try {
-			const [moved, after, before] = await Promise.all([
-				rpc.page.get({ id: rowId }),
-				place.after ? rpc.page.get({ id: place.after }) : null,
-				place.before ? rpc.page.get({ id: place.before }) : null
-			]);
+		if (!store || !collection || !shown) return;
+		const held = new Map((shown.groups ? shown.groups.flatMap((g) => g.rows) : shown.rows).map((r) => [r.id, r]));
+		const moved = held.get(rowId);
+		const after = place.after ? held.get(place.after) : undefined;
+		const before = place.before ? held.get(place.before) : undefined;
+		if (!moved?.rank) return;
+		const handPicked = collection.sourceAst === null;
+		if (!handPicked) {
 			for (const n of [after, before]) {
-				if (n && n.parentId !== moved.parentId) {
+				if (n && (n.parentId ?? null) !== (moved.parentId ?? null)) {
 					toast.info({ title: 'This page cannot be reordered here', description: 'It belongs to another parent.' });
 					return;
 				}
 			}
+		}
+		try {
 			const rank = rankBetween(after?.rank ?? null, before?.rank ?? null);
-			await store.mutate([{ op: 'move', page: rowId, parentId: moved.parentId, rank }]);
+			await store.mutate([
+				handPicked
+					? { op: 'moveMember', collection: collection.id, page: rowId, rank }
+					: { op: 'move', page: rowId, parentId: moved.parentId ?? null, rank }
+			]);
 		} catch {
 			// the store has raised the toast, or the ranks collided (the next drop retries)
 		}
@@ -294,10 +307,10 @@
 		if (!store || !windowId || !shown || !view) return;
 		if (group !== undefined) {
 			const g = shown.groups?.find((x) => x.key === group);
-			if (g) store.setWindow(windowId, Math.min(1000, g.loaded + LIMITS.board), group);
+			if (g) store.setWindow(windowId, Math.min(MAX_WINDOW, g.loaded + LIMITS.board), group);
 		} else {
 			const have = shown.rows.length;
-			if (have < shown.total) store.setWindow(windowId, Math.min(1000, have + LIMITS[view.type]));
+			if (have < shown.total) store.growWindow(windowId, have + LIMITS[view.type]);
 		}
 	}
 
@@ -342,10 +355,10 @@
 	});
 </script>
 
-<div class="view-host" class:full={fullPage} data-testid="view-host" data-view-type={view?.type} data-state={failure ? 'error' : shown && env ? 'ready' : 'loading'} aria-busy={!shown && !failure}>
+<div class="view-host" class:full={fullPage} data-testid="view-host" data-view-type={view?.type} data-state={failure && !collection ? 'error' : shown && env ? 'ready' : 'loading'} aria-busy={!shown && !(failure && !collection)}>
 	{#if !store}
 		<div class="note">Open this page in the app to see its database.</div>
-	{:else if failure}
+	{:else if failure && !collection}
 		<div class="note" role="alert">
 			<span>{failure}</span>
 			<button type="button" onclick={() => void store.loadCollection(collectionId, true)}>Try again</button>
@@ -373,6 +386,11 @@
 			<CalendarView {env} data={shown} onRange={showRange} />
 		{:else if view.type === 'timeline'}
 			<TimelineView {env} data={shown} onRange={showRange} />
+		{/if}
+		{#if shown && !shown.groups && shown.rows.length >= MAX_WINDOW && shown.total > shown.rows.length}
+			<div class="note capnote" data-testid="view-window-cap">
+				Showing the first {MAX_WINDOW.toLocaleString('en-US')} of {shown.total.toLocaleString('en-US')} rows. Search or filter to narrow this view.
+			</div>
 		{/if}
 	{/if}
 </div>
@@ -403,6 +421,10 @@
 		color: var(--app-accent);
 		text-decoration: underline;
 		cursor: pointer;
+	}
+	.capnote {
+		font-size: 13px;
+		color: var(--app-text-tertiary);
 	}
 	.skeleton {
 		display: block;

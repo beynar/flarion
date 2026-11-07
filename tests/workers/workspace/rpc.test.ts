@@ -148,8 +148,50 @@ describe('workspace.teamspaces', () => {
 		expect(seq).toBeGreaterThan(page.seq);
 		expect((await owner.workspace.teamspaces.list()).map((t) => t.name)).toEqual(['General']);
 		expect((await failure(ann.page.get({ id: page.id }))).code).toBe('NOT_FOUND');
+		// An archived teamspace is listed for its owner in Settings (not in Trash) and restored from there.
+		expect(await owner.page.trashList({})).toMatchObject({ items: [] });
+		expect(await ann.workspace.teamspaces.archived()).toEqual([expect.objectContaining({ id: ts.id, name: 'Design team', pageCount: 1 })]);
+		expect(await owner.workspace.teamspaces.archived()).toEqual([]);
+		expect((await failure(owner.workspace.teamspaces.restore({ id: ts.id }))).code).toBe('FORBIDDEN');
+		await ann.workspace.teamspaces.restore({ id: ts.id });
+		expect((await owner.workspace.teamspaces.list()).map((t) => t.name)).toEqual(['Design team', 'General']);
+		expect(await ann.page.get({ id: page.id })).toMatchObject({ id: page.id });
+		expect(await ann.workspace.teamspaces.archived()).toEqual([]);
 		// Guests cannot create teamspaces.
 		const guest = clientFor(ws.id, 'gus');
 		expect((await failure(guest.workspace.teamspaces.create({ name: 'No', privacy: 'open', defaultLevel: 'read' }))).code).toBe('FORBIDDEN');
+	});
+});
+
+describe('rows made from a view and the P4 stubs', () => {
+	test('page.create takes a viewId and starts the row where the view wants it', async () => {
+		const { ws, owner } = await setup();
+		await owner.mutate({
+			mid: 'rpc-view-0',
+			appVersion: '0.0.1',
+			ops: [{ op: 'createProperty', property: { id: 'prio', name: 'Priority', type: 'select', config: { options: [{ id: 'p1', name: 'P1', color: 'default' }] } } }]
+		});
+		await owner.mutate({
+			mid: 'rpc-view',
+			appVersion: '0.0.1',
+			ops: [
+				{ op: 'create', id: 'db', parentId: null, rank: r1, teamspaceId: ws.generalId, isDatabase: true, values: { title: 'DB' } },
+				{ op: 'createCollection', id: 'c1', pageId: 'db', sourceAst: { and: [{ prop: '$parent', op: 'is', value: 'db' }] } },
+				{ op: 'createView', id: 'v1', collectionId: 'c1', type: 'table', name: 'P1', filter: { and: [{ prop: 'prio', op: 'is', value: 'p1' }] }, rank: r1 }
+			]
+		});
+		const made = await owner.page.create({ viewId: 'v1', values: { title: 'Derived' } });
+		expect(await owner.page.get({ id: made.id })).toMatchObject({ parentId: 'db', title: 'Derived', values: expect.objectContaining({ prio: 'p1' }) });
+		expect((await failure(owner.page.create({ viewId: 'nope' }))).code).toBe('NOT_FOUND');
+		expect((await failure(owner.page.create({}))).code).toBe('VALIDATION_FAILED');
+	});
+
+	test('ai.regenerate and ai.ask answer a clean NOT_IMPLEMENTED to a signed-in caller, and nothing to an outsider', async () => {
+		const { ws, owner } = await setup();
+		const error = await failure(owner.ai.regenerate({ pageId: 'x', propId: 'y' }));
+		expect(error).toMatchObject({ code: 'NOT_IMPLEMENTED', status: 501, data: { feature: 'ai-property' } });
+		expect(error.message).toBe('AI properties are not available yet.');
+		const outsider = clientFor(ws.id, null);
+		expect((await failure(outsider.ai.regenerate({ pageId: 'x', propId: 'y' }))).code).toBe('UNAUTHORIZED');
 	});
 });

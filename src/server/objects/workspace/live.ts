@@ -291,11 +291,18 @@ export function analyze(rows: readonly LogRow[]): Touch {
 				for (const id of [...((newV.add as string[]) ?? []), ...((newV.remove as string[]) ?? [])]) t.backlinkTargets.add(id);
 				break;
 			case 'archiveTeamspace':
+			case 'restoreTeamspace':
 				t.structural = true;
 				t.all = true;
 				break;
 			case 'clock':
 				t.clock = true;
+				break;
+			case 'moveMember':
+				// A hand-picked member's rank is the row's manual-order key: views holding the page send `$rank`.
+				if (row.page) addTo(t.fields, row.page, '$memberRank');
+				t.structural = true;
+				t.definition = true;
 				break;
 			case 'grant.set':
 			case 'grant.revoke':
@@ -650,7 +657,7 @@ export class LiveHub {
 			case 'page':
 				return this.#reader.pageRows(ids, access);
 			case 'view':
-				return this.#reader.viewRows(ids, access, sub.props);
+				return this.#reader.viewRows(ids, access, sub.props, sub.collectionId);
 			case 'backlinks':
 				return this.#reader.backlinkRows(ids, sub.pageId);
 		}
@@ -735,11 +742,11 @@ export class LiveHub {
 			const sub = row.sub as Extract<Subscription, { kind: 'view' }>;
 			if (!state.groupBy) {
 				const window = set.lists.get(FLAT)?.window ?? [];
-				const rows = await this.#reader.viewRows(window, view.level, sub.props);
+				const rows = await this.#reader.viewRows(window, view.level, sub.props, sub.collectionId);
 				return { t: 'snapshot', id: subId, total: set.distinct, seq, kind: 'view', rows: window.map((id) => rows.get(id)).filter((r): r is ViewRow => !!r) };
 			}
 			const everything = this.#windowIds(set);
-			const rows = await this.#reader.viewRows([...everything], view.level, sub.props);
+			const rows = await this.#reader.viewRows([...everything], view.level, sub.props, sub.collectionId);
 			const groups = set.keys.map((key) => {
 				const list = set.lists.get(key) ?? { all: [], window: [] };
 				return { key, total: list.all.length, rows: list.window.map((id) => rows.get(id)).filter((r): r is ViewRow => !!r) };
@@ -794,7 +801,12 @@ export class LiveHub {
 			const newW = this.#windows(state, next, (n) => view.has(n), registry);
 			const updated: SubRow = { ...row, sub, lim: next.lim, glim: next.glim };
 			const ops = await this.#viewWindowOps(updated, !!state.groupBy, oldW, newW, view, false);
-			return ops.length ? ops : null;
+			if (ops.length === 0) return null;
+			// The rows that slide in are `add`s, which a client counts: say what the totals are (they do not change
+			// when a window grows, only what is held does), the groups' first.
+			if (state.groupBy) for (const key of newW.keys) ops.push({ op: 'count', total: newW.lists.get(key)?.all.length ?? 0, group: key });
+			ops.push({ op: 'count', total: newW.distinct });
+			return ops;
 		}
 		const sub = { ...row.sub, limit } as Subscription;
 		this.#run('UPDATE socket_sub SET spec = ?, lim = ? WHERE socket_id = ? AND sub_id = ?', JSON.stringify(sub), limit, socketId, subId);
@@ -803,7 +815,9 @@ export class LiveHub {
 		const newW = all.slice(0, limit);
 		const rows = await this.#rowsFor(sub, newW, view.level);
 		const ops = diffWindows(oldW, newW, (id) => rows.get(id));
-		return ops.length ? ops : null;
+		if (ops.length === 0) return null;
+		ops.push({ op: 'count', total: all.length });
+		return ops;
 	}
 
 	// ───────────────────────── commits ─────────────────────────
@@ -1195,7 +1209,7 @@ export class LiveHub {
 }
 
 /** Change kinds that alter who can see what. */
-const ACCESS_KINDS: ReadonlySet<string> = new Set(['grant.set', 'grant.revoke', 'member.sync', 'teamspace.member', 'teamspace.update', 'archiveTeamspace']);
+const ACCESS_KINDS: ReadonlySet<string> = new Set(['grant.set', 'grant.revoke', 'member.sync', 'teamspace.member', 'teamspace.update', 'archiveTeamspace', 'restoreTeamspace']);
 
 /** Replays touching more pages (or log rows) than this are answered with fresh snapshots instead. */
 export const MAX_REPLAY_PAGES = 200;
@@ -1205,15 +1219,29 @@ export const MAX_REPLAY_ROWS = 2000;
 class CommitCache {
 	readonly #values: Awaited<ReturnType<RowReader['currentValues']>>;
 	readonly #structure: ReturnType<RowReader['structure']>;
+	readonly #reader: RowReader;
+	/** Member ranks per hand-picked-only collection (null: the collection orders by page rank). */
+	readonly #memberRanks = new Map<string, Map<string, string> | null>();
 
-	private constructor(values: Awaited<ReturnType<RowReader['currentValues']>>, structure: ReturnType<RowReader['structure']>) {
+	private constructor(reader: RowReader, values: Awaited<ReturnType<RowReader['currentValues']>>, structure: ReturnType<RowReader['structure']>) {
+		this.#reader = reader;
 		this.#values = values;
 		this.#structure = structure;
 	}
 
 	static async create(reader: RowReader, pages: ReadonlySet<string>): Promise<CommitCache> {
 		const ids = [...pages];
-		return new CommitCache(await reader.currentValues(ids), reader.structure(ids));
+		return new CommitCache(reader, await reader.currentValues(ids), reader.structure(ids));
+	}
+
+	/** The manual-order key of `id` in a view of `collectionId`: its member rank in a hand-picked-only collection, else its page rank. */
+	#rankIn(collectionId: string, id: string, pageRank: string): string {
+		let ranks = this.#memberRanks.get(collectionId);
+		if (ranks === undefined) {
+			ranks = this.#reader.memberRanks(collectionId, [...this.#structure.keys()]);
+			this.#memberRanks.set(collectionId, ranks);
+		}
+		return ranks?.get(id) ?? pageRank;
 	}
 
 	updatesFor(sub: Subscription, kind: RowKind, ids: readonly string[], touch: Touch): DiffOp[] {
@@ -1240,10 +1268,14 @@ class CommitCache {
 						if (kind === 'page' || kind === 'view') push('$cover', values.cover);
 						break;
 					case '$parent':
-						if (kind === 'tree' || kind === 'page') push('$parent', structure.parentId as never);
+						if (kind === 'tree' || kind === 'page' || kind === 'view') push('$parent', structure.parentId as never);
 						break;
 					case '$rank':
 						if (kind === 'tree' || kind === 'page') push('$rank', structure.rank);
+						else if (kind === 'view') push('$rank', this.#rankIn((sub as Extract<Subscription, { kind: 'view' }>).collectionId, id, structure.rank));
+						break;
+					case '$memberRank':
+						if (kind === 'view') push('$rank', this.#rankIn((sub as Extract<Subscription, { kind: 'view' }>).collectionId, id, structure.rank));
 						break;
 					case '$teamspace':
 						if (kind === 'tree' || kind === 'page') push('$teamspace', structure.teamspaceId as never);

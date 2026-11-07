@@ -13,6 +13,8 @@ export interface ModelRow {
 	cover?: string | null;
 	values: Record<string, unknown>;
 	access?: string;
+	rank?: string;
+	parentId?: string | null;
 }
 
 export interface ModelGroup {
@@ -92,7 +94,7 @@ export class WindowModel {
 					const row = this.rows.get(op.id);
 					if (!row) throw new Error(`update of a row the window does not hold: ${op.id}`);
 					if (op.prop.startsWith('$')) {
-						const field = { $icon: 'icon', $cover: 'cover', $access: 'access' }[op.prop];
+						const field = { $icon: 'icon', $cover: 'cover', $access: 'access', $rank: 'rank', $parent: 'parentId' }[op.prop];
 						if (field) (row as unknown as Record<string, unknown>)[field] = op.value;
 					} else if (op.prop === 'title') {
 						row.title = op.value as string;

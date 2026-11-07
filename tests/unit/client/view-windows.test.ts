@@ -52,8 +52,10 @@ describe('flat view windows', () => {
 		store.receive({ t: 'snapshot', kind: 'view', id: 'v1', rows: [vrow('r1'), vrow('r2')], total: 4, seq: 11 });
 		store.setWindow('v1', 4);
 		// The server answers at the head seq (11): not newer than the snapshot, yet new rows.
-		store.receive(diff(11, 'v1', [{ op: 'add', index: 2, row: vrow('r3') }, { op: 'add', index: 3, row: vrow('r4') }]));
+		// ... and restates the total, which a resize does not change (the adds would count the rows again).
+		store.receive(diff(11, 'v1', [{ op: 'add', index: 2, row: vrow('r3') }, { op: 'add', index: 3, row: vrow('r4') }, { op: 'count', total: 4 }]));
 		expect(store.viewData('v1')?.rows.map((r) => r.id)).toEqual(['r1', 'r2', 'r3', 'r4']);
+		expect(store.viewData('v1')?.total).toBe(4);
 		// A replayed duplicate is dropped again.
 		store.receive(diff(11, 'v1', [{ op: 'add', index: 0, row: vrow('dup') }]));
 		expect(store.windows.get('v1')?.rows.has('dup')).toBe(false);

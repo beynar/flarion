@@ -146,7 +146,7 @@ const optionNames = (def: PropertyDef | undefined): string =>
  * Seeds a pass from the records of a batch: what each one makes dirty. Handled records: `setProp` (the property
  * changed on the page, and the page's last-edited stamp), `create` (every computed property of the new page),
  * `trash` and `restore` (rollups and formulas reading the page through a relation, and now-formulas of a restored
- * page), `updateProperty` (option renames reach the properties that read the option names), `setPage` and `move`
+ * page), `archiveTeamspace` and `restoreTeamspace` (the same for every page of the teamspace), `updateProperty` (option renames reach the properties that read the option names), `setPage` and `move`
  * (the last-edited stamp that formulas may read).
  */
 export async function seedFromRecords(pass: Pass, records: readonly ChangeRecord[]): Promise<void> {
@@ -186,6 +186,19 @@ export async function seedFromRecords(pass: Pass, records: readonly ChangeRecord
 				const nums = await affectedByTrash(pass.db, rec.page, rec.kind === 'restore');
 				for (const e of graph.edges) if (e.via !== '') pass.dirty.add(e.target, await resolveVia(pass.db, registry, e.via, nums));
 				if (rec.kind === 'restore') for (const def of computed) if (formulaUsesNow(def, registry)) pass.dirty.add(def.id, nums);
+				break;
+			}
+			case 'archiveTeamspace':
+			case 'restoreTeamspace': {
+				// Every page of the teamspace changes state at once, like the pages of a trashed or restored subtree.
+				if (!rec.prop) break;
+				const nums = (await all<{ num: number }>(pass.db, 'SELECT num FROM page WHERE teamspace_id = ?', rec.prop)).map((r) => r.num);
+				if (nums.length === 0) break;
+				for (const e of graph.edges) if (e.via !== '') pass.dirty.add(e.target, await resolveVia(pass.db, registry, e.via, nums));
+				if (rec.kind === 'restoreTeamspace') {
+					// What the pages read while they were away may have moved: their own computed values are read again.
+					for (const def of computed) pass.dirty.add(def.id, nums);
+				}
 				break;
 			}
 			case 'updateProperty': {

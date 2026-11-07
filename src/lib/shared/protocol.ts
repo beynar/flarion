@@ -27,7 +27,8 @@
  * Rows. A `view` or `page` row's `values` come from `props_json` (display), keyed by property id;
  * the title is the `title` property. `update` diffs address one value: `prop` is a property id, or
  * one of the `$`-prefixed row fields `$icon`, `$cover`, `$parent`, `$rank`, `$teamspace`,
- * `$isDatabase`, `$access`, `$hasChildren`.
+ * `$isDatabase`, `$access`, `$hasChildren`. View rows also carry `rank` (the manual-order key, see `viewRowSchema`)
+ * and `parentId`, kept current by `$rank` and `$parent` updates.
  *
  * Live views (P3). A `view` subscription is a live query: the collection's membership and the view's filter
  * (ANDed with the subscription's `filter`, a `database_view` block's local filter), sorted, optionally grouped,
@@ -40,7 +41,11 @@
  *   sort position inside the window is a `move`; one that leaves the window and re-enters is `remove` + `add`.
  *   `index` is the position inside the window (inside the group's window of a grouped view) after the earlier
  *   ops of the same list. A frame never repeats a row.
- *   `window { id, limit }` grows (or shrinks) the window and answers with one `diff` (the new rows are `add`s).
+ *   `window { id, limit }` grows (or shrinks) the window and answers with one `diff`: the rows that slide in (or
+ *   out) are `add`s (`remove`s), followed by `count`s that restate the totals (a resize does not change them; a
+ *   client that counts adds would otherwise count rows it already counted). A window never holds more than
+ *   `MAX_WINDOW` (1000) rows, per view or per group: a larger `limit` is refused by the schema, and a view that
+ *   matches more is searched or filtered, not scrolled. Rows beyond the window are never sent.
  * A definition change that alters what a view means (its filter, sorts, group-by, the collection's source, a
  * property's type or options) is applied as an ordinary diff computed against the new definition; the
  * `registry` frame tells the client to refetch the definitions.
@@ -203,7 +208,15 @@ export const viewRowSchema = v.object({
 	icon: v.nullable(v.string()),
 	cover: v.optional(v.nullable(v.string())),
 	values: valuesSchema,
-	access: v.optional(accessLevelSchema)
+	access: v.optional(accessLevelSchema),
+	/**
+	 * The ordering key the view breaks ties with (a manual order): the page's member rank in a hand-picked-only
+	 * collection (no source AST), its sibling rank (`page.rank`) otherwise. A client reordering rows by hand picks
+	 * a rank between two neighbours' (`rankBetween`) and sends `moveMember` (hand-picked) or `move` (the rest).
+	 */
+	rank: v.optional(rankSchema),
+	/** The page's parent: what a manual reorder of a source-AST collection keeps (`move` carries it). */
+	parentId: v.optional(v.nullable(idSchema))
 });
 export type ViewRow = v.InferOutput<typeof viewRowSchema>;
 
@@ -334,7 +347,7 @@ export type ClientMessageType = ClientMessage['t'];
 
 // ───────────────────────────── server -> client ─────────────────────────────
 
-export const REGISTRY_SCOPES = ['properties', 'directory'] as const;
+export const REGISTRY_SCOPES = ['properties', 'directory', 'collections'] as const;
 export type RegistryScope = (typeof REGISTRY_SCOPES)[number];
 
 /** Which definition scopes a commit's change kinds touch (empty for ordinary page and value edits). */
@@ -342,7 +355,9 @@ export function registryScopesOf(kinds: Iterable<string>): RegistryScope[] {
 	const scopes = new Set<RegistryScope>();
 	for (const kind of kinds) {
 		if (/^(create|update|delete)Property$/.test(kind)) scopes.add('properties');
-		else if (kind.startsWith('teamspace.') || kind === 'archiveTeamspace' || kind === 'member.sync') scopes.add('directory');
+		else if (kind.startsWith('teamspace.') || kind === 'archiveTeamspace' || kind === 'restoreTeamspace' || kind === 'member.sync') scopes.add('directory');
+		// Definitions of databases: collections and their views (members and values flow through the live loop).
+		else if (/^(create|update|delete)Collection$/.test(kind) || /^(create|update|move|delete)View$/.test(kind)) scopes.add('collections');
 	}
 	return REGISTRY_SCOPES.filter((scope) => scopes.has(scope));
 }
@@ -393,9 +408,11 @@ export const serverMessageSchema = v.variant('t', [
 	/**
 	 * A commit changed workspace-level definitions that clients hold outside any subscription: `properties` is
 	 * the property registry (a property or an option was created, renamed or deleted), `directory` is the member
-	 * and teamspace directory (a teamspace, its membership or a workspace member changed). The client fetches
-	 * the lists again (`property.list`, `workspace.members.list`, `workspace.teamspaces.list`); the frame carries
-	 * no data because each actor reads what they may see. `seq` is the commit's.
+	 * and teamspace directory (a teamspace, its membership or a workspace member changed), `collections` is the
+	 * definition of a collection or of one of its views (created, renamed, re-filtered, moved, deleted). The client
+	 * fetches the lists again (`property.list`, `workspace.members.list`, `workspace.teamspaces.list`,
+	 * `collection.get` of each collection it shows); the frame carries no data because each actor reads what they
+	 * may see. `seq` is the commit's.
 	 */
 	v.object({ t: v.literal('registry'), scopes: v.pipe(v.array(v.picklist(REGISTRY_SCOPES)), v.minLength(1)), seq: seqNum }),
 	/**

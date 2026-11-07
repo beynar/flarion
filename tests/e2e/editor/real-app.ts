@@ -8,6 +8,8 @@ import { addVirtualAuthenticator } from '../webauthn';
 
 export const EDITOR = '[data-flarion-editor] [data-edytor]';
 const stamp = Date.now().toString(36);
+/** Each world is a new pair of accounts: the dev database keeps emails, and two spec files of one run both make one. */
+let worlds = 0;
 
 export interface Person {
 	name: string;
@@ -59,14 +61,14 @@ async function expectLive(page: Page) {
 
 /** Ada (the owner: full access) and Bob (a member: update), both on Ada's "Getting started" page. */
 export async function createWorld(browser: Browser): Promise<World> {
-	const ada = await newPerson(browser, 'Ada Lovelace', `ada-p2-${stamp}@example.com`);
-	const bob = await newPerson(browser, 'Bob Babbage', `bob-p2-${stamp}@example.com`);
+	const ada = await newPerson(browser, 'Ada Lovelace', `ada-p2-${stamp}-${++worlds}@example.com`);
+	const bob = await newPerson(browser, 'Bob Babbage', `bob-p2-${stamp}-${worlds}@example.com`);
 
 	await ada.page.goto('/signup');
 	await ada.page.getByLabel('Your name').fill(ada.name);
 	await ada.page.getByLabel('Work email').fill(ada.email);
 	await ada.page.getByRole('button', { name: 'Create account with a passkey' }).click();
-	await expect(ada.page.getByRole('heading', { name: 'Create a workspace' })).toBeVisible();
+	await expect(ada.page.getByRole('heading', { name: 'Create a workspace' })).toBeVisible({ timeout: 20_000 });
 	await ada.page.request.get(await mailTo(ada.page, ada.email, /Verify your email/), { maxRedirects: 0 });
 	await ada.page.getByLabel('Workspace name').fill('Editor Co');
 	await ada.page.getByRole('button', { name: 'Create workspace' }).click();

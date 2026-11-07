@@ -421,6 +421,10 @@ export async function runFuzz(seed: number, options: FuzzOptions = {}): Promise<
 				return { label: 'move', ops: [{ op: 'move', page, parentId: parent, rank: nextRank(), ...(parent === null ? { teamspaceId: state.teamspace } : {}) } as Op] };
 			}
 			if (roll < 0.9) {
+				if (collectionKinds === 'hand' && r.bool(0.6)) {
+					// The manual order of a hand-picked collection: views holding the page get a new `rank`.
+					return { label: 'moveMember', ops: [{ op: 'moveMember', collection: 'c1', page: r.pick(ids.slice(0, 20)), rank: nextRank() } as Op] };
+				}
 				const page = pick(rows);
 				return { label: 'setPage', ops: page ? [{ op: 'setPage', page, icon: r.pick(['🚀', '⭐', null]) } as Op] : [] };
 			}
@@ -583,8 +587,8 @@ async function freshOf(stub: Stub, actor: Actor, s: SubSpec) {
 	});
 }
 
-const rowKey = (row: { title?: string; icon?: string | null; values?: Record<string, unknown>; access?: string }) =>
-	JSON.stringify({ title: row.title, icon: row.icon ?? null, access: row.access ?? null, values: Object.fromEntries(Object.entries(row.values ?? {}).filter(([k, v]) => k !== 'title' && v !== null && v !== undefined).sort(([a], [b]) => a.localeCompare(b))) });
+const rowKey = (row: { title?: string; icon?: string | null; values?: Record<string, unknown>; access?: string; rank?: string; parentId?: string | null }) =>
+	JSON.stringify({ title: row.title, icon: row.icon ?? null, access: row.access ?? null, rank: row.rank ?? null, parentId: row.parentId ?? null, values: Object.fromEntries(Object.entries(row.values ?? {}).filter(([k, v]) => k !== 'title' && v !== null && v !== undefined).sort(([a], [b]) => a.localeCompare(b))) });
 
 /** null when the window equals the fresh answer, else what differs. */
 export async function compareWindow(stub: Stub, actor: Actor, s: SubSpec, w: import('./model').WindowModel): Promise<string | null> {
@@ -594,7 +598,7 @@ export async function compareWindow(stub: Stub, actor: Actor, s: SubSpec, w: imp
 	} catch (error) {
 		return `the fresh query threw: ${error instanceof Error ? error.message : String(error)}`;
 	}
-	const diffRows = (held: Map<string, ModelRow>, ids: string[], want: { id: string; title: string; icon: string | null; values: Record<string, unknown>; access?: string }[]): string | null => {
+	const diffRows = (held: Map<string, ModelRow>, ids: string[], want: { id: string; title: string; icon: string | null; values: Record<string, unknown>; access?: string; rank?: string; parentId?: string | null }[]): string | null => {
 		for (let i = 0; i < want.length; i++) {
 			const mine = held.get(ids[i]);
 			if (!mine) return `row ${ids[i]} is not held`;

@@ -21,7 +21,7 @@ import { decorateValues, readCollection, usesNow } from '../objects/workspace/ea
 import { loadEavRegistry } from '../objects/workspace/eav/registry';
 import { all, chunks, qmarks } from '../objects/workspace/eav/sql';
 import { WorkspaceError, notFound } from '../objects/workspace/errors';
-import { runQuery } from './index';
+import { parseSource, runQuery } from './index';
 import type { QueryResult, ReferencedProps, RowRef, VisibleSet } from './types';
 
 export interface QueryViewInput {
@@ -81,15 +81,39 @@ function parseValues(text: string): Values {
 	}
 }
 
-async function viewRows(db: WorkspaceDb, refs: readonly RowRef[], props: readonly string[] | undefined, ctx: QueryViewContext): Promise<ViewRow[]> {
-	const byNum = new Map<number, { id: string; title: string; icon: string | null; cover: string | null; props_json: string }>();
+/** Member ranks of `ids` when the collection is hand-picked only (the manual order), else null: see `ViewRow.rank`. */
+async function memberRanksOf(db: WorkspaceDb, collectionId: string, ids: readonly string[]): Promise<Map<string, string> | null> {
+	const [found] = await all<{ source_ast: string | null }>(db, 'SELECT source_ast FROM collection WHERE id = ? AND deleted_at IS NULL', collectionId);
+	if (!found || parseSource(found.source_ast) !== null) return null;
+	const out = new Map<string, string>();
+	for (const part of chunks(ids, 90)) {
+		for (const r of await all<{ page_id: string; rank: string }>(
+			db,
+			`SELECT page_id, rank FROM collection_member WHERE collection_id = ? AND page_id IN (${qmarks(part.length)})`,
+			collectionId,
+			...part
+		)) {
+			out.set(r.page_id, r.rank);
+		}
+	}
+	return out;
+}
+
+async function viewRows(
+	db: WorkspaceDb,
+	refs: readonly RowRef[],
+	props: readonly string[] | undefined,
+	ctx: QueryViewContext,
+	collectionId: string
+): Promise<ViewRow[]> {
+	const byNum = new Map<number, { id: string; title: string; icon: string | null; cover: string | null; props_json: string; rank: string; parent_id: string | null }>();
 	for (const part of chunks(
 		refs.map((r) => r.num),
 		90
 	)) {
-		const rows = await all<{ num: number; id: string; title: string; icon: string | null; cover: string | null; props_json: string }>(
+		const rows = await all<{ num: number; id: string; title: string; icon: string | null; cover: string | null; props_json: string; rank: string; parent_id: string | null }>(
 			db,
-			`SELECT num, id, title, icon, cover, props_json FROM page WHERE num IN (${qmarks(part.length)})`,
+			`SELECT num, id, title, icon, cover, props_json, rank, parent_id FROM page WHERE num IN (${qmarks(part.length)})`,
 			...part
 		);
 		for (const r of rows) byNum.set(r.num, r);
@@ -102,12 +126,13 @@ async function viewRows(db: WorkspaceDb, refs: readonly RowRef[], props: readonl
 		return r ? [{ ref, r, row: { id: r.id, num: ref.num, values: parseValues(r.props_json) } }] : [];
 	});
 	await decorateValues(db, registry, entries.map((e) => e.row), want);
+	const memberRanks = await memberRanksOf(db, collectionId, entries.map((e) => e.r.id));
 	const out: ViewRow[] = [];
 	for (const { ref, r, row } of entries) {
 		let values = row.values;
 		if (want) values = Object.fromEntries(Object.entries(values).filter(([k]) => want.has(k))) as Values;
 		const access = ctx.levels?.get(ref.num) ?? ctx.fallbackLevel;
-		out.push({ id: r.id, title: r.title, icon: r.icon, cover: r.cover, values, ...(access ? { access } : {}) });
+		out.push({ id: r.id, title: r.title, icon: r.icon, cover: r.cover, values, ...(access ? { access } : {}), rank: memberRanks?.get(r.id) ?? r.rank, parentId: r.parent_id });
 	}
 	return out;
 }
@@ -152,11 +177,11 @@ export async function queryViewRows(db: WorkspaceDb, input: QueryViewInput, ctx:
 		...(input.groupWindows ? { groupWindows: Object.fromEntries(Object.entries(input.groupWindows).map(([k, w]) => [k, clampWindow(w)])) } : {})
 	});
 
-	const rows = await viewRows(db, result.rows, input.props, ctx);
+	const rows = await viewRows(db, result.rows, input.props, ctx, input.collectionId);
 	let groups: QueryViewGroup[] | undefined;
 	if (result.groups) {
 		groups = [];
-		for (const g of result.groups) groups.push({ key: g.key, total: g.total, rows: await viewRows(db, g.rows, input.props, ctx) });
+		for (const g of result.groups) groups.push({ key: g.key, total: g.total, rows: await viewRows(db, g.rows, input.props, ctx, input.collectionId) });
 	}
 	return { rows, total: result.total, ...(groups ? { groups } : {}), props: result.props, spec, seq: ctx.seq, stats: result.stats };
 }

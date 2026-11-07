@@ -11,7 +11,7 @@ import { isRank } from '../../../lib/shared/sort-keys';
 import type { WorkspaceTx } from '../../db/workspace.client';
 import type { AccessLevel } from '../../db/workspace.schema';
 import { invalid, WorkspaceError } from './errors';
-import { writeInitialValues, type ChangeRecord } from './eav';
+import { defaultsForView, writeInitialValues, type ChangeRecord } from './eav';
 import { isoTime, LIVE_SUBTREE_CTE, rawAll, rawRun, SUBTREE_CTE } from './util';
 
 export interface PageOpEnv {
@@ -124,6 +124,15 @@ async function createPage(tx: WorkspaceTx, op: CreateOp, env: PageOpEnv): Promis
 	await assertTeamspace(tx, teamspaceId, '/teamspaceId');
 	await env.noteParent(op.parentId);
 
+	// A row made from a database view starts with the values that keep it in that view (`values` win).
+	let initial = op.values;
+	if (op.viewId) {
+		const defaults = await defaultsForView(tx, op.viewId, { meId: env.actorId, now: env.now, localFilter: op.localFilter ?? null });
+		if (!defaults) throw invalid('/viewId', 'not_found', `View "${op.viewId}" does not exist`);
+		await assertCan(tx, defaults.collectionPageId as string, 'read', 'read this database');
+		initial = { ...defaults.values, ...(op.values ?? {}) };
+	}
+
 	const num = await env.allocateNum();
 	// A raw INSERT: viborm's governed `create` also asks to READ the teamspace the row references, which a guest
 	// (or a member shared one page of a private teamspace) cannot. Placement was checked by `authorizeOp`
@@ -163,8 +172,8 @@ async function createPage(tx: WorkspaceTx, op: CreateOp, env: PageOpEnv): Promis
 			}
 		}
 	];
-	if (op.values && Object.keys(op.values).length > 0) {
-		records.push(...(await writeInitialValues(tx, op.id, op.values, { actorId: env.actorId, now: env.now })));
+	if (initial && Object.keys(initial).length > 0) {
+		records.push(...(await writeInitialValues(tx, op.id, initial, { actorId: env.actorId, now: env.now })));
 	}
 	return records;
 }

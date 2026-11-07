@@ -502,6 +502,7 @@ export class AccessService {
 					for (const e of this.#entries.values()) if (e.actor.userId === row.actor) this.#rebuild(e);
 					break;
 				case 'archiveTeamspace':
+				case 'restoreTeamspace':
 					affecting = true;
 					if (row.prop) teamspaces.add(row.prop);
 					this.#facts.clear();

@@ -78,6 +78,8 @@ describe('private contract: routers of the plan', () => {
 						throw new ORPCError('FORBIDDEN');
 					}),
 					archive: os.workspace.teamspaces.archive.handler(() => ({ seq: 1 })),
+					archived: os.workspace.teamspaces.archived.handler(() => []),
+					restore: os.workspace.teamspaces.restore.handler(() => ({ seq: 1 })),
 					members: {
 						list: os.workspace.teamspaces.members.list.handler(() => []),
 						add: os.workspace.teamspaces.members.add.handler(() => {

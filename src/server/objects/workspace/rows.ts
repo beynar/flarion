@@ -12,6 +12,7 @@ import type {
 	Values
 } from '../../../lib/shared/protocol';
 import type { WorkspaceDb } from '../../db/workspace.client';
+import { parseSource } from '../../engine';
 import { decorateValues } from './eav/relations';
 import { loadEavRegistry } from './eav/registry';
 import { chunks, MAX_PARAMS, qmarks } from './util';
@@ -223,15 +224,45 @@ export class RowReader {
 		return out;
 	}
 
-	async viewRows(ids: readonly string[], access: AccessOf, props?: readonly string[]): Promise<Map<string, ViewRow>> {
+	/**
+	 * Member ranks of `ids` in a collection that is hand-picked only (no source AST): the manual order the engine
+	 * breaks ties with instead of the pages' sibling ranks. Null for any other collection.
+	 */
+	memberRanks(collectionId: string, ids: readonly string[]): Map<string, string> | null {
+		const found = this.#all<{ source_ast: string | null }>('SELECT source_ast FROM collection WHERE id = ? AND deleted_at IS NULL', collectionId)[0];
+		if (!found || parseSource(found.source_ast) !== null) return null;
+		const out = new Map<string, string>();
+		for (const part of chunks(ids, MAX_PARAMS - 1)) {
+			for (const r of this.#all<{ page_id: string; rank: string }>(
+				`SELECT page_id, rank FROM collection_member WHERE collection_id = ? AND page_id IN (${qmarks(part.length)})`,
+				collectionId,
+				...part
+			)) {
+				out.set(r.page_id, r.rank);
+			}
+		}
+		return out;
+	}
+
+	async viewRows(ids: readonly string[], access: AccessOf, props?: readonly string[], collectionId?: string): Promise<Map<string, ViewRow>> {
 		const rows = this.#pageRows(ids);
+		const memberRanks = collectionId ? this.memberRanks(collectionId, ids) : null;
 		const decorated = [...rows].map(([id, r]) => ({ id, num: r.num, values: parseValues(r.props_json) }));
 		await this.#decorate(decorated, props ? new Set(props) : null);
 		const out = new Map<string, ViewRow>();
 		for (const d of decorated) {
 			const r = rows.get(d.id) as PageSqlRow;
 			const values = props ? Object.fromEntries(Object.entries(d.values).filter(([k]) => props.includes(k))) : d.values;
-			out.set(d.id, { id: d.id, title: r.title, icon: r.icon, cover: r.cover, values, access: access(r.num) });
+			out.set(d.id, {
+				id: d.id,
+				title: r.title,
+				icon: r.icon,
+				cover: r.cover,
+				values,
+				access: access(r.num),
+				rank: memberRanks?.get(d.id) ?? r.rank,
+				parentId: r.parent_id
+			});
 		}
 		return out;
 	}

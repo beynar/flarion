@@ -43,6 +43,15 @@ Product name is **Flarion** (never use Notion's name, logo or fonts in the UI).
 - Design: tokens in `src/lib/design/notion.tokens.ts`, `pnpm gen:theme` → `src/lib/design/generated/*`.
 - `sveltekit-cloudflare-worker` is vendored: `vendor/sveltekit-cloudflare-worker-0.0.1.tgz`.
 
+## UI rule (owner requirement): entasis everywhere
+Every UI element must be an entasis component when entasis has one: `DataTable`/`Table` for tables and
+row lists, `Select` / `Combobox` / `PopupMenu` for selectors and pickers, `Dialog` / `confirmation()`,
+`Tabs`, `TextInput` / `NumberInput` / `DateInput` / `TimeInput` / `RadioInput` / `Checkbox`, `Chip`, `Avatar(Group)`,
+`Alert`, `Skeleton`, `Tooltip`, `Toast`… No native `<table>`, `<select>`, raw form inputs, hand-built
+listboxes/menus/tabs/modals. Exceptions only where entasis has no equivalent, listed in
+`docs/audits/entasis-audit.md` §5 (tree DnD, cover reposition, emoji grid, option color swatches) —
+and an exception must be justified in a comment.
+
 ## Layout and ownership
 `src/worker.ts` is the only Worker entry; it routes in plan order to `src/server/http/*-route.ts` and
 re-exports DO classes, Workflows, `queue` and `scheduled`. Each route/class lives in its own module so
@@ -95,7 +104,7 @@ itself on `E2E_PORT` and reuses when one is already there. Three Playwright conf
 
 | Suite | Command |
 | --- | --- |
-| P1 gate, P2 gate, auth, passkeys | `E2E_PORT=5373 pnpm exec playwright test` (or one file: `... tests/e2e/p2-gate.spec.ts`) |
+| P1 gate, P2 gate, P3 gate, auth, passkeys | `E2E_PORT=5373 pnpm exec playwright test` (or one file: `... tests/e2e/p3-gate.spec.ts`) |
 | Editor | `E2E_PORT=5273 pnpm exec playwright test -c tests/e2e/editor/playwright.config.ts` |
 | App UI (sidebar, teamspaces, share, properties, pushes, files) | `E2E_PORT=5473 pnpm exec playwright test -c tests/e2e/app/playwright.config.ts` |
 
@@ -113,7 +122,7 @@ itself on `E2E_PORT` and reuses when one is already there. Three Playwright conf
   image, cover and file download in those suites goes through the permission check and the signed redirect. The dev
   server listens on `localhost` (IPv6 loopback), hence `[::1]` rather than `127.0.0.1`.
 - In dev the page code exposes `window.__flarion` (the workspace store) and `window.__edytor` (the open editor).
-- Screenshots: `docs/screens/p1/gate-*.png`, `docs/screens/p2/{gate,app,editor}-*.png`. Run the suites one at a time
+- Screenshots: `docs/screens/p1/gate-*.png`, `docs/screens/p2/{gate,app,editor}-*.png`, `docs/screens/p3/{gate,app,editor}-*.png`. Run the suites one at a time
   when you only need a pass/fail; they are parallel-safe, not CPU-free.
 
 ## Integration conventions learned in P2
@@ -137,3 +146,36 @@ itself on `E2E_PORT` and reuses when one is already there. Three Playwright conf
   a "Comment" button over the selection (`data-testid="comment-selection"`).
 - The files property uploads with the editor's `uploadToPage` (multipart included) and links its chips to the stable
   `/files/<id>?ws=` URL, not to a short-lived signed one.
+
+## Integration conventions learned in P3
+- **View rows carry their manual order.** `ViewRow` has `rank` (the key the engine breaks ties with: the member rank in a
+  hand-picked-only collection, i.e. no source AST, else `page.rank`) and `parentId`; the live loop keeps them current with
+  `$rank` / `$parent` `update` ops (a `moveMember` change row marks `$memberRank`, sent as `$rank`). A client reorders with
+  `rankBetween(neighbour ranks)` and sends `moveMember` (hand-picked) or `move` with the row's own `parentId`
+  (`ViewHost.moveRow`); it never reads the neighbours with `page.get`. Anything that builds view rows must pass the
+  collection id (`RowReader.viewRows(..., collectionId)`, `engine/view.ts`). The fuzz compares `rank` and `parentId` too.
+- **Definition pushes also cover databases.** `registryScopesOf` returns `collections` for `create/update/deleteCollection`
+  and `create/update/move/deleteView`; the store refetches every collection it holds (and the ones a view asked for that
+  did not exist yet). Member and value changes do not push a definition: they flow through the live loop.
+- **Rows made from a view use the server's defaults.** `page.create` (and the `create` op) take `viewId` and `localFilter`;
+  the DO runs `defaultsForView` (collection defaults, collection filter, view filter, local filter) and explicit `values`
+  win. `page.create` also resolves the parent (the view's `$parent is X`, else the database page) when `parentId` is
+  absent, then authorizes a plain `create` on it; the op path keeps the client's `parentId` (placement is authorized on
+  the op). `WorkspaceStore.createViewRow` shows `newRowInit`'s prediction as the optimistic layer.
+- **Window cap: 1,000 rows per view (or per group), `MAX_WINDOW`.** A bigger `limit` is refused by the schema, the table
+  grows 100 rows at a time as it scrolls (`WorkspaceStore.growWindow`, which ignores a request that is not larger than the
+  one already out) and stops at the cap with a note (`view-window-cap`, `board-window-cap`). Rows beyond the window are never
+  sent. A `window` answer ends with `count` ops restating the totals: the client counts every `add`, so without them a
+  resize double counted (found by `tests/e2e/p3-gate.spec.ts` test 7).
+- **Computed values follow archive, restore and purge.** `afterWrite` runs for `archiveTeamspace` / `restoreTeamspace`
+  records (every page of the teamspace, like a trashed subtree) and for the records a purge produces (relation cells that
+  lost their target). `WorkspaceDO.#computedAfter` is the one place that does it outside `apply`.
+- **Archived teamspaces are restored from Settings, not Trash** (Notion's behaviour): no trash entry is made. The archive
+  stamps the teamspace and its pages with one `deleted_at` (pages trashed earlier keep their own entry);
+  `workspace.teamspaces.archived` lists the ones the caller owns, `.restore` clears the stamp (`restoreTeamspace` change
+  kind, an access-affecting record like the archive). The 30-day purge covers them.
+- **`ai.regenerate` and `ai.ask` are P4 stubs** that answer `NOT_IMPLEMENTED` (501) with a message a toast can show and
+  `data.feature` (`ai-property` / `ai-ask`). AI-property invalidation markers are P4 as well.
+- **Gate numbers** (`tests/e2e/p3-gate.spec.ts`, real browsers, local dev): an edit reaches a collaborator's DOM in about
+  15 ms p50 and 20 ms p95 over 20 edits; the workers measurement (`tests/workers/live/latency.test.ts`) has no network.
+- Chromium headless: the comment margin needs a 1,700 px viewport for every thread to show a card.
