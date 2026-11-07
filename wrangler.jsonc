@@ -1,0 +1,426 @@
+{
+	"$schema": "node_modules/wrangler/config-schema.json",
+	"name": "flarion",
+	"account_id": "6886250e2aff0047919a1ed731a55c64",
+	"main": ".svelte-kit/cloudflare/_worker.js",
+	"compatibility_date": "2026-07-11",
+	"compatibility_flags": [
+		"nodejs_compat"
+	],
+	"workers_dev": true,
+	"preview_urls": true,
+	"observability": {
+		"enabled": true,
+		"logs": {
+			"enabled": true,
+			"invocation_logs": true
+		}
+	},
+	"assets": {
+		"binding": "ASSETS",
+		"directory": ".svelte-kit/cloudflare",
+		"run_worker_first": true
+	},
+	"vars": {
+		"APP_NAME": "Flarion",
+		"APP_VERSION": "0.0.1",
+		"ENVIRONMENT": "development",
+		"RP_ID": "localhost",
+		"APP_ORIGIN": "http://localhost:5173",
+		"MAIL_FROM": "noreply@flarion.local",
+		"AI_GATEWAY_ID": "flarion",
+		"AI_TEXT_MODEL": "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
+		"AI_EMBEDDING_MODEL": "@cf/baai/bge-m3",
+		"TURNSTILE_SITE_KEY": "1x00000000000000000000AA",
+		"FILES_ORIGIN": "http://localhost:5173"
+	},
+	"d1_databases": [
+		{
+			"binding": "DB",
+			"database_name": "flarion",
+			"database_id": "ccc49b0d-80fc-477d-ad6a-3f7bb016dd2e",
+			"migrations_dir": "migrations/d1"
+		}
+	],
+	"durable_objects": {
+		"bindings": [
+			{
+				"name": "WORKSPACE",
+				"class_name": "WorkspaceDO"
+			},
+			{
+				"name": "PAGE",
+				"class_name": "PageDO"
+			}
+		]
+	},
+	"migrations": [
+		{
+			"tag": "v1",
+			"new_sqlite_classes": [
+				"WorkspaceDO",
+				"PageDO"
+			]
+		}
+	],
+	"r2_buckets": [
+		{
+			"binding": "FILES",
+			"bucket_name": "flarion-files"
+		}
+	],
+	"kv_namespaces": [
+		{
+			"binding": "CACHE",
+			"id": "504959b7a138452d8188fa6e928cb482"
+		}
+	],
+	"queues": {
+		"producers": [
+			{
+				"binding": "JOBS",
+				"queue": "flarion-jobs"
+			}
+		],
+		"consumers": [
+			{
+				"queue": "flarion-jobs",
+				"max_batch_size": 100,
+				"max_batch_timeout": 30,
+				"max_retries": 5
+			}
+		]
+	},
+	"workflows": [
+		{
+			"name": "flarion-import",
+			"binding": "IMPORT",
+			"class_name": "ImportWorkflow"
+		},
+		{
+			"name": "flarion-export",
+			"binding": "EXPORT",
+			"class_name": "ExportWorkflow"
+		},
+		{
+			"name": "flarion-purge",
+			"binding": "PURGE",
+			"class_name": "PurgeWorkflow"
+		}
+	],
+	"ai": {
+		"binding": "AI"
+	},
+	"vectorize": [
+		{
+			"binding": "VECTORS",
+			"index_name": "flarion-chunks"
+		}
+	],
+	"send_email": [
+		{
+			"name": "EMAIL"
+		}
+	],
+	"images": {
+		"binding": "IMAGES"
+	},
+	"ratelimits": [
+		{
+			"name": "RL_AUTH",
+			"namespace_id": "1001",
+			"simple": {
+				"limit": 20,
+				"period": 60
+			}
+		},
+		{
+			"name": "RL_API",
+			"namespace_id": "1002",
+			"simple": {
+				"limit": 300,
+				"period": 60
+			}
+		}
+	],
+	"analytics_engine_datasets": [
+		{
+			"binding": "METRICS",
+			"dataset": "flarion_metrics"
+		}
+	],
+	"triggers": {
+		"crons": [
+			"0 3 * * *",
+			"0 4 * * 0"
+		]
+	},
+	"env": {
+		"staging": {
+			"name": "flarion-staging",
+			"vars": {
+				"APP_NAME": "Flarion",
+				"APP_VERSION": "0.0.1",
+				"ENVIRONMENT": "staging",
+				"RP_ID": "flarion-staging.beynar.workers.dev",
+				"APP_ORIGIN": "https://flarion-staging.beynar.workers.dev",
+				"MAIL_FROM": "noreply@beynar.dev",
+				"AI_GATEWAY_ID": "flarion",
+				"AI_TEXT_MODEL": "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
+				"AI_EMBEDDING_MODEL": "@cf/baai/bge-m3",
+				"TURNSTILE_SITE_KEY": "1x00000000000000000000AA",
+				"FILES_ORIGIN": "https://flarion-staging.beynar.workers.dev"
+			},
+			"d1_databases": [
+				{
+					"binding": "DB",
+					"database_name": "flarion-staging",
+					"database_id": "7d5863a6-a2ea-40c6-887a-99ee60a68d22",
+					"migrations_dir": "migrations/d1"
+				}
+			],
+			"durable_objects": {
+				"bindings": [
+					{
+						"name": "WORKSPACE",
+						"class_name": "WorkspaceDO"
+					},
+					{
+						"name": "PAGE",
+						"class_name": "PageDO"
+					}
+				]
+			},
+			"r2_buckets": [
+				{
+					"binding": "FILES",
+					"bucket_name": "flarion-files-staging"
+				}
+			],
+			"kv_namespaces": [
+				{
+					"binding": "CACHE",
+					"id": "8cdb862909b544ddb3d13d8b08f99411"
+				}
+			],
+			"queues": {
+				"producers": [
+					{
+						"binding": "JOBS",
+						"queue": "flarion-jobs-staging"
+					}
+				],
+				"consumers": [
+					{
+						"queue": "flarion-jobs-staging",
+						"max_batch_size": 100,
+						"max_batch_timeout": 30,
+						"max_retries": 5
+					}
+				]
+			},
+			"workflows": [
+				{
+					"name": "flarion-import-staging",
+					"binding": "IMPORT",
+					"class_name": "ImportWorkflow"
+				},
+				{
+					"name": "flarion-export-staging",
+					"binding": "EXPORT",
+					"class_name": "ExportWorkflow"
+				},
+				{
+					"name": "flarion-purge-staging",
+					"binding": "PURGE",
+					"class_name": "PurgeWorkflow"
+				}
+			],
+			"ai": {
+				"binding": "AI"
+			},
+			"vectorize": [
+				{
+					"binding": "VECTORS",
+					"index_name": "flarion-chunks-staging"
+				}
+			],
+			"send_email": [
+				{
+					"name": "EMAIL"
+				}
+			],
+			"images": {
+				"binding": "IMAGES"
+			},
+			"ratelimits": [
+				{
+					"name": "RL_AUTH",
+					"namespace_id": "1011",
+					"simple": {
+						"limit": 20,
+						"period": 60
+					}
+				},
+				{
+					"name": "RL_API",
+					"namespace_id": "1012",
+					"simple": {
+						"limit": 300,
+						"period": 60
+					}
+				}
+			],
+			"analytics_engine_datasets": [
+				{
+					"binding": "METRICS",
+					"dataset": "flarion_metrics_staging"
+				}
+			],
+			"triggers": {
+				"crons": [
+					"0 3 * * *",
+					"0 4 * * 0"
+				]
+			}
+		},
+		"production": {
+			"name": "flarion",
+			"vars": {
+				"APP_NAME": "Flarion",
+				"APP_VERSION": "0.0.1",
+				"ENVIRONMENT": "production",
+				"RP_ID": "flarion.beynar.dev",
+				"APP_ORIGIN": "https://flarion.beynar.dev",
+				"MAIL_FROM": "noreply@beynar.dev",
+				"AI_GATEWAY_ID": "flarion",
+				"AI_TEXT_MODEL": "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
+				"AI_EMBEDDING_MODEL": "@cf/baai/bge-m3",
+				"TURNSTILE_SITE_KEY": "1x00000000000000000000AA",
+				"FILES_ORIGIN": "https://flarion-files.beynar.dev"
+			},
+			"d1_databases": [
+				{
+					"binding": "DB",
+					"database_name": "flarion",
+					"database_id": "ccc49b0d-80fc-477d-ad6a-3f7bb016dd2e",
+					"migrations_dir": "migrations/d1"
+				}
+			],
+			"durable_objects": {
+				"bindings": [
+					{
+						"name": "WORKSPACE",
+						"class_name": "WorkspaceDO"
+					},
+					{
+						"name": "PAGE",
+						"class_name": "PageDO"
+					}
+				]
+			},
+			"r2_buckets": [
+				{
+					"binding": "FILES",
+					"bucket_name": "flarion-files"
+				}
+			],
+			"kv_namespaces": [
+				{
+					"binding": "CACHE",
+					"id": "504959b7a138452d8188fa6e928cb482"
+				}
+			],
+			"queues": {
+				"producers": [
+					{
+						"binding": "JOBS",
+						"queue": "flarion-jobs"
+					}
+				],
+				"consumers": [
+					{
+						"queue": "flarion-jobs",
+						"max_batch_size": 100,
+						"max_batch_timeout": 30,
+						"max_retries": 5
+					}
+				]
+			},
+			"workflows": [
+				{
+					"name": "flarion-import",
+					"binding": "IMPORT",
+					"class_name": "ImportWorkflow"
+				},
+				{
+					"name": "flarion-export",
+					"binding": "EXPORT",
+					"class_name": "ExportWorkflow"
+				},
+				{
+					"name": "flarion-purge",
+					"binding": "PURGE",
+					"class_name": "PurgeWorkflow"
+				}
+			],
+			"ai": {
+				"binding": "AI"
+			},
+			"vectorize": [
+				{
+					"binding": "VECTORS",
+					"index_name": "flarion-chunks"
+				}
+			],
+			"send_email": [
+				{
+					"name": "EMAIL"
+				}
+			],
+			"images": {
+				"binding": "IMAGES"
+			},
+			"ratelimits": [
+				{
+					"name": "RL_AUTH",
+					"namespace_id": "1001",
+					"simple": {
+						"limit": 20,
+						"period": 60
+					}
+				},
+				{
+					"name": "RL_API",
+					"namespace_id": "1002",
+					"simple": {
+						"limit": 300,
+						"period": 60
+					}
+				}
+			],
+			"analytics_engine_datasets": [
+				{
+					"binding": "METRICS",
+					"dataset": "flarion_metrics"
+				}
+			],
+			"triggers": {
+				"crons": [
+					"0 3 * * *",
+					"0 4 * * 0"
+				]
+			},
+			"routes": [
+				{
+					"pattern": "flarion.beynar.dev",
+					"custom_domain": true
+				},
+				{
+					"pattern": "flarion-files.beynar.dev",
+					"custom_domain": true
+				}
+			]
+		}
+	}
+}

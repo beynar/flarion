@@ -1,0 +1,12 @@
+node_modules
+.svelte-kit
+.wrangler
+.distilled
+build
+dist
+.env
+.env.*
+.dev.vars*
+test-results
+playwright-report
+wrangler.dev.jsonc

@@ -1,0 +1,36 @@
+{
+	// Test-only Worker for @cloudflare/vitest-plugin: real workerd + SQLite Durable Objects.
+	"name": "flarion-test",
+	"main": "./tests/workers/entry.ts",
+	"compatibility_date": "2026-07-11",
+	"compatibility_flags": ["nodejs_compat"],
+	"vars": {
+		"APP_NAME": "Flarion",
+		"APP_VERSION": "0.0.1",
+		"ENVIRONMENT": "test",
+		"RP_ID": "localhost",
+		"APP_ORIGIN": "http://localhost:5173",
+		"FILES_ORIGIN": "http://localhost:5173",
+		"MAIL_FROM": "noreply@flarion.local",
+		"BETTER_AUTH_SECRET": "test-secret-test-secret-test-secret-32",
+		"ROOM_TOKEN_KEY": "test-room-token-key-test-room-token",
+		"API_TOKEN_PEPPER": "test-pepper"
+	},
+	"d1_databases": [{ "binding": "DB", "database_name": "flarion-test", "database_id": "test", "migrations_dir": "migrations/d1" }],
+	"durable_objects": {
+		"bindings": [
+			{ "name": "WORKSPACE", "class_name": "WorkspaceDO" },
+			{ "name": "PAGE", "class_name": "PageDO" },
+			{ "name": "TEST_SQL", "class_name": "TestSqlDO" }
+		]
+	},
+	"migrations": [{ "tag": "v1", "new_sqlite_classes": ["WorkspaceDO", "PageDO", "TestSqlDO"] }],
+	"r2_buckets": [{ "binding": "FILES", "bucket_name": "flarion-files-test" }],
+	"kv_namespaces": [{ "binding": "CACHE", "id": "test" }],
+	"queues": { "producers": [{ "binding": "JOBS", "queue": "flarion-jobs-test" }] },
+	"ratelimits": [
+		{ "name": "RL_AUTH", "namespace_id": "2001", "simple": { "limit": 1000, "period": 60 } },
+		{ "name": "RL_API", "namespace_id": "2002", "simple": { "limit": 1000, "period": 60 } }
+	],
+	"analytics_engine_datasets": [{ "binding": "METRICS", "dataset": "flarion_metrics_test" }]
+}
