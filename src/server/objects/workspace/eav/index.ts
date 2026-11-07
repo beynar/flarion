@@ -189,3 +189,27 @@ export {
 	readCollectionOfPage,
 	readMembers
 } from './read';
+
+// ───────────────────────────── P3 seams (owner: Databases) ─────────────────────────────
+
+/**
+ * Called by the Sync core inside `apply()`'s transaction after all ops of a batch ran, with every
+ * record they produced. Recomputes rollups/formulas (and AI-property invalidation markers) of pages
+ * that depend on the written properties via the `dependency` graph and the reverse relation scan,
+ * writes computed rows, and returns the extra records so they flow through the same live loop.
+ */
+export async function afterWrite(
+	_tx: WorkspaceTx,
+	_records: ChangeRecord[],
+	_ctx: EavOpContext
+): Promise<ChangeRecord[]> {
+	return [];
+}
+
+/**
+ * Called hourly by the Workspace DO alarm (Sync core) outside any open transaction: recompute
+ * formulas that read `now()` and return the change records to publish.
+ */
+export async function recomputeNowFormulas(_db: WorkspaceDb, _ctx: EavOpContext): Promise<ChangeRecord[]> {
+	return [];
+}
