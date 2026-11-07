@@ -143,6 +143,10 @@ export interface WorkspaceStoreOptions {
 	/** The tab asked to reload (build too old) or sign in again. */
 	onFatal?: (action: FatalAction, code: number, reason: string) => void;
 	reauth?: () => Promise<boolean>;
+	/** A page's lock changed (the `lock` push): the page lock cache applies it. */
+	onLock?: (lock: { pageId: string; locked: boolean; lockedBy: string | null; lockedAt: number | null }) => void;
+	/** The socket reconnected: pushes were missed, so what is cached outside the store (page locks) is read again. */
+	onReconnect?: () => void;
 	appVersion?: string;
 	storage?: Pick<Storage, 'getItem' | 'setItem'> | null;
 	/** Debounce of title edits, ms. */
@@ -345,6 +349,8 @@ export class WorkspaceStore {
 	#cacheTimer: unknown = null;
 	#registryTimer: unknown = null;
 	#directoryTimer: unknown = null;
+	/** A `welcome` was received already: the next one is a reconnect. */
+	#welcomed = false;
 	/** Bumped by every definition write: an older registry fetch must not overwrite it. */
 	#defVersion = 0;
 	#recentOpened: string[] = [];
@@ -684,6 +690,21 @@ export class WorkspaceStore {
 	receive(msg: ServerMessage): void {
 		switch (msg.t) {
 			case 'welcome':
+				// A reconnect: definition changes pushed while the socket was down (the log replays page and
+				// value changes, not the registry or the directory) are fetched again.
+				if (this.#welcomed) {
+					this.#scheduleRegistryRefresh();
+					this.#scheduleDirectoryRefresh();
+					this.#o.onReconnect?.();
+				}
+				this.#welcomed = true;
+				return;
+			case 'lock':
+				this.#o.onLock?.({ pageId: msg.pageId, locked: msg.locked, lockedBy: msg.lockedBy, lockedAt: msg.lockedAt });
+				return;
+			case 'registry':
+				if (msg.scopes.includes('properties')) this.#scheduleRegistryRefresh();
+				if (msg.scopes.includes('directory')) this.#scheduleDirectoryRefresh();
 				return;
 			case 'resumed':
 				this.#resumedMode = msg.mode;

@@ -81,7 +81,7 @@ notion-clone/
 │     ├─ (app)/[ws]/            # +layout.ts: export const ssr = false
 │     │  ├─ [page]/             # page or full-page database
 │     │  ├─ trash/ and settings/
-│     └─ (public)/share/[token]/ # published pages
+│     └─ (public)/share/[token]/ # published pages: rendered by the Worker (server/share/route.ts), not by SvelteKit
 ├─ migrations/d1/               # generated SQL, applied by wrangler d1 migrations
 ├─ wrangler.jsonc
 └─ vite.config.ts               # plugins: [sveltekit(), cloudflareWorker()]
@@ -94,6 +94,7 @@ notion-clone/
 - `/ws/:workspaceId` checks the session, then upgrades into the Workspace Durable Object.
 - `/rooms/:pageId` goes through edytor's `routeDocumentSocket` into the Page Durable Object.
 - `/files/*` streams uploads and downloads to R2 after a permission check.
+- `/share/:token` resolves a public link and answers the published page's HTML (`noindex`; P4 adds the body from `edytor/export`, cached in KV).
 - Everything else returns nothing, so the request falls through to SvelteKit.
 **Bindings**
 | Binding | Type | Purpose | 

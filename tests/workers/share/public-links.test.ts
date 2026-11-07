@@ -1,6 +1,6 @@
 import { beforeAll, describe, expect, test } from 'vitest';
 import { createDirectoryClient, globalClient } from '../../../src/server/db/global.client';
-import { handleShareData } from '../../../src/server/share/route';
+import { handleSharePage } from '../../../src/server/share/route';
 import { reconcilePublicShares, resolveShare } from '../../../src/server/share';
 import { NIGHTLY_CRON, scheduled } from '../../../src/server/scheduled';
 import { createWorld, signUpPerson, verifyEmail, type Person, type TestWorld } from '../auth/helpers';
@@ -204,16 +204,21 @@ describe('resolveShare', () => {
 	});
 });
 
-describe('/share-data/:token', () => {
+describe('/share/:token (the published page, rendered by the Worker)', () => {
 	const call = (token: string, env = world.env, init: RequestInit = {}) =>
-		handleShareData(new Request(`http://localhost:5173/share-data/${token}`, { headers: { 'cf-connecting-ip': '203.0.113.9' }, ...init }), env) as Promise<Response>;
+		handleSharePage(new Request(`http://localhost:5173/share/${token}`, { headers: { 'cf-connecting-ip': '203.0.113.9' }, ...init }), env) as Promise<Response>;
 
-	test('returns the title and icon, noindex, uncached; the visitor is anonymous', async () => {
+	test('answers an HTML document with the title and icon, noindex, uncached; the visitor is anonymous', async () => {
 		const pageId = newPage('Launch plan', '🚀');
 		const grant = await owner().page.grants.set({ pageId, subjectKind: 'public', subjectId: null, level: 'read' });
 		const response = await call(grant.token!);
 		expect(response.status).toBe(200);
-		expect(await response.json()).toEqual({ title: 'Launch plan', icon: '🚀', level: 'read' });
+		expect(response.headers.get('content-type')).toContain('text/html');
+		const html = await response.text();
+		expect(html).toContain('<title>Launch plan · Flarion</title>');
+		expect(html).toContain('<h1>Launch plan</h1>');
+		expect(html).toContain('🚀');
+		expect(html).toContain('<meta name="robots" content="noindex, nofollow">');
 		expect(response.headers.get('x-robots-tag')).toContain('noindex');
 		expect(response.headers.get('cache-control')).toBe('no-store');
 		// The actor the DO saw: a share token, no user id, a guest.
@@ -221,7 +226,26 @@ describe('/share-data/:token', () => {
 		expect((fake().lastPageActor as { userId?: string }).userId).toBeUndefined();
 	});
 
-	test('unknown, malformed and revoked tokens are 404 and still noindex', async () => {
+	test('escapes the title: a page named like markup renders as text', async () => {
+		const pageId = newPage('<img src=x onerror=alert(1)> & "q"', null);
+		const grant = await owner().page.grants.set({ pageId, subjectKind: 'public', subjectId: null, level: 'read' });
+		const html = await (await call(grant.token!)).text();
+		expect(html).not.toContain('<img');
+		expect(html).toContain('&lt;img src=x onerror=alert(1)&gt; &amp; &quot;q&quot;');
+	});
+
+	test('the policy lets images and media load from the files origin, and nothing from anywhere else', async () => {
+		const pageId = newPage();
+		const grant = await owner().page.grants.set({ pageId, subjectKind: 'public', subjectId: null, level: 'read' });
+		const env = { ...world.env, FILES_ORIGIN: 'https://files.flarion.example/' } as unknown as Env;
+		const csp = (await call(grant.token!, env)).headers.get('content-security-policy')!;
+		expect(csp).toContain("default-src 'none'");
+		expect(csp).toContain('img-src data: https://files.flarion.example;');
+		expect(csp).toContain('media-src https://files.flarion.example;');
+		expect(csp).not.toContain("'unsafe-eval'");
+	});
+
+	test('unknown, malformed and revoked tokens are 404 pages and still noindex', async () => {
 		const pageId = newPage();
 		const grant = await owner().page.grants.set({ pageId, subjectKind: 'public', subjectId: null, level: 'read' });
 		await owner().page.grants.revoke({ grantId: grant.id });
@@ -229,6 +253,7 @@ describe('/share-data/:token', () => {
 			const response = await call(token);
 			expect(response.status, token).toBe(404);
 			expect(response.headers.get('x-robots-tag')).toContain('noindex');
+			expect(await response.text()).toContain('not published');
 		}
 	});
 
@@ -246,6 +271,6 @@ describe('/share-data/:token', () => {
 	});
 
 	test('other paths fall through', async () => {
-		expect(await handleShareData(new Request('http://localhost:5173/share-data/'), world.env)).toBeUndefined();
+		expect(await handleSharePage(new Request('http://localhost:5173/share/'), world.env)).toBeUndefined();
 	});
 });

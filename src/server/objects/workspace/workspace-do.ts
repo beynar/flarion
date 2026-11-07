@@ -114,7 +114,7 @@ import {
 	type FilesContext,
 	type PageLevel
 } from './files';
-import { APP_VERSION_HEADER, APP_VERSION_PARAM } from '../../../lib/shared/protocol';
+import { APP_VERSION_HEADER, APP_VERSION_PARAM, registryScopesOf } from '../../../lib/shared/protocol';
 
 type TrashListInput = v.InferOutput<typeof trashListInputSchema>;
 
@@ -368,6 +368,8 @@ export class WorkspaceDO extends DurableObject<Env> {
 					// reconnect: `hello` with its last seq replays or resnapshots.
 					this.#resync(error);
 				}
+				// Definitions held outside any subscription (property registry, teamspace and member directory).
+				this.#api.broadcastRegistry(registryScopesOf(commit.rows.map((row) => row.kind)), commit.seq);
 				if (access.affecting) roomWork.value = { scope: access, changes: this.#access.changedActors() };
 				this.#access.clearDeltas();
 			}
@@ -857,6 +859,20 @@ export class WorkspaceDO extends DurableObject<Env> {
 	 */
 	async pageAccess(actor: AccessActor, pageId: string): Promise<AccessLevel | null> {
 		return this.#access.pageAccess(actor, pageId);
+	}
+
+	/**
+	 * Pushes a page's new lock state to every connected tab that can read the page (the `lock` message). The lock
+	 * itself lives in the page's room; the `page.lock.set` handler calls this once the room has changed.
+	 */
+	async pageLockChanged(pageId: string, state: { locked: boolean; lockedBy: string | null; lockedAt: number | null }): Promise<void> {
+		const message: ServerMessage = { t: 'lock', pageId, locked: state.locked, lockedBy: state.lockedBy, lockedAt: state.lockedAt };
+		await Promise.all(
+			this.#hub.streamSockets().map(async (socketId) => {
+				const socket = this.#socket(socketId);
+				if (socket && (await this.#access.pageAccess(socket.actor, pageId))) this.#send(socketId, message);
+			})
+		);
 	}
 
 	/** Whether `actor` holds `level` on each of the pages: `{ [pageId]: boolean }`. */

@@ -5,6 +5,7 @@
 	import { toast } from 'entasis/toast';
 	import { appState, rpc, setActiveWorkspace } from '#lib/client/rpc.ts';
 	import { refreshSession } from '#lib/client/session.ts';
+	import { pageLocks } from '#lib/components/editor/page-lock.svelte.ts';
 	import { WorkspaceStore, setWorkspaceContext } from '#lib/client/workspace.svelte.ts';
 	import AppShell from '#lib/components/shell/AppShell.svelte';
 
@@ -23,6 +24,9 @@
 			rpc,
 			socketFactory: data.socketFactory,
 			reauth: refreshSession,
+			// Page locks are pushed over the workspace socket (no polling).
+			onLock: (lock) => pageLocks.apply(lock.pageId, lock),
+			onReconnect: () => pageLocks.refreshWatched(),
 			notify: ({ kind, title, description }) =>
 				toast[kind === 'error' ? 'danger' : kind === 'success' ? 'success' : 'info']({ title, description }),
 			// Raised by a refused HTTP call as well as by the socket.
@@ -63,7 +67,7 @@
 		if (section === 'page') {
 			const id = page.params.page ?? '';
 			const entity = store?.page(id);
-			if (!store || !entity) return [{ label: store?.pageStatus(id) === 'error' ? 'Page not found' : 'Loading…', active: true }];
+			if (!store || !entity) return [{ label: store && ['error', 'ready'].includes(store.pageStatus(id)) ? 'Page not found' : 'Loading…', active: true }];
 			const chain = [...store.ancestors(id), entity];
 			return chain.map((entry, index) => ({
 				// An emoji in the label: a string `icon` would stack above it.

@@ -52,6 +52,11 @@ async function newLine(page: Page, text = '') {
 test('an image uploaded by one person renders for the other', async () => {
 	const { ada, bob } = world;
 	await freshPage('Image page');
+	// Bob's browser has not loaded the image yet (no cache): count what the files host serves him.
+	const fromFilesHost: number[] = [];
+	bob.page.on('response', (response) => {
+		if (response.url().startsWith('http://[::1]') && response.url().includes('/files/') && response.url().includes('sig=')) fromFilesHost.push(response.status());
+	});
 	await newLine(ada.page);
 	await ada.page.keyboard.type('/image');
 	await expect(ada.page.getByTestId('slash-menu')).toBeVisible();
@@ -65,10 +70,12 @@ test('an image uploaded by one person renders for the other', async () => {
 	await expect(image).toHaveAttribute('src', new RegExp(`/files/[^?]+\\?ws=${workspaceId}`));
 	await expect.poll(() => image.evaluate((el: HTMLImageElement) => el.complete && el.naturalWidth)).toBe(240);
 
-	// The other person's browser loads the same stable URL: cookie check, then a signed redirect, then the bytes.
+	// The other person's browser loads the same stable URL: cookie check, then a signed redirect to the files
+	// host (the config serves files from `[::1]`, the app is on `localhost`), then the bytes.
 	const bobImage = bob.page.locator(`${EDITOR} figure img`).first();
 	await expect(bobImage).toBeVisible({ timeout: 20_000 });
 	await expect.poll(() => bobImage.evaluate((el: HTMLImageElement) => el.complete && el.naturalWidth), { timeout: 20_000 }).toBe(240);
+	await expect.poll(() => fromFilesHost).toContain(200);
 	await shot(bob.page, 'image-upload');
 });
 
@@ -158,13 +165,16 @@ test('a locked page refuses edits from a person without full access', async () =
 	await freshPage('Locked page');
 	await newLine(ada.page, 'Quiet page');
 	await expect.poll(() => text(bob.page), { timeout: 20_000 }).toContain('Quiet page');
+	// The lock is pushed over the workspace socket: after the page opened, Bob's tab never asks for it again.
+	let bobLockReads = 0;
+	bob.page.on('request', (request) => request.url().includes('/rpc/page/lock/get') && bobLockReads++);
 	await ada.page.getByTestId('page-menu').click();
 	await ada.page.getByRole('menuitem', { name: 'Lock page' }).click();
 	await expect(ada.page.getByTestId('lock-indicator')).toBeVisible();
 	await expect(ada.page.getByTestId('editor-locked')).toContainText('You can still edit');
 
 	// Bob (a member, not full) learns the page is locked and cannot edit it.
-	await expect(bob.page.getByTestId('editor-locked')).toContainText('locked', { timeout: 30_000 });
+	await expect(bob.page.getByTestId('editor-locked')).toContainText('locked', { timeout: 4_000 });
 	await expect(bob.page.getByTestId('editor-locked')).toContainText('Only people with full access');
 	await bob.page.locator(EDITOR).click();
 	await bob.page.keyboard.type('BOB TYPES HERE');
@@ -182,9 +192,12 @@ test('a locked page refuses edits from a person without full access', async () =
 	// Unlocking gives Bob his page back.
 	await ada.page.getByTestId('page-menu').click();
 	await ada.page.getByRole('menuitem', { name: 'Unlock page' }).click();
-	await expect(bob.page.getByTestId('editor-locked')).toHaveCount(0, { timeout: 30_000 });
+	await expect(bob.page.getByTestId('editor-locked')).toHaveCount(0, { timeout: 4_000 });
 	await bob.page.locator(EDITOR).click();
 	await bob.page.keyboard.press('Control+End');
 	await bob.page.keyboard.type(' BOB IS BACK');
 	await expect.poll(() => text(ada.page), { timeout: 20_000 }).toContain('BOB IS BACK');
+	// No polling: the old 8 s refresh would have read the lock again by now.
+	await bob.page.waitForTimeout(9_000);
+	expect(bobLockReads).toBe(0);
 });

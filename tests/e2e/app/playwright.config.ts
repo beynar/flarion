@@ -7,10 +7,13 @@
  * version wants is not installed.
  */
 import { defineConfig } from '@playwright/test';
+import { chromiumLaunchOptions } from '../chromium';
 
 const port = Number(process.env.E2E_PORT ?? 5473);
 
 export default defineConfig({
+	// Per suite and port: concurrent runs (distinct ports) must not clean each other's traces and screenshots.
+	outputDir: `../../../test-results/app-${port}`,
 	testDir: '.',
 	testMatch: '*.spec.ts',
 	timeout: 240_000,
@@ -25,12 +28,16 @@ export default defineConfig({
 		actionTimeout: 15_000,
 		trace: 'retain-on-failure',
 		screenshot: 'only-on-failure',
-		launchOptions: process.env.E2E_CHROMIUM ? { executablePath: process.env.E2E_CHROMIUM } : {}
+		launchOptions: chromiumLaunchOptions()
 	},
 	webServer: {
+		// Playwright runs the command from the config's directory; `vite dev` must start at the repo root.
+		cwd: new URL('../../../', import.meta.url).pathname,
 		command: `pnpm exec vite dev --port ${port} --strictPort`,
 		url: `http://localhost:${port}/healthz`,
 		reuseExistingServer: true,
+		// User files come from another host than the app (FILES_ORIGIN; the dev server listens on localhost, so the other host is the IPv6 loopback), so images and covers prove the signed redirect.
+		env: { E2E_FILES_HOST: process.env.E2E_FILES_HOST ?? '[::1]' },
 		timeout: 180_000
 	}
 });

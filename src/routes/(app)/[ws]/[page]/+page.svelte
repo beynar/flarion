@@ -16,6 +16,9 @@
 	const pageId = $derived(route.params.page ?? '');
 	const entity = $derived(store.page(pageId));
 	const status = $derived(store.pageStatus(pageId));
+	// The page's subscription answered and has no row for it: it does not exist, was trashed, or access was withdrawn
+	// (a revoked grant removes the row live). Without this the skeleton would stay forever.
+	const unavailable = $derived(!entity && (status === 'error' || status === 'ready'));
 	const backlinks = $derived(store.backlinks(pageId));
 
 	// Subscribe to the page and its backlinks, publish presence, and unfold the tree to it.
@@ -51,7 +54,7 @@
 			.map((p) => ({ id: p.id, title: p.title, icon: p.icon }));
 </script>
 
-<svelte:head><title>{entity ? entity.title || 'Untitled' : status === 'error' ? 'Not found' : 'Flarion'} · Flarion</title></svelte:head>
+<svelte:head><title>{entity ? entity.title || 'Untitled' : unavailable ? 'Not found' : 'Flarion'} · Flarion</title></svelte:head>
 
 {#if entity}
 	{#key pageId}
@@ -79,6 +82,7 @@
 				getRoomToken={() => rpc.page.roomToken({ id: pageId })}
 				user={me}
 				{readonly}
+				access={entity?.access}
 				onSubpage={async ({ parentId, title }) => ({ id: await store.createPage({ parentId, title }) })}
 				resolvePage={(id) => {
 					const p = store.resolvePage(id);
@@ -93,8 +97,8 @@
 			/>
 		{/if}
 	{/key}
-{:else if status === 'error'}
-	<div class="mx-auto mt-24 flex max-w-[420px] flex-col items-center gap-2 px-6 text-center">
+{:else if unavailable}
+	<div class="mx-auto mt-24 flex max-w-[420px] flex-col items-center gap-2 px-6 text-center" role="alert" data-testid="page-unavailable">
 		<div class="text-5xl">🔎</div>
 		<h1 class="text-xl font-semibold">This page doesn't exist</h1>
 		<p class="text-sm text-[color:var(--app-text-secondary)]">

@@ -15,6 +15,7 @@
 import {
 	decodeClientMessage,
 	encodeServerMessage,
+	registryScopesOf,
 	type BacklinkRow,
 	type ClientMessage,
 	type PageRow,
@@ -303,6 +304,9 @@ export class MockServer {
 			const prev = before.get(s) ?? new Map();
 			this.schedule(() => s.deliverCommit(seq, prev), this.#opts.deliveryDelayMs);
 		}
+		// As the real object does: a definition change tells every tab to read the registry again.
+		const scopes = registryScopesOf(ops.map((op) => op.op));
+		if (scopes.length) this.schedule(() => this.inject({ t: 'registry', scopes, seq }), this.#opts.deliveryDelayMs);
 		return seq;
 	}
 

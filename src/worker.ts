@@ -10,7 +10,7 @@ import { handlePublicApi } from './server/http/public-api-route';
 import { handleWorkspaceSocket } from './server/http/workspace-socket-route';
 import { handleRoom } from './server/http/room-route';
 import { handleFiles, isFilesHost } from './server/http/files-route';
-import { handleShareData } from './server/share/route';
+import { handleSharePage } from './server/share/route';
 
 type Env = App.Platform['env'];
 
@@ -26,7 +26,7 @@ export const fetch: WorkerFetch<Env> = async (request, env, ctx) => {
 	if (path.startsWith('/ws/')) return handleWorkspaceSocket(request, env, ctx);
 	if (path.startsWith('/rooms/')) return handleRoom(request, env, ctx);
 	if (path.startsWith('/files/')) return handleFiles(request, env, ctx);
-	if (path.startsWith('/share-data/')) return handleShareData(request, env);
+	if (path.startsWith('/share/')) return handleSharePage(request, env);
 	// Returning void falls through to SvelteKit.
 };
 

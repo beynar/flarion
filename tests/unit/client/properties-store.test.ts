@@ -89,3 +89,42 @@ describe('property writes through the store (what the panel calls)', () => {
 		a.store.dispose();
 	});
 });
+
+describe('pushes that keep definitions fresh without polling', () => {
+	it('a registry frame makes the store read the property registry again (another tab renamed an option)', async () => {
+		const { store, server } = setup();
+		await ready(store);
+		await store.createProperty(newPropertyDef('select', 'Kind', 'prop_kind'));
+		// Another client changes the registry behind this store's back, then the server pushes the notice.
+		server.properties = server.properties.map((p) => (p.id === 'prop_kind' ? { ...p, name: 'Category' } : p));
+		expect(store.properties.find((p) => p.id === 'prop_kind')?.name).toBe('Kind');
+		server.inject({ t: 'registry', scopes: ['properties'], seq: server.seq });
+		await vi.waitFor(() => expect(store.properties.find((p) => p.id === 'prop_kind')?.name).toBe('Category'));
+		store.dispose();
+	});
+
+	it('a registry frame for the directory reads teamspaces and members again', async () => {
+		const { store, server } = setup();
+		await ready(store);
+		await vi.waitFor(() => expect(store.teamspaces.length).toBeGreaterThan(0));
+		const count = store.teamspaces.length;
+		server.teamspaces = server.teamspaces.map((t, i) => (i === 0 ? { ...t, name: 'Renamed elsewhere' } : t));
+		server.inject({ t: 'registry', scopes: ['directory'], seq: server.seq });
+		await vi.waitFor(() => expect(store.teamspaces.some((t) => t.name === 'Renamed elsewhere')).toBe(true));
+		expect(store.teamspaces).toHaveLength(count);
+		store.dispose();
+	});
+
+	it('a lock frame reaches the page lock cache, and a reconnect asks to read the locks again', async () => {
+		const locks: unknown[] = [];
+		const reconnects = vi.fn();
+		const { store, server } = setup({ store: { onLock: (lock) => locks.push(lock), onReconnect: reconnects } });
+		await ready(store);
+		server.inject({ t: 'lock', pageId: 'getting-started', locked: true, lockedBy: 'u_ada', lockedAt: 5 });
+		await vi.waitFor(() => expect(locks).toEqual([{ pageId: 'getting-started', locked: true, lockedBy: 'u_ada', lockedAt: 5 }]));
+		expect(reconnects).not.toHaveBeenCalled(); // the first welcome is not a reconnect
+		server.dropConnections();
+		await vi.waitFor(() => expect(reconnects).toHaveBeenCalledTimes(1), { timeout: 3000 });
+		store.dispose();
+	});
+});

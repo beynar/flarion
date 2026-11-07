@@ -2,6 +2,7 @@
 	import { tick, untrack } from 'svelte';
 	import { SvelteSet } from 'svelte/reactivity';
 	import { rpc } from '#lib/client/rpc.ts';
+	import { fileUrl, uploadToPage } from '#lib/components/editor/uploads.ts';
 	import type { PageEntity, WorkspaceStore } from '#lib/client/workspace.svelte.ts';
 	import type { PropValue, PropertyDef, PropertyType } from '#lib/shared/property-types.ts';
 	import AddProperty from './AddProperty.svelte';
@@ -119,22 +120,22 @@
 			fileMiss.add(id);
 			void Promise.resolve()
 				.then(() => rpc.files.get({ fileId: id }))
-				.then((info) => (fileNames[id] = { name: info.name, url: info.url }))
+				.then((info) => (fileNames[id] = { name: info.name, url: fileUrl(store.workspace.id, id) }))
 				.catch(() => undefined);
 		}
 	});
 
+	/**
+	 * The files property's upload: the editor's flow (`files.begin`, the bytes, `files.complete`; multipart for a
+	 * large file, see components/editor/uploads.ts). Every file is stored under this page, and the chip links to the
+	 * stable, permission-checked URL rather than to the short-lived signed one.
+	 */
 	async function upload(files: File[]): Promise<string[]> {
 		const ids: string[] = [];
 		for (const file of files) {
-			const type = file.type || 'application/octet-stream';
-			const begin = await rpc.files.begin({ pageId: page.id, name: file.name, size: file.size, type });
-			if (begin.multipart) throw new Error('This file is too large to upload here yet.');
-			const res = await fetch(begin.uploadUrl, { method: 'PUT', body: file, headers: { 'content-type': type }, credentials: 'include' });
-			if (!res.ok) throw new Error(`Upload failed (${res.status})`);
-			const info = await rpc.files.complete({ fileId: begin.fileId });
-			fileNames[info.id] = { name: info.name, url: info.url };
-			ids.push(info.id);
+			const { fileId } = await uploadToPage(file, { workspaceId: store.workspace.id, pageId: page.id, rpc });
+			fileNames[fileId] = { name: file.name, url: fileUrl(store.workspace.id, fileId) };
+			ids.push(fileId);
 		}
 		return ids;
 	}

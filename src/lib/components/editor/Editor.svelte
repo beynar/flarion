@@ -27,6 +27,7 @@
 		getRoomToken,
 		user,
 		readonly = false,
+		access,
 		onSubpage,
 		resolvePage,
 		searchPages,
@@ -46,6 +47,13 @@
 		getRoomToken: () => Promise<RoomToken>;
 		user: { id: string; name: string; color?: string };
 		readonly?: boolean;
+		/**
+		 * The level the page's permissions give this person right now (the live tree row's `access`). The room's
+		 * access comes from the token in hand, which only narrows; when a grant raises the level, the token is
+		 * too narrow, so a fresh one is fetched and the view remounts with it (the room redialed already, with
+		 * the old token, and would hand back the old access).
+		 */
+		access?: 'read' | 'comment' | 'update' | 'full';
 		onSubpage?: (input: { parentId: string; title?: string }) => Promise<{ id: string }>;
 		resolvePage?: (id: string) => { title: string; icon: string | null } | undefined;
 		searchPages?: PagesSearch;
@@ -89,6 +97,19 @@
 			}
 		);
 		return () => (current = false);
+	});
+
+	// A raised permission needs a new token (see `access`): once per level, so a server that keeps answering
+	// narrower than the tree cannot make this loop.
+	const ROOM_RANK = { read: 0, comment: 1, write: 2 } as const;
+	let upgradedFor: string | undefined;
+	$effect(() => {
+		if (!access || !initial || failure) return;
+		const wanted = access === 'full' || access === 'update' ? 'write' : access;
+		if (ROOM_RANK[wanted] > ROOM_RANK[initial.access] && upgradedFor !== wanted) {
+			upgradedFor = wanted;
+			attempt++;
+		}
 	});
 
 	const refused = (refusal: SyncRefusedError) => {

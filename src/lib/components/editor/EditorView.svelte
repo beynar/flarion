@@ -9,6 +9,7 @@
 		type Block,
 		Edytor,
 		SyncRefusedError,
+		commentsController,
 		createCommentsClient,
 		type EdytorInstance,
 		type Uploader
@@ -196,6 +197,39 @@
 		marqueeContainer: '[data-flarion-editor]'
 	}));
 
+	// Dev server only: the editor instance for the browser tests (`window.__edytor`), like the store's `__flarion`.
+	$effect(() => {
+		if (import.meta.env.DEV && edytor) (window as unknown as { __edytor?: unknown }).__edytor = edytor;
+	});
+
+	/**
+	 * Someone who may comment but not edit has a read-only editor, and edytor hides its selection toolbar (and
+	 * ignores the shortcut) in a read-only view. A small "Comment" button over the selection starts the thread
+	 * instead: the room writes the anchor for them (`document.access === 'comment'`).
+	 */
+	const commentOnly = $derived(readonly && initial.access === 'comment');
+	let commentAt = $state<{ top: number; left: number } | null>(null);
+	let view = $state<HTMLElement>();
+	$effect(() => {
+		if (!commentOnly || !view) return;
+		const root = view;
+		const track = () => {
+			const selection = document.getSelection();
+			const inside = selection && !selection.isCollapsed && selection.rangeCount > 0 && root.querySelector('[data-edytor]')?.contains(selection.anchorNode);
+			if (!inside) return (commentAt = null);
+			const rect = selection.getRangeAt(0).getBoundingClientRect();
+			commentAt = { top: Math.max(8, rect.top - 40), left: Math.max(8, rect.left) };
+		};
+		document.addEventListener('selectionchange', track);
+		return () => {
+			document.removeEventListener('selectionchange', track);
+			commentAt = null;
+		};
+	});
+	const startComment = () => {
+		if (edytor && commentsController(edytor as never)?.start()) commentAt = null;
+	};
+
 	/** Clicks on `[[` page links stay in the app (a full navigation would reload it); modified clicks are the browser's. */
 	const onclickcapture = (event: MouseEvent) => {
 		if (!onNavigate || event.defaultPrevented || event.button !== 0) return;
@@ -209,7 +243,19 @@
 </script>
 
 <!-- svelte-ignore a11y_no_static_element_interactions -->
-<div class="flarion-editor-view" {onclickcapture}>
+<div class="flarion-editor-view" {onclickcapture} bind:this={view}>
+	{#if commentOnly && commentAt}
+		<button
+			type="button"
+			class="flarion-comment-button"
+			style="top: {commentAt.top}px; left: {commentAt.left}px"
+			data-testid="comment-selection"
+			onmousedown={(event) => event.preventDefault()}
+			onclick={startComment}
+		>
+			💬 Comment
+		</button>
+	{/if}
 	<Edytor
 		bind:edytor
 		{plugins}
@@ -224,3 +270,22 @@
 		onSyncRefused={onRefused}
 	/>
 </div>
+
+<style>
+	.flarion-comment-button {
+		position: fixed;
+		z-index: 30;
+		height: var(--app-button-height-small, 28px);
+		padding: 0 10px;
+		border: 1px solid var(--app-hairline-strong);
+		border-radius: var(--app-radius-control);
+		background: var(--app-page);
+		color: var(--app-text);
+		box-shadow: var(--app-shadow-menu);
+		font-size: var(--app-font-size-small, 13px);
+		cursor: pointer;
+	}
+	.flarion-comment-button:hover {
+		background: var(--app-hover);
+	}
+</style>

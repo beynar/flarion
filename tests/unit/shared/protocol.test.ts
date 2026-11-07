@@ -69,6 +69,8 @@ const server: ServerMessage[] = [
 	{ t: 'head', seq: 43 },
 	{ t: 'presence', entries: [{ pageId: 'p1', users: [{ userId: 'u2', name: 'Ada', color: '#fa0' }] }, { pageId: 'p2', users: [] }] },
 	{ t: 'notification', notification: { id: 'n1', kind: 'mention', pageId: 'p1', actorId: 'u2', text: 'Ada mentioned you', createdAt: '2026-11-07T10:00:00Z', readAt: null } },
+	{ t: 'registry', scopes: ['properties', 'directory'], seq: 44 },
+	{ t: 'lock', pageId: 'p1', locked: true, lockedBy: 'u2', lockedAt: 1762512000000 },
 	{ t: 'error', code: 'bad_subscription', message: 'No such collection', id: 's2' },
 	{ t: 'pong' }
 ];

@@ -9,6 +9,7 @@ import {
 	MAX_SUBSCRIPTIONS_PER_SOCKET,
 	PROTOCOL_VERSION,
 	type PresenceUser,
+	type RegistryScope,
 	type ServerMessage,
 	type Subscription
 } from '../../../lib/shared/protocol';
@@ -147,6 +148,13 @@ export class WorkspaceSocketApi implements SocketApi {
 	broadcastPresence(pageIds: readonly string[]): void {
 		if (pageIds.length === 0) return;
 		const message: ServerMessage = { t: 'presence', entries: this.#d.presence.entries(pageIds) };
+		for (const socketId of this.#d.streams()) this.#d.send(socketId, message);
+	}
+
+	/** Tells every connected tab that workspace definitions changed (see the `registry` message). */
+	broadcastRegistry(scopes: readonly RegistryScope[], seq: number): void {
+		if (scopes.length === 0) return;
+		const message: ServerMessage = { t: 'registry', scopes: [...scopes], seq };
 		for (const socketId of this.#d.streams()) this.#d.send(socketId, message);
 	}
 

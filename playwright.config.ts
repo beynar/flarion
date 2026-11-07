@@ -1,17 +1,21 @@
 import { defineConfig, devices } from '@playwright/test';
+import { chromiumLaunchOptions } from './tests/e2e/chromium';
 
 /**
  * End-to-end tests run against `pnpm dev` (vite dev + workerd). The server listens on `E2E_PORT` (default
- * 5173); vite.config.ts derives APP_ORIGIN from `--port`, so any free port works, e.g.
+ * 5373, so a developer's own `pnpm dev` on 5173 is never reused); vite.config.ts derives APP_ORIGIN and an isolated
+ * worker name and local state from `--port`, so any free port works, e.g.
  *   E2E_PORT=5373 pnpm exec playwright test
- * `E2E_CHROMIUM` points at a Chromium build when the one this Playwright version wants is not installed.
+ * The Chromium is found by tests/e2e/chromium.ts (`E2E_CHROMIUM` overrides it).
  * Passkeys use Chrome's virtual WebAuthn authenticator (CDP), see tests/e2e/webauthn.ts.
  * The editor specs have their own config (tests/e2e/editor/playwright.config.ts).
  */
-const port = Number(process.env.E2E_PORT ?? 5173);
+const port = Number(process.env.E2E_PORT ?? 5373);
 const origin = `http://localhost:${port}`;
 
 export default defineConfig({
+	// Per suite and port: concurrent runs (distinct ports) must not clean each other's traces and screenshots.
+	outputDir: `test-results/root-${port}`,
 	testDir: './tests/e2e',
 	testIgnore: ['**/editor/**', '**/app/**'], // the Editor and App UI tracks have their own configs (tests/e2e/{editor,app}/playwright.config.ts)
 	globalSetup: './tests/e2e/global-setup.ts',
@@ -31,11 +35,13 @@ export default defineConfig({
 			name: 'chromium',
 			use: {
 				...devices['Desktop Chrome'],
-				launchOptions: process.env.E2E_CHROMIUM ? { executablePath: process.env.E2E_CHROMIUM } : {}
+				launchOptions: chromiumLaunchOptions()
 			}
 		}
 	],
 	webServer: {
+		// Playwright runs the command from the config's directory; `vite dev` must start at the repo root.
+		cwd: new URL('./', import.meta.url).pathname,
 		command: `pnpm exec vite dev --port ${port} --strictPort`,
 		url: `${origin}/healthz`,
 		reuseExistingServer: !process.env.CI,

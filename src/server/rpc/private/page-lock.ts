@@ -32,6 +32,8 @@ export const pageLockHandlers = {
 		if (refused) {
 			throw new ORPCError('FORBIDDEN', { message: 'Only the person who locked this page, or someone with full access, can unlock it' });
 		}
+		// Every open tab that can read the page learns the new state at once (no polling).
+		await context.workspace.pageLockChanged(input.id, { locked: state.locked, lockedBy: state.lockedBy, lockedAt: state.lockedAt });
 		return { ...state, bypass: level === 'full' };
 	})
 };

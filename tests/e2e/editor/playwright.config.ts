@@ -7,10 +7,13 @@
  * `E2E_CHROMIUM` points at a Chromium build when the one this Playwright version wants is not installed.
  */
 import { defineConfig } from '@playwright/test';
+import { chromiumLaunchOptions } from '../chromium';
 
 const port = Number(process.env.E2E_PORT ?? 5273);
 
 export default defineConfig({
+	// Per suite and port: concurrent runs (distinct ports) must not clean each other's traces and screenshots.
+	outputDir: `../../../test-results/editor-${port}`,
 	testDir: '.',
 	testMatch: '*.spec.ts',
 	timeout: 90_000,
@@ -20,12 +23,16 @@ export default defineConfig({
 	use: {
 		baseURL: `http://localhost:${port}`,
 		viewport: { width: 1280, height: 900 },
-		launchOptions: process.env.E2E_CHROMIUM ? { executablePath: process.env.E2E_CHROMIUM } : {}
+		launchOptions: chromiumLaunchOptions()
 	},
 	webServer: {
+		// Playwright runs the command from the config's directory; `vite dev` must start at the repo root.
+		cwd: new URL('../../../', import.meta.url).pathname,
 		command: `pnpm exec vite dev --port ${port} --strictPort`,
 		url: `http://localhost:${port}/healthz`,
 		reuseExistingServer: true,
+		// User files come from another host than the app (FILES_ORIGIN; the dev server listens on localhost, so the other host is the IPv6 loopback), so images and covers prove the signed redirect.
+		env: { E2E_FILES_HOST: process.env.E2E_FILES_HOST ?? '[::1]' },
 		timeout: 120_000
 	}
 });

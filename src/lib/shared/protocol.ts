@@ -297,6 +297,19 @@ export type ClientMessageType = ClientMessage['t'];
 
 // ───────────────────────────── server -> client ─────────────────────────────
 
+export const REGISTRY_SCOPES = ['properties', 'directory'] as const;
+export type RegistryScope = (typeof REGISTRY_SCOPES)[number];
+
+/** Which definition scopes a commit's change kinds touch (empty for ordinary page and value edits). */
+export function registryScopesOf(kinds: Iterable<string>): RegistryScope[] {
+	const scopes = new Set<RegistryScope>();
+	for (const kind of kinds) {
+		if (/^(create|update|delete)Property$/.test(kind)) scopes.add('properties');
+		else if (kind.startsWith('teamspace.') || kind === 'archiveTeamspace' || kind === 'member.sync') scopes.add('directory');
+	}
+	return REGISTRY_SCOPES.filter((scope) => scopes.has(scope));
+}
+
 const snapshotBase = { t: v.literal('snapshot'), id: subId, total, seq: seqNum };
 
 export const serverMessageSchema = v.variant('t', [
@@ -340,6 +353,26 @@ export const serverMessageSchema = v.variant('t', [
 	/** Each entry replaces the list of who is on that page; an empty list means nobody. */
 	v.object({ t: v.literal('presence'), entries: v.array(presenceEntrySchema) }),
 	v.object({ t: v.literal('notification'), notification: notificationSchema }),
+	/**
+	 * A commit changed workspace-level definitions that clients hold outside any subscription: `properties` is
+	 * the property registry (a property or an option was created, renamed or deleted), `directory` is the member
+	 * and teamspace directory (a teamspace, its membership or a workspace member changed). The client fetches
+	 * the lists again (`property.list`, `workspace.members.list`, `workspace.teamspaces.list`); the frame carries
+	 * no data because each actor reads what they may see. `seq` is the commit's.
+	 */
+	v.object({ t: v.literal('registry'), scopes: v.pipe(v.array(v.picklist(REGISTRY_SCOPES)), v.minLength(1)), seq: seqNum }),
+	/**
+	 * A page's lock changed (`page.lock.set`). Sent to every connected tab whose person can read the page: the
+	 * lock lives in the page's room, and this saves the polling. `bypass` (full access) is the receiver's own and
+	 * is not carried; the client keeps the one it read with `page.lock.get`.
+	 */
+	v.object({
+		t: v.literal('lock'),
+		pageId: idSchema,
+		locked: v.boolean(),
+		lockedBy: v.nullable(v.string()),
+		lockedAt: v.nullable(v.number())
+	}),
 	v.object({
 		t: v.literal('error'),
 		code: v.picklist(['bad_subscription', 'forbidden', 'not_found', 'too_many_subscriptions', 'internal']),

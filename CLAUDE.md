@@ -68,11 +68,9 @@ Rules for parallel work:
 5. Report honestly: what works, what is stubbed, what deviates from the plan and why.
 
 ## Integration notes (P1 gate)
-- **Gate e2e**: `tests/e2e/p1-gate.spec.ts` (two contexts, virtual authenticators, real dev server, no mocks). Run
-  `E2E_PORT=5373 pnpm exec playwright test` (any free port; `vite.config.ts` derives `APP_ORIGIN` and a per-port
-  `wrangler.dev-<port>.jsonc` from `--port`). `E2E_CHROMIUM` points at a Chromium build when needed. Editor specs:
-  `pnpm exec playwright test -c tests/e2e/editor/playwright.config.ts`. The dev database persists between runs
-  (emails and slugs must be unique per run). Do not edit `src/` while an e2e run is going: HMR reloads the app.
+- **Gate e2e**: `tests/e2e/p1-gate.spec.ts` (two contexts, virtual authenticators, real dev server, no mocks). The dev
+  database persists between runs (emails and slugs must be unique per run). Do not edit `src/` while an e2e run is
+  going: HMR reloads the app. Commands are in "E2E suites" below.
 - **Dev secrets**: copy `.dev.vars.example` to `.dev.vars` (gitignored): `ROOM_TOKEN_KEY`, `BETTER_AUTH_SECRET`,
   `API_TOKEN_PEPPER`, `TURNSTILE_SECRET` (Cloudflare's always-pass test secret).
 - **Build version**: `vite build` embeds package.json's `version` as `VITE_APP_VERSION`; every client sends it (`x-app-version`,
@@ -90,3 +88,52 @@ Rules for parallel work:
 - **Workspace rename**: `workspace.settings` writes D1 and a `rename` outbox job; the Workspace DO keeps the name in `meta`
   (`WorkspaceDO.rename`). Clients read the name from `rpc.me` (no live push yet).
 - **Tree rows carry `createdBy`**: the sidebar's Private/Shared sections use it (`WorkspaceStore.privateRoots/sharedRoots`).
+
+## E2E suites (P2 integration)
+Every suite runs against a real `vite dev` (Worker, Durable Objects, D1, R2, passkeys; no mocks) that Playwright starts
+itself on `E2E_PORT` and reuses when one is already there. Three Playwright configs, each with its own default port:
+
+| Suite | Command |
+| --- | --- |
+| P1 gate, P2 gate, auth, passkeys | `E2E_PORT=5373 pnpm exec playwright test` (or one file: `... tests/e2e/p2-gate.spec.ts`) |
+| Editor | `E2E_PORT=5273 pnpm exec playwright test -c tests/e2e/editor/playwright.config.ts` |
+| App UI (sidebar, teamspaces, share, properties, pushes, files) | `E2E_PORT=5473 pnpm exec playwright test -c tests/e2e/app/playwright.config.ts` |
+
+- **Concurrent servers are safe on distinct ports.** `vite.config.ts` gives a server on a non-default port its own
+  worker name and local resource ids (`flarion-<port>`, D1/KV/R2/queue/workflow suffixes, see `isolateDevState`):
+  Distilled's machine-wide registry (`~/.local/state/alchemy/registry/<script name>.json`) and its state under
+  `.sveltekit-cloudflare-worker/local/<name or id>` are keyed by those names, so two `flarion` workers used to overwrite
+  each other's registry entry and share SQLite files. Port 5173 (`pnpm dev`) keeps the plain names and the old state.
+  Delete `.sveltekit-cloudflare-worker/local/*-<port>*` to reset one port's data.
+- **Chromium**: Playwright's pinned build is used when cached; otherwise `tests/e2e/chromium.ts` picks the newest
+  headless shell or Chromium under `~/Library/Caches/ms-playwright` (`PLAYWRIGHT_BROWSERS_PATH` is honoured).
+  `E2E_CHROMIUM=/path/to/chrome-headless-shell` overrides it. Nothing to set up on a normal machine.
+- The editor and app configs set `cwd` to the repo root for the `vite dev` command (Playwright runs it from the config's
+  folder) and `E2E_FILES_HOST=[::1]`: user files are served from another host than the app (`FILES_ORIGIN`), so every
+  image, cover and file download in those suites goes through the permission check and the signed redirect. The dev
+  server listens on `localhost` (IPv6 loopback), hence `[::1]` rather than `127.0.0.1`.
+- In dev the page code exposes `window.__flarion` (the workspace store) and `window.__edytor` (the open editor).
+- Screenshots: `docs/screens/p1/gate-*.png`, `docs/screens/p2/{gate,app,editor}-*.png`. Run the suites one at a time
+  when you only need a pass/fail; they are parallel-safe, not CPU-free.
+
+## Integration conventions learned in P2
+- **Definition pushes** (`protocol.ts`): the Workspace DO sends every connected tab `{ t: 'registry', scopes, seq }` after a
+  commit that changed property definitions (`properties`) or teamspaces, their members or workspace members
+  (`directory`) (`registryScopesOf`); the store refetches `property.list` / `members.list` / `teamspaces.list`. A
+  reconnect refetches too (the change log replays pages and values, not definitions). `{ t: 'lock', pageId, ... }` is sent
+  when `page.lock.set` changes a lock, to the tabs that can read the page; `pageLocks` (`page-lock.svelte.ts`) applies
+  it. There is no polling of either. New kinds of workspace-level data that live outside a subscription should
+  join `registryScopesOf` instead of adding a timer.
+- **Published pages** (`/share/:token`) are rendered by the Worker (`src/server/share/route.ts`, called from
+  `src/worker.ts`), not SvelteKit: a Worker cannot reliably fetch its own hostname and SvelteKit server code must not call
+  Durable Objects. P4 passes the `edytor/export` HTML to `renderSharedPage(page, bodyHtml)`. The response carries its own
+  CSP; `img-src` and `media-src` name `env.FILES_ORIGIN`. **Any CSP added to the app (the plan's per-request nonce)
+  must allow `FILES_ORIGIN` in `img-src`, `media-src` and `connect-src`**; the app sets none today.
+- **Room tokens only narrow.** `resolveRoomAccess` returns `min(token claim, current level)`, so a redial after a grant was
+  raised still gets the old level. `Editor.svelte` therefore takes the live page `access` and fetches a fresh token (the
+  view remounts) when the tree says more than the token does. A page whose subscription answers with no row shows
+  "This page doesn't exist" (`data-testid="page-unavailable"`), also after a revoked grant.
+- **Comment-only people** get a read-only editor, and edytor hides its selection toolbar there: `EditorView.svelte` shows
+  a "Comment" button over the selection (`data-testid="comment-selection"`).
+- The files property uploads with the editor's `uploadToPage` (multipart included) and links its chips to the stable
+  `/files/<id>?ws=` URL, not to a short-lived signed one.

@@ -3,7 +3,7 @@ import { env } from 'cloudflare:test';
 import { beforeAll, describe, expect, test } from 'vitest';
 import { firstLink } from '../../../src/server/mail';
 import { resolveShare } from '../../../src/server/share';
-import { handleShareData } from '../../../src/server/share/route';
+import { handleSharePage } from '../../../src/server/share/route';
 import { clearDevMails, createWorld, mails, signUpPerson, verifyEmail, type Person, type TestWorld } from '../auth/helpers';
 
 let world: TestWorld;
@@ -69,15 +69,18 @@ describe('a public link', () => {
 		expect(grant.token).toBeTruthy();
 		expect(await resolveShare(world.env, grant.token!)).toEqual({ workspaceId, pageId: pageA, level: 'read' });
 
-		const response = (await handleShareData(new Request(`http://localhost:5173/share-data/${grant.token}`), world.env)) as Response;
+		const response = (await handleSharePage(new Request(`http://localhost:5173/share/${grant.token}`), world.env)) as Response;
 		expect(response.status).toBe(200);
 		expect(response.headers.get('x-robots-tag')).toContain('noindex');
-		expect(await response.json()).toMatchObject({ title: 'Shared page', icon: '🤝', level: 'read' });
+		const html = await response.text();
+		expect(html).toContain('<h1>Shared page</h1>');
+		expect(html).toContain('🤝');
+		expect(html).toContain('<meta name="robots" content="noindex, nofollow">');
 
 		await owner().page.grants.revoke({ grantId: grant.id });
 		expect(await resolveShare(world.env, grant.token!)).toBeNull();
 		expect(await doStub().grantByToken(grant.token!)).toBeNull();
-		const gone = (await handleShareData(new Request(`http://localhost:5173/share-data/${grant.token}`), world.env)) as Response;
+		const gone = (await handleSharePage(new Request(`http://localhost:5173/share/${grant.token}`), world.env)) as Response;
 		expect(gone.status).toBe(404);
 	});
 
