@@ -1,7 +1,7 @@
 import type { WorkerScheduled } from 'sveltekit-cloudflare-worker';
 import { drainOutbox, pruneOutbox, reconcileMemberships } from './auth/outbox';
 
-/** "0 3 * * *": daily purge + nightly reconcile/backups. "0 4 * * 0": weekly upload sweep. */
+/** "0 3 * * *": daily purge + nightly reconcile/backups. "0 4 * * SUN": weekly upload sweep. */
 export const NIGHTLY_CRON = '0 3 * * *';
 
 type Env = App.Platform['env'];

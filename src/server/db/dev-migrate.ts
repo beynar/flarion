@@ -4,7 +4,9 @@
  * in wrangler's own `d1_migrations` table, so the two never apply the same file twice. Staging and
  * production are migrated by `wrangler d1 migrations apply` (see scripts/deploy.sh) and never run this.
  */
-const migrationFiles = import.meta.glob('/migrations/d1/*.sql', { query: '?raw', import: 'default' }) as Record<
+// `import.meta.glob` exists only when Vite transforms this module (dev). The production Worker
+// bundle (esbuild) leaves the call untransformed, so guard it: deployed envs never run this path.
+const migrationFiles = (typeof import.meta.glob === 'function' ? import.meta.glob('/migrations/d1/*.sql', { query: '?raw', import: 'default' }) : {}) as Record<
 	string,
 	() => Promise<string>
 >;

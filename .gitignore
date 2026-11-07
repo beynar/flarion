@@ -13,3 +13,4 @@ playwright-report
 wrangler.dev.jsonc
 wrangler.dev-*.jsonc
 .sveltekit-cloudflare-worker
+.secrets/

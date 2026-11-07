@@ -22,7 +22,7 @@ describe('nightly cron', () => {
 
 	test('other crons leave identity alone', async () => {
 		const world = createWorld();
-		await scheduled({ cron: '0 4 * * 0', scheduledTime: Date.now(), noRetry() {} } as ScheduledController, world.env, world.ctx as never);
+		await scheduled({ cron: '0 4 * * SUN', scheduledTime: Date.now(), noRetry() {} } as ScheduledController, world.env, world.ctx as never);
 		await world.settle();
 		expect(world.workspaces.inits).toHaveLength(0);
 	});
