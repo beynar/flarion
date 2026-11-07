@@ -210,7 +210,7 @@ describe('page snapshots and indexing jobs', () => {
 			});
 		await vi.waitFor(async () => expect(await jobs()).toHaveLength(1), { timeout: 15_000, interval: 100 });
 		const [job] = await jobs();
-		expect(job).toEqual({ workspaceId: ws, pageId: page, version: expect.any(Number) });
+		expect(job).toEqual({ type: 'index-page', workspaceId: ws, pageId: page, version: expect.any(Number) });
 		expect(job.version).toBe(await stub.lastUpdated());
 		ada.close();
 	});
@@ -229,8 +229,8 @@ describe('page snapshots and indexing jobs', () => {
 		expect(await enqueueIndexJob(queue, kv, identity, 10)).toBe(false); // a retried save
 		expect(await enqueueIndexJob(queue, kv, identity, 11)).toBe(true);
 		expect(sent).toEqual([
-			{ workspaceId: 'w', pageId: 'p', version: 10 },
-			{ workspaceId: 'w', pageId: 'p', version: 11 }
+			{ type: 'index-page', workspaceId: 'w', pageId: 'p', version: 10 },
+			{ type: 'index-page', workspaceId: 'w', pageId: 'p', version: 11 }
 		]);
 		// A failed send is not recorded, so the retry enqueues.
 		const failing = { send: async () => Promise.reject(new Error('queue down')) } as unknown as Queue<IndexJob>;

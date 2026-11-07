@@ -1,0 +1,1 @@
+{"format":"1","hash":"sha256","target":{"dialect":"sqlite","tables":["account","apiToken","invite","membership","outbox","passkey","publicShare","session","user","verification","workspace"]}}

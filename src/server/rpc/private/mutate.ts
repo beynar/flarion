@@ -1,4 +1,6 @@
-/** `mutate` procedures of the private contract. Owner: Sync core. Replace stubs with real handlers. */
-import { notImplemented, os } from './base';
+/** `mutate` procedure of the private contract. Owner: Sync core. The batch is applied by the Workspace DO. */
+import { os, requireWorkspace } from './base';
 
-export const mutateHandler = os.mutate.handler(() => notImplemented('mutate'));
+export const mutateHandler = os.mutate
+	.use(requireWorkspace)
+	.handler(({ input, context }) => context.workspace.apply(context.actor, input));

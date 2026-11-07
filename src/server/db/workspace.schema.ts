@@ -3,10 +3,10 @@
  * "Data model" section table by table; P1 owns the final shape, migrations and indexes.
  *
  * Deviations from the plan's SQL, all deliberate for this draft:
- * - The `p_*` EAV tables use a composite primary key `(prop, v, page)` but viborm cannot emit
- *   `WITHOUT ROWID`; P1 either adds the tables with a hand-written migration step or accepts the rowid
- *   B-tree. `prop` is `property.num` and `page` is `page.num` (dense integers), without foreign keys: the
- *   EAV tables are written on every property edit and the dense numbers are never reused.
+ * - The `p_*` EAV tables (and `value_count`) use a composite primary key `(prop, v, page)`; viborm cannot
+ *   emit `WITHOUT ROWID`, so `ensureEavLayout()` (eav/layout.ts) converts them in place after the
+ *   migrations run. `prop` is `property.num` and `page` is `page.num` (dense integers), without foreign
+ *   keys: the EAV tables are written on every property edit and the dense numbers are never reused.
  * - The FTS5 `search` table is not a viborm model: it is created and queried with raw SQL (and must be
  *   excluded from viborm's managed `tables`, see {@link WORKSPACE_TABLES}).
  * - Soft-deletable models (`page`, `property`, `teamspace`, `grant`) carry a nullable `deletedAt`.
@@ -99,7 +99,8 @@ export const property = s
 		name: s.string(),
 		type: s.string(),
 		configJson: s.json().default({}).map('config_json'),
-		deletedAt: s.dateTime().nullable().map('deleted_at')
+		deletedAt: s.dateTime().nullable().map('deleted_at'),
+		deletedById: s.string().nullable().map('deleted_by')
 	})
 	.map('property');
 
@@ -131,8 +132,10 @@ export const pNum = s
 export const pDate = s
 	.model({
 		prop: s.int(),
-		v: s.string(),
-		vEnd: s.string().nullable().map('v_end'),
+		/** Epoch ms of the start (date-only values sit at UTC midnight). */
+		v: s.number(),
+		/** Epoch ms of the end of a range. */
+		vEnd: s.number().nullable().map('v_end'),
 		page: s.int(),
 		computed: s.boolean().default(false)
 	})
@@ -152,6 +155,21 @@ export const pRef = s
 	.index(['page', 'prop'])
 	.map('p_ref');
 
+/**
+ * Per-value row counts, kept on every EAV write for the query planner's selectivity ordering.
+ * `v` is `String(value)` of the EAV `v` (so numbers and relation targets share one TEXT column);
+ * the reserved key `''` holds the property's total row count. Not kept for `p_text` values
+ * (near-unique, folded text): only that table's total is. See eav/counts.ts.
+ */
+export const valueCount = s
+	.model({
+		prop: s.int(),
+		v: s.string(),
+		n: s.int()
+	})
+	.id(['prop', 'v'])
+	.map('value_count');
+
 // ----- databases -----
 
 export const collection = s
@@ -162,6 +180,8 @@ export const collection = s
 		sourceAst: s.json().nullable().map('source_ast'),
 		shownProps: s.json().default([]).map('shown_props'),
 		defaultsJson: s.json().default({}).map('defaults_json'),
+		deletedAt: s.dateTime().nullable().map('deleted_at'),
+		deletedById: s.string().nullable().map('deleted_by'),
 		members: s.toMany(() => collectionMember),
 		views: s.toMany(() => view)
 	})
@@ -176,6 +196,7 @@ export const collectionMember = s
 		rank: s.string()
 	})
 	.id(['collectionId', 'pageId'])
+	.index(['pageId'])
 	.map('collection_member');
 
 export const view = s
@@ -187,10 +208,14 @@ export const view = s
 		name: s.string(),
 		filterAst: s.json().nullable().map('filter_ast'),
 		sorts: s.json().default([]),
-		groupBy: s.string().nullable().map('group_by'),
-		columnsJson: s.json().default([]).map('columns_json'),
-		rank: s.string()
+		/** A `GroupBySpec` ({ prop, sort?, hideEmpty?, bucket? }). */
+		groupBy: s.json().nullable().map('group_by'),
+		columnsJson: s.json().default({ columns: [], options: {} }).map('columns_json'),
+		rank: s.string(),
+		deletedAt: s.dateTime().nullable().map('deleted_at'),
+		deletedById: s.string().nullable().map('deleted_by')
 	})
+	.index(['collectionId', 'rank'])
 	.map('view');
 
 // ----- teamspaces and access -----
@@ -263,24 +288,57 @@ export const grant = s
 export const member = s
 	.model({
 		userId: s.string().id().map('user_id'),
-		role: s.string()
+		role: s.string(),
+		/** Display name, kept for presence and attribution. */
+		name: s.string().default(''),
+		/** Set when the user left or was removed: the row stays for attribution, the role is gone. */
+		removedAt: s.dateTime().nullable().map('removed_at')
 	})
 	.map('member');
 
 // ----- sync and derived data -----
 
+/**
+ * The change log. `seq` is monotonic (AUTOINCREMENT: a deleted row never frees its number). Rows of one
+ * commit share `commitId`; the last row's `seq` is the commit's sequence number. `page` and `prop` are
+ * the ids (not the dense numbers) the socket protocol speaks.
+ */
 export const change = s
 	.model({
 		seq: s.int().id().increment(),
-		ts: s.dateTime().now(),
+		/** Epoch milliseconds. */
+		ts: s.int(),
 		actor: s.string(),
+		commitId: s.string().map('commit_id'),
 		kind: s.string(),
-		page: s.int().nullable(),
-		prop: s.int().nullable(),
+		page: s.string().nullable(),
+		prop: s.string().nullable(),
 		oldJson: s.json().nullable().map('old_json'),
 		newJson: s.json().nullable().map('new_json')
 	})
+	.index(['page', 'prop'])
+	.index(['ts'])
 	.map('change');
+
+/** Key/value rows of the object itself: workspace identity, counters, the log's retention floor. */
+export const meta = s
+	.model({
+		key: s.string().id(),
+		value: s.json()
+	})
+	.map('meta');
+
+/** Mutation ids already applied, so a retried batch returns its first answer instead of applying twice. */
+export const mutation = s
+	.model({
+		/** `<actorId>:<mid>` */
+		key: s.string().id(),
+		seq: s.int(),
+		/** Epoch milliseconds. */
+		ts: s.int()
+	})
+	.index(['ts'])
+	.map('mutation');
 
 export const link = s
 	.model({
@@ -307,6 +365,7 @@ export const workspaceSchema = {
 	pNum,
 	pDate,
 	pRef,
+	valueCount,
 	collection,
 	collectionMember,
 	view,
@@ -315,6 +374,8 @@ export const workspaceSchema = {
 	grant,
 	member,
 	change,
+	meta,
+	mutation,
 	link,
 	openRoom
 };
@@ -330,6 +391,7 @@ export const WORKSPACE_TABLES = [
 	'p_num',
 	'p_date',
 	'p_ref',
+	'value_count',
 	'collection',
 	'collection_member',
 	'view',
@@ -338,6 +400,8 @@ export const WORKSPACE_TABLES = [
 	'grant',
 	'member',
 	'change',
+	'meta',
+	'mutation',
 	'link',
 	'open_room'
 ] as const;

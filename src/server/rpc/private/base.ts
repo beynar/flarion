@@ -11,6 +11,7 @@ import { WORKSPACE_HEADER } from '../../../lib/shared/protocol';
 import { contract } from '../contract';
 import { resolveMembership, resolveSession, type Actor, type SessionInfo } from '../../auth/session';
 import type { WorkspaceDO } from '../../objects/workspace/workspace-do';
+import { mapWorkspaceError } from './workspace-errors';
 
 export interface RpcContext {
 	request: Request;
@@ -50,7 +51,12 @@ export const requireWorkspace = os.middleware(async ({ context, next }) => {
 		name: session.name
 	};
 	const workspace = context.env.WORKSPACE.getByName(workspaceId) as unknown as DurableObjectStub<WorkspaceDO>;
-	return next({ context: { session, actor, workspace } });
+	try {
+		return await next({ context: { session, actor, workspace } });
+	} catch (error) {
+		// Errors the Workspace DO throws arrive encoded in the message: turn them into the contract's errors.
+		throw mapWorkspaceError(error);
+	}
 });
 
 export const notImplemented = (what: string): never => {

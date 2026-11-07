@@ -8,6 +8,25 @@ import type { Op, ValueOp } from '../../../../lib/shared/ops';
 import type { PropertyRegistry } from '../../../../lib/shared/property-types';
 import type { Values } from '../../../../lib/shared/protocol';
 import type { WorkspaceDb, WorkspaceTx } from '../../../db/workspace.client';
+import {
+	addMember,
+	createCollection,
+	createProperty,
+	createView,
+	deleteCollection,
+	deleteProperty,
+	deleteView,
+	moveMember,
+	moveView,
+	removeMember,
+	updateCollection,
+	updateProperty,
+	updateView
+} from './definitions';
+import { loadEavRegistry, invalidateRegistry as invalidate } from './registry';
+import { MAX_PARAMS, all, chunks, qmarks } from './sql';
+import { applyValueOpTx, writeInitialValuesTx } from './values';
+
 
 /** Ops the EAV module applies: value ops plus property/collection/view definition ops. */
 export type EavOp = Extract<
@@ -68,33 +87,105 @@ export interface ChangeRecord {
 	new: unknown;
 }
 
-/** Load (and cache per transaction/object) the workspace property registry. */
-export async function loadRegistry(_db: WorkspaceDb): Promise<PropertyRegistry> {
-	throw new Error('eav.loadRegistry not implemented');
+/**
+ * Load (and cache per transaction/object) the workspace property registry: the live rows of `property`
+ * plus the built-in title. The cache is keyed by the db handle and dropped by {@link invalidateRegistry}.
+ */
+export async function loadRegistry(db: WorkspaceDb): Promise<PropertyRegistry> {
+	return loadEavRegistry(db);
 }
 
 /** Drop any cached registry (call after a definition op commits or on rollback). */
-export function invalidateRegistry(): void {}
+export function invalidateRegistry(): void {
+	invalidate();
+}
 
 /**
  * Apply one EAV op inside the caller's transaction: typed EAV rows, `page.props_json` (and `page.title`
- * for the title property), per-value counts, registry/collection/view rows. Throws on invalid input.
+ * for the title property), per-value counts, registry/collection/view rows. Throws {@link EavError} on
+ * invalid input; the caller rolls the transaction back (and calls `invalidateRegistry()`).
  */
-export async function applyEavOp(_tx: WorkspaceTx, _op: EavOp, _ctx: EavOpContext): Promise<ChangeRecord[]> {
-	throw new Error('eav.applyEavOp not implemented');
+export async function applyEavOp(tx: WorkspaceTx, op: EavOp, ctx: EavOpContext): Promise<ChangeRecord[]> {
+	switch (op.op) {
+		case 'setProp':
+		case 'addOption':
+		case 'removeOption':
+			return applyValueOpTx(tx, op, ctx);
+		case 'createProperty':
+			return createProperty(tx, op, ctx);
+		case 'updateProperty':
+			return updateProperty(tx, op, ctx);
+		case 'deleteProperty':
+			return deleteProperty(tx, op, ctx);
+		case 'createCollection':
+			return createCollection(tx, op, ctx);
+		case 'updateCollection':
+			return updateCollection(tx, op, ctx);
+		case 'deleteCollection':
+			return deleteCollection(tx, op, ctx);
+		case 'addMember':
+			return addMember(tx, op, ctx);
+		case 'removeMember':
+			return removeMember(tx, op, ctx);
+		case 'moveMember':
+			return moveMember(tx, op, ctx);
+		case 'createView':
+			return createView(tx, op, ctx);
+		case 'updateView':
+			return updateView(tx, op, ctx);
+		case 'moveView':
+			return moveView(tx, op, ctx);
+		case 'deleteView':
+			return deleteView(tx, op, ctx);
+	}
 }
 
 /** Initialise EAV values for a newly created page (create op `values`), inside the same transaction. */
-export async function writeInitialValues(
-	_tx: WorkspaceTx,
-	_pageId: string,
-	_values: Values,
-	_ctx: EavOpContext
+export function writeInitialValues(
+	tx: WorkspaceTx,
+	pageId: string,
+	values: Values,
+	ctx: EavOpContext
 ): Promise<ChangeRecord[]> {
-	throw new Error('eav.writeInitialValues not implemented');
+	return writeInitialValuesTx(tx, pageId, values, ctx);
 }
 
-/** Read display values (from `props_json`) for pages. */
-export async function readValues(_db: WorkspaceDb, _pageIds: string[]): Promise<Map<string, Values>> {
-	throw new Error('eav.readValues not implemented');
+/** Read display values (from `props_json`, live properties only) for pages. Unknown pages are absent. */
+export async function readValues(db: WorkspaceDb, pageIds: string[]): Promise<Map<string, Values>> {
+	const out = new Map<string, Values>();
+	if (pageIds.length === 0) return out;
+	const registry = await loadEavRegistry(db);
+	for (const part of chunks([...new Set(pageIds)], MAX_PARAMS)) {
+		const rows = await all<{ id: string; props_json: string }>(
+			db,
+			`SELECT id, props_json FROM page WHERE id IN (${qmarks(part.length)})`,
+			...part
+		);
+		for (const r of rows) {
+			let props: Values = {};
+			try {
+				props = JSON.parse(r.props_json) as Values;
+			} catch {
+				/* reads as empty */
+			}
+			const live: Values = {};
+			for (const [k, val] of Object.entries(props)) if (registry.get(k)) live[k] = val;
+			out.set(r.id, live);
+		}
+	}
+	return out;
 }
+
+export { EavError, isEavError } from './errors';
+export { TITLE_NUM, loadEavRegistry, type EavRegistry } from './registry';
+export { selectivity, valueCountOf, totalCountOf } from './counts';
+export { defaultsForView, defaultsForCollection, deriveDefaults, type ViewDefaults } from './defaults';
+export { ensureEavLayout } from './layout';
+export { reverseRelation, purgePageEav, writeComputedValue } from './values';
+export {
+	readProperties,
+	readCollection,
+	readViews,
+	readCollectionOfPage,
+	readMembers
+} from './read';

@@ -12,7 +12,7 @@
 		"APP_ORIGIN": "http://localhost:5173",
 		"FILES_ORIGIN": "http://localhost:5173",
 		"MAIL_FROM": "noreply@flarion.local",
-		"BETTER_AUTH_SECRET": "test-secret-test-secret-test-secret-32",
+		"BETTER_AUTH_SECRET": "k3J9xQ2vL7mZp0RtYw8NfB4aHs6UdEcG1iVoXq5TyMn",
 		"ROOM_TOKEN_KEY": "test-room-token-key-test-room-token",
 		"API_TOKEN_PEPPER": "test-pepper"
 	},

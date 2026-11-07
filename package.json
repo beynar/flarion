@@ -14,7 +14,9 @@
     "test:workers": "vitest run --project workers",
     "deploy": "vite build && wrangler deploy",
     "deploy:staging": "vite build && wrangler deploy --env staging",
-    "gen:theme": "node --experimental-strip-types scripts/gen-theme.ts"
+    "gen:theme": "node --experimental-strip-types scripts/gen-theme.ts",
+    "gen:workspace-estate": "UPDATE_ESTATE=1 vitest run --project unit tests/unit/db/workspace-estate.test.ts",
+    "db:generate": "node --experimental-strip-types scripts/db-generate.ts"
   },
   "devDependencies": {
     "@cloudflare/vitest-plugin": "^1.6.0",
@@ -47,6 +49,7 @@
   },
   "dependencies": {
     "@better-auth/passkey": "1.7.18",
+    "@floating-ui/dom": "1.8.0",
     "@orpc/client": "1.16.2",
     "@orpc/contract": "1.16.2",
     "@orpc/openapi": "1.16.2",

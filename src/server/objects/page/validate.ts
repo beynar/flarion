@@ -27,10 +27,24 @@ export function recordedUserAccess(kv: SyncKvStorage, userId: string): StoredAcc
 
 const CANNOT_EDIT: ReadonlySet<StoredAccess> = new Set(['none', 'read', 'comment']);
 
-/** Builds the synchronous `validate` option. Returns `false` to deny a frame. */
+const LAST_EDITOR = 'last_editor';
+
+/** The user whose frame last changed the page's blocks, for the indexing job's `editedBy`. */
+export function lastEditor(kv: SyncKvStorage): string | null {
+	return kv.get<string>(LAST_EDITOR) ?? null;
+}
+
+/**
+ * Builds the synchronous `validate` option. Returns `false` to deny a frame. A frame that is kept and
+ * changed something records its sender as the page's last editor.
+ */
 export function createFrameValidator(kv: SyncKvStorage) {
 	return (frame: FrameValidation): boolean => {
 		const access = recordedUserAccess(kv, frame.user);
-		return access === undefined || !CANNOT_EDIT.has(access);
+		const allowed = access === undefined || !CANNOT_EDIT.has(access);
+		if (allowed && (frame.touched.length > 0 || frame.dataChanged) && kv.get<string>(LAST_EDITOR) !== frame.user) {
+			kv.put(LAST_EDITOR, frame.user);
+		}
+		return allowed;
 	};
 }

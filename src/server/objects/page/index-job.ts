@@ -4,14 +4,11 @@
  * page every 30 seconds (docs/PLAN.md "Between Durable Objects"), and reads the page text from the
  * Page DO then; the job carries no content.
  */
+import type { IndexPageJob } from '../../queues/types';
 import type { PageIdentity } from './page-meta';
 
-export interface IndexJob {
-	workspaceId: string;
-	pageId: string;
-	/** Milliseconds timestamp of the room's last stored change; the consumer's dedup key with the page. */
-	version: number;
-}
+/** The message the Page DO enqueues on `JOBS` (the `index-page` member of the queue's `Job` union). */
+export type IndexJob = IndexPageJob;
 
 const LAST_ENQUEUED = 'index_job:version';
 
@@ -26,7 +23,10 @@ export async function enqueueIndexJob(
 	version: number
 ): Promise<boolean> {
 	if (kv.get<number>(LAST_ENQUEUED) === version) return false;
-	await queue.send({ workspaceId: identity.workspaceId, pageId: identity.pageId, version }, { contentType: 'json' });
+	await queue.send(
+		{ type: 'index-page', workspaceId: identity.workspaceId, pageId: identity.pageId, version },
+		{ contentType: 'json' }
+	);
 	kv.put(LAST_ENQUEUED, version);
 	return true;
 }

@@ -1,28 +1,99 @@
 <script lang="ts">
-	import { page } from '$app/state';
-	import { getPage, workspace } from '#lib/client/mock.ts';
+	import { goto } from '$app/navigation';
+	import { page as route } from '$app/state';
+	import Editor from '#lib/components/editor/Editor.svelte';
+	import PageHeader from '#lib/components/page-header/PageHeader.svelte';
+	import type { PageHeaderAccess } from '#lib/components/page-header/types.ts';
+	import { rpc } from '#lib/client/rpc.ts';
+	import { isMock, userColor } from '#lib/client/runtime.ts';
+	import { useWorkspace } from '#lib/client/workspace.svelte.ts';
 	import DocumentPlaceholder from '#lib/components/shell/DocumentPlaceholder.svelte';
-	import PageHeader from '#lib/components/shell/PageHeader.svelte';
+	import PagePropertyRows from '#lib/components/shell/PagePropertyRows.svelte';
 
-	const current = $derived(getPage(page.params.page ?? ''));
+	const store = useWorkspace();
+	const ws = $derived(route.params.ws ?? store.workspace.slug);
+	const pageId = $derived(route.params.page ?? '');
+	const entity = $derived(store.page(pageId));
+	const status = $derived(store.pageStatus(pageId));
+	const backlinks = $derived(store.backlinks(pageId));
+
+	// Subscribe to the page and its backlinks, publish presence, and unfold the tree to it.
+	$effect(() => {
+		const id = pageId;
+		if (!id) return;
+		const release = store.openPage(id);
+		store.setPresence(id);
+		return () => {
+			release();
+			store.setPresence(null);
+			void store.flushTitles();
+		};
+	});
+	$effect(() => {
+		if (pageId) store.reveal(pageId);
+	});
+
+	// The header calls the protocol's `update` level "write".
+	const headerAccess = $derived<PageHeaderAccess>(entity?.access === 'update' ? 'write' : (entity?.access ?? 'read'));
+	const readonly = $derived(!entity || entity.access === 'read' || entity.access === 'comment');
+	const me = $derived({ id: store.user.id, name: store.user.name, color: userColor(store.user.id) });
+	// Mock mode has no page rooms: the static document stands in for the editor.
+	const mock = isMock();
+
+	const guard = <T,>(p: Promise<T>) => p.catch(() => undefined);
 </script>
 
-<svelte:head><title>{current ? current.title : 'Not found'} · Flarion</title></svelte:head>
+<svelte:head><title>{entity ? entity.title || 'Untitled' : status === 'error' ? 'Not found' : 'Flarion'} · Flarion</title></svelte:head>
 
-{#if current}
-	{#key current.slug}
-		<PageHeader page={current} />
-		<DocumentPlaceholder />
+{#if entity}
+	{#key pageId}
+		<PageHeader
+			page={{ id: entity.id, title: entity.title, icon: entity.icon, cover: entity.cover }}
+			access={headerAccess}
+			backlinks={backlinks.length}
+			presence={store.othersOn(pageId)}
+			onTitle={(title) => store.setTitle(pageId, title)}
+			onIcon={(icon) => guard(store.setPage(pageId, { icon }))}
+			onCover={(cover) => guard(store.setPage(pageId, { cover }))}
+		>
+			{#snippet properties()}
+				<PagePropertyRows page={entity} properties={store.properties} members={store.members} />
+			{/snippet}
+		</PageHeader>
+
+		{#if mock}
+			<DocumentPlaceholder />
+		{:else}
+			<Editor
+				workspaceId={store.workspace.id}
+				{pageId}
+				getRoomToken={() => rpc.page.roomToken({ id: pageId })}
+				user={me}
+				{readonly}
+				onSubpage={async ({ parentId, title }) => ({ id: await store.createPage({ parentId, title }) })}
+				resolvePage={(id) => {
+					const p = store.resolvePage(id);
+					return p ? { title: p.title, icon: p.icon } : undefined;
+				}}
+				searchPages={async (q) => store.searchPages(q)}
+				searchPeople={async (q) => store.searchPeople(q).map((m) => ({ id: m.id, name: m.name }))}
+				onNavigate={(id) => goto(`/${ws}/${id}`)}
+			/>
+		{/if}
 	{/key}
-{:else}
+{:else if status === 'error'}
 	<div class="mx-auto mt-24 flex max-w-[420px] flex-col items-center gap-2 px-6 text-center">
 		<div class="text-5xl">🔎</div>
 		<h1 class="text-xl font-semibold">This page doesn't exist</h1>
 		<p class="text-sm text-[color:var(--app-text-secondary)]">
 			It may have been moved to the trash, or you may not have access.
 		</p>
-		<a href={`/${page.params.ws ?? workspace.slug}`} class="text-sm text-[color:var(--app-accent)]">
-			Back to home
-		</a>
+		<a href={`/${ws}`} class="text-sm text-[color:var(--app-accent)]">Back to home</a>
+	</div>
+{:else}
+	<div class="mx-auto w-full max-w-[var(--app-page-width)] px-[var(--app-page-padding-x-narrow)] pt-24 md:px-[var(--app-page-padding-x)]" aria-busy="true">
+		<div class="mb-4 h-12 w-2/3 animate-pulse rounded bg-[color:var(--app-hover)]"></div>
+		<div class="mb-2 h-4 w-full animate-pulse rounded bg-[color:var(--app-hover)]"></div>
+		<div class="h-4 w-4/5 animate-pulse rounded bg-[color:var(--app-hover)]"></div>
 	</div>
 {/if}

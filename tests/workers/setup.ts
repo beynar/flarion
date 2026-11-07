@@ -1,0 +1,5 @@
+/** Applies `migrations/d1` to the test database before each workers test file (see vitest.config.ts). */
+import { applyD1Migrations, env } from 'cloudflare:test';
+
+const testEnv = env as unknown as { DB: D1Database; TEST_MIGRATIONS: Parameters<typeof applyD1Migrations>[1] };
+await applyD1Migrations(testEnv.DB, testEnv.TEST_MIGRATIONS);

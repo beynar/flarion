@@ -19,3 +19,8 @@ export interface ResolvedRoomAccess {
 export async function resolveRoomAccess(_env: Env, claims: RoomClaims): Promise<ResolvedRoomAccess | null> {
 	return { access: claims.access };
 }
+
+/** What the workspace role of a caller allows in a page room until P2's page permissions exist. */
+export function roomAccessForRole(role: 'owner' | 'admin' | 'member' | 'guest'): RoomAccess {
+	return role === 'guest' ? 'read' : 'write';
+}

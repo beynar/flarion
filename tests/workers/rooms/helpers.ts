@@ -2,6 +2,7 @@ import { SELF, env } from 'cloudflare:test';
 import { WebsocketProvider } from 'edytor/protocol';
 import { createDocument, type EdytorDocument, type JSONDoc } from 'edytor/crdt/edytor';
 import { vi } from 'vitest';
+import { KINDS_VERSION } from '../../../src/lib/shared/blocks/kinds';
 import { roomName } from '../../../src/server/rooms/names';
 import { mintRoomToken, type RoomAccess, type RoomClaims } from '../../../src/server/rooms/token';
 
@@ -31,6 +32,8 @@ export interface PageStub {
 	setAccess(userId: string, access: 'read' | 'comment' | 'suggest' | 'write' | 'none'): Promise<{ sockets: number }>;
 	closeUser(userId: string, code?: number, reason?: string): Promise<{ sockets: number }>;
 	closeAll(code?: number, reason?: string): Promise<{ sockets: number }>;
+	seedFrom(json: JSONDoc): Promise<{ seeded: boolean }>;
+	readForIndex(): Promise<{ doc: JSONDoc; editedAt: number | null; editedBy: string | null }>;
 }
 
 export const pageStub = (workspaceId: string, pageId: string) =>
@@ -112,15 +115,21 @@ export interface Client {
 export function connect(
 	pageId: string,
 	token: string,
-	options: { userId?: string; value?: JSONDoc; extraParams?: Record<string, string>; headers?: Record<string, string> } = {}
+	options: {
+		userId?: string;
+		value?: JSONDoc;
+		extraParams?: Record<string, string>;
+		headers?: Record<string, string>;
+		semantics?: Parameters<typeof createDocument>[0] extends infer O ? (O extends { semantics?: infer S } ? S : never) : never;
+	} = {}
 ): Client {
 	SelfWebSocket.headers = options.headers ?? {};
-	const document = createDocument({ value: options.value, actor: { id: options.userId ?? 'ada' } });
+	const document = createDocument({ value: options.value, actor: { id: options.userId ?? 'ada' }, semantics: options.semantics });
 	const provider = new WebsocketProvider(SERVER, pageId, document.doc, {
 		awareness: document.awareness,
 		WebSocketPolyfill: SelfWebSocket as unknown as typeof WebSocket,
 		disableBc: true,
-		params: { token, ...options.extraParams }
+		params: { token, kinds: String(KINDS_VERSION), ...options.extraParams }
 	});
 	const client: Client = {
 		document,
@@ -152,7 +161,7 @@ export async function dialOutcome(
 	query: Record<string, string>,
 	headers: Record<string, string> = {}
 ): Promise<'open' | { code: number; reason: string }> {
-	const url = `${ORIGIN}/rooms/${encodeURIComponent(pageId)}?${new URLSearchParams(query)}`;
+	const url = `${ORIGIN}/rooms/${encodeURIComponent(pageId)}?${new URLSearchParams({ kinds: String(KINDS_VERSION), ...query })}`;
 	const response = await SELF.fetch(url, { headers: { ...headers, Upgrade: 'websocket' } });
 	const ws = response.webSocket;
 	if (!ws) throw new Error(`upgrade refused: ${response.status} ${await response.text()}`);

@@ -7,14 +7,22 @@
 	import { moonIcon } from 'entasis/icons/moon';
 	import { sunIcon } from 'entasis/icons/sun';
 	import { magnifyingGlassIcon } from 'entasis/icons/magnifyingGlass';
+	import { wifiSlashIcon } from 'entasis/icons/wifiSlash';
 	import type { SidebarApi } from 'entasis/sidebar';
+	import type { PresenceUser } from '#lib/shared/protocol.ts';
+	import PresenceAvatars from './PresenceAvatars.svelte';
 
 	let {
 		sidebar,
 		crumbs,
 		dark,
-		favorite = $bindable(false),
+		favorite = false,
+		offline = false,
+		reconnecting = false,
+		pending = 0,
+		presence = [],
 		showPageActions = true,
+		onToggleFavorite,
 		onToggleDark,
 		onSearch
 	}: {
@@ -22,7 +30,16 @@
 		crumbs: BreadcrumbItem[];
 		dark: boolean;
 		favorite?: boolean;
+		/** The socket is down for good (no network, or it gave up). */
+		offline?: boolean;
+		/** The socket is reconnecting after having been online. */
+		reconnecting?: boolean;
+		/** Mutations not yet confirmed back by the socket. */
+		pending?: number;
+		/** Other people on this page. */
+		presence?: PresenceUser[];
 		showPageActions?: boolean;
+		onToggleFavorite: () => void;
 		onToggleDark: () => void;
 		onSearch: () => void;
 	} = $props();
@@ -50,6 +67,21 @@
 	</div>
 
 	<div class="flex shrink-0 items-center gap-0.5">
+		{#if offline || reconnecting}
+			<span
+				class="mr-1 inline-flex items-center gap-1 rounded-full bg-[color:var(--app-hover)] px-2 text-xs text-[color:var(--app-text-secondary)]"
+				style="height: var(--app-button-height-small)"
+				role="status"
+				data-testid="network-status"
+				title={offline
+					? 'No connection. You can keep writing in pages; properties and the page tree need a connection.'
+					: 'Reconnecting…'}
+			>
+				{@render wifiSlashIcon({ size: 14 })}
+				{offline ? 'Offline' : 'Reconnecting…'}
+			</span>
+		{/if}
+		<PresenceAvatars users={presence} max={3} size={22} />
 		<Button
 			variant="ghost"
 			size="small"
@@ -59,16 +91,16 @@
 			onclick={onSearch}
 		/>
 		{#if showPageActions}
-			<span class="mr-1 hidden text-xs text-[color:var(--app-text-secondary)] md:inline">
-				Edited just now
+			<span class="mr-1 ml-1 hidden text-xs text-[color:var(--app-text-secondary)] md:inline" aria-live="polite">
+				{pending > 0 ? 'Saving…' : 'Saved'}
 			</span>
-			<Button variant="ghost" size="small" class="hidden md:inline-flex">Share</Button>
+			<Button variant="ghost" size="small" class="hidden md:inline-flex"disabled>Share</Button>
 			<Button
 				variant="ghost"
 				size="small"
 				label={favorite ? 'Remove from favorites' : 'Add to favorites'}
 				prefix={favorite ? starIconFill : starIcon}
-				onclick={() => (favorite = !favorite)}
+				onclick={onToggleFavorite}
 			/>
 		{/if}
 		<Button

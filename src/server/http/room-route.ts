@@ -9,13 +9,26 @@
  * which owns the origin check, the close codes (4400 invalid id, 4401 expired, 4403 refused) and the
  * identity hand-off to the room.
  */
-import { closedSocket, routeDocumentSocket, type DocumentNamespace } from 'edytor/cloudflare';
+import {
+	closedSocket,
+	routeDocumentComments,
+	routeDocumentSocket,
+	type DocumentNamespace
+} from 'edytor/cloudflare';
+import { checkKindsVersion } from '../../lib/shared/blocks/kinds.js';
+import { CLOSE } from '../../lib/shared/protocol.js';
 import { createRoomAuthorize } from '../rooms/authorize';
 import { isValidRoomId, roomName } from '../rooms/names';
-import { verifyRoomToken, type VerifyRoomTokenResult } from '../rooms/token';
+import { mintRoomToken, verifyRoomToken, type RoomAccess, type VerifyRoomTokenResult } from '../rooms/token';
 import type { RouteHandler } from './types';
 
 const ROOM_PATH = /^\/rooms\/([^/]+)\/?$/;
+/** Comment threads of a page, kept by the room: `/rooms/comments/:pageId` (the comments client's `server`). */
+const COMMENTS_PATH = /^\/rooms\/comments\/([^/]+)\/?$/;
+/** Development only: mints a room token for the editor test page (never answers outside `development`). */
+const DEV_TOKEN_PATH = '/rooms/dev/token';
+/** The query parameter a client sends its block `KINDS_VERSION` in (see `src/lib/shared/blocks/kinds.ts`). */
+export const KINDS_PARAM = 'kinds';
 
 /** `APP_ORIGIN` may list several origins, comma separated (app domain plus preview domains). */
 export function allowedRoomOrigins(env: Pick<Env, 'APP_ORIGIN'>): string[] {
@@ -25,9 +38,58 @@ export function allowedRoomOrigins(env: Pick<Env, 'APP_ORIGIN'>): string[] {
 		.filter(Boolean);
 }
 
+/**
+ * The origins allowed to dial a room: `APP_ORIGIN`'s list, and in development any localhost port, so
+ * several `pnpm dev` servers (or a Playwright run on its own port) can reach their own Worker.
+ */
+function roomOriginPolicy(env: Pick<Env, 'APP_ORIGIN' | 'ENVIRONMENT'>): string[] | ((origin: string) => boolean) {
+	const listed = allowedRoomOrigins(env);
+	if (env.ENVIRONMENT !== 'development') return listed;
+	return (origin) => listed.includes(origin) || /^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin);
+}
+
+const ACCESS: readonly RoomAccess[] = ['read', 'comment', 'write'];
+
+/**
+ * `POST /rooms/dev/token` `{ workspaceId, pageId, userId, access?, ttlSeconds? }` answers `{ token, expiresAt, access }`.
+ * It exists for `src/routes/(dev)/editor-test` and the Playwright co-edit test, and refuses everywhere
+ * but `ENVIRONMENT=development`: anyone could mint any identity with it.
+ */
+async function handleDevToken(request: Request, env: Env): Promise<Response> {
+	if (env.ENVIRONMENT !== 'development') return new Response('Not found', { status: 404 });
+	if (request.method !== 'POST') return new Response('Method not allowed', { status: 405 });
+	let body: Record<string, unknown>;
+	try {
+		body = (await request.json()) as Record<string, unknown>;
+	} catch {
+		return new Response('Invalid JSON', { status: 400 });
+	}
+	const { workspaceId, pageId, userId } = body;
+	const access = (body.access ?? 'write') as RoomAccess;
+	if (
+		typeof workspaceId !== 'string' ||
+		typeof pageId !== 'string' ||
+		typeof userId !== 'string' ||
+		!isValidRoomId(workspaceId) ||
+		!isValidRoomId(pageId) ||
+		!ACCESS.includes(access)
+	) {
+		return new Response('Invalid claims', { status: 400 });
+	}
+	const ttl = Number(body.ttlSeconds);
+	const minted = await mintRoomToken(
+		env,
+		{ workspaceId, pageId, userId, access },
+		Number.isFinite(ttl) && ttl > 0 ? { ttlSeconds: Math.min(ttl, 3600) } : {}
+	);
+	return Response.json({ ...minted, access });
+}
+
 export const handleRoom: RouteHandler = async (request, env) => {
 	const url = new URL(request.url);
-	const match = ROOM_PATH.exec(url.pathname);
+	if (url.pathname === DEV_TOKEN_PATH) return handleDevToken(request, env);
+	const comments = COMMENTS_PATH.exec(url.pathname);
+	const match = comments ?? ROOM_PATH.exec(url.pathname);
 	if (!match) return new Response('Not found', { status: 404 });
 	const isUpgrade = request.headers.get('Upgrade')?.toLowerCase() === 'websocket';
 
@@ -42,6 +104,15 @@ export const handleRoom: RouteHandler = async (request, env) => {
 		return isUpgrade ? closedSocket(4400, 'invalid document id') : new Response('Invalid page id', { status: 400 });
 	}
 
+	// A client whose block kinds are behind the room's could write blocks the room misreads: it reloads.
+	// Missing counts as behind. A client ahead of the room (a deploy rolling out) is served.
+	if (isUpgrade && !comments) {
+		const kinds = url.searchParams.get(KINDS_PARAM);
+		if (checkKindsVersion(kinds === null ? null : Number(kinds)) === 'reload') {
+			return closedSocket(CLOSE.RELOAD_REQUIRED, 'reload required');
+		}
+	}
+
 	const verified: VerifyRoomTokenResult = await verifyRoomToken(env, url.searchParams.get('token'));
 	const authorize = createRoomAuthorize({ env, verified, workspaceHint: url.searchParams.get('workspace') });
 	// Only reachable once `authorize` accepted, i.e. `verified.ok`: the workspace comes from the token.
@@ -51,5 +122,7 @@ export const handleRoom: RouteHandler = async (request, env) => {
 			return env.PAGE.getByName(roomName(verified.claims.workspaceId, id));
 		}
 	};
-	return routeDocumentSocket(request, rooms, pageId, authorize, { allowedOrigins: allowedRoomOrigins(env) });
+	const options = { allowedOrigins: roomOriginPolicy(env) };
+	if (comments) return routeDocumentComments(request, rooms, pageId, authorize, options);
+	return routeDocumentSocket(request, rooms, pageId, authorize, options);
 };
