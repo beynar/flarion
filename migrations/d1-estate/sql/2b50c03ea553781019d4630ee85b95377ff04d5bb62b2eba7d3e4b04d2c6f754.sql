@@ -4,6 +4,7 @@ CREATE TABLE "user" (
   "email" TEXT NOT NULL,
   "emailVerified" INTEGER NOT NULL DEFAULT 0,
   "image" TEXT DEFAULT NULL,
+  "notifyMentions" INTEGER NOT NULL DEFAULT 1,
   "createdAt" TEXT NOT NULL,
   "updatedAt" TEXT NOT NULL,
   PRIMARY KEY ("id"),
@@ -195,6 +196,62 @@ SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ?)
 
 SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ?)
 
+CREATE TABLE "pendingGrant" (
+  "id" TEXT NOT NULL,
+  "workspaceId" TEXT NOT NULL,
+  "inviteId" TEXT NOT NULL,
+  "pageId" TEXT NOT NULL,
+  "level" TEXT NOT NULL,
+  "createdBy" TEXT NOT NULL,
+  "createdAt" TEXT NOT NULL,
+  "appliedAt" TEXT DEFAULT NULL,
+  PRIMARY KEY ("id"),
+  CONSTRAINT "pendingGrant_inviteId_fkey" FOREIGN KEY ("inviteId") REFERENCES "invite" ("id") ON DELETE CASCADE
+)
+
+SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?)
+
+SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?)
+
+CREATE INDEX "pendingGrant_inviteId_idx" ON "pendingGrant" ("inviteId")
+
+SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ?)
+
+SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ?)
+
+CREATE INDEX "pendingGrant_workspaceId_pageId_idx" ON "pendingGrant" ("workspaceId", "pageId")
+
+SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ?)
+
+SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ?)
+
+CREATE TABLE "guestGrant" (
+  "id" TEXT NOT NULL,
+  "workspaceId" TEXT NOT NULL,
+  "userId" TEXT NOT NULL,
+  "pageId" TEXT NOT NULL,
+  "grantId" TEXT NOT NULL,
+  "createdBy" TEXT NOT NULL,
+  "createdAt" TEXT NOT NULL,
+  PRIMARY KEY ("id")
+)
+
+SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?)
+
+SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?)
+
+CREATE UNIQUE INDEX "guestGrant_grantId_idx" ON "guestGrant" ("grantId")
+
+SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ?)
+
+SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ?)
+
+CREATE INDEX "guestGrant_workspaceId_userId_idx" ON "guestGrant" ("workspaceId", "userId")
+
+SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ?)
+
+SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ?)
+
 CREATE TABLE "apiToken" (
   "id" TEXT NOT NULL,
   "workspaceId" TEXT NOT NULL,
@@ -228,6 +285,8 @@ CREATE TABLE "publicShare" (
   "createdBy" TEXT NOT NULL,
   "createdAt" TEXT NOT NULL,
   "revokedAt" TEXT DEFAULT NULL,
+  "grantId" TEXT DEFAULT NULL,
+  "doRevokedAt" TEXT DEFAULT NULL,
   PRIMARY KEY ("id")
 )
 
@@ -283,6 +342,18 @@ SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?)
 SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?)
 
 DROP TABLE "apiToken"
+
+SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?)
+
+SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?)
+
+DROP TABLE "guestGrant"
+
+SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?)
+
+SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?)
+
+DROP TABLE "pendingGrant"
 
 SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?)
 

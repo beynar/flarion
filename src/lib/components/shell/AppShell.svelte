@@ -16,6 +16,7 @@
 	import { signOut, type SessionUser } from '#lib/client/session.ts';
 	import type { WorkspaceStore } from '#lib/client/workspace.svelte.ts';
 	import type { Workspace } from '#lib/shared/schemas.ts';
+	import ShareDialog from '#lib/components/share/ShareDialog.svelte';
 	import CommandPalette from './CommandPalette.svelte';
 	import ReloadBanner from './ReloadBanner.svelte';
 	import SidebarTree from './SidebarTree.svelte';
@@ -50,6 +51,7 @@
 	const dark = $derived(theme.resolvedTheme === 'dark');
 	let paletteOpen = $state(false);
 	let sidebarOpen = $state(true);
+	let shareOpen = $state(false);
 
 	const { sidebar: width } = notion.metrics;
 
@@ -127,6 +129,10 @@
 	}
 
 	const banner = $derived(store.outdated ? 'reload' : store.closed);
+	const canLockPage = $derived.by(() => {
+		const access = activePageId ? store.page(activePageId)?.access : undefined;
+		return store.canEdit && (access === 'update' || access === 'full');
+	});
 	const favorite = $derived(activePageId ? store.isFavorite(activePageId) : false);
 </script>
 
@@ -188,6 +194,9 @@
 				onToggleFavorite={() => activePageId && store.toggleFavorite(activePageId)}
 				onToggleDark={toggleDark}
 				onSearch={() => (paletteOpen = true)}
+				onShare={() => (shareOpen = true)}
+				pageId={section === 'page' ? (activePageId ?? null) : null}
+				canLock={canLockPage}
 			/>
 			<div class="flex min-w-0 flex-1 flex-col">
 				{@render pageContent()}
@@ -197,6 +206,10 @@
 </Sidebar>
 
 <CommandPalette bind:open={paletteOpen} {store} {ws} {onAction} />
+
+{#if activePageId && section === 'page'}
+	<ShareDialog {store} pageId={activePageId} bind:open={shareOpen} />
+{/if}
 
 {#snippet pageContent()}
 	{@render children()}

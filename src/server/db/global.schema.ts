@@ -23,6 +23,8 @@ export const user = s
 		email: s.string().unique(),
 		emailVerified: s.boolean().default(false),
 		image: s.string().nullable(),
+		/** Email me when someone @-mentions me in a page I can read (P2; editable in settings later). */
+		notifyMentions: s.boolean().default(true),
 		createdAt: s.dateTime(),
 		updatedAt: s.dateTime(),
 		sessions: s.toMany(() => session),
@@ -148,10 +150,52 @@ export const invite = s
 		createdBy: s.string(),
 		createdAt: s.dateTime(),
 		expiresAt: s.dateTime(),
-		acceptedAt: s.dateTime().nullable()
+		acceptedAt: s.dateTime().nullable(),
+		pendingGrants: s.toMany(() => pendingGrant)
 	})
 	.map('invite')
 	.index(['workspaceId']);
+
+/**
+ * A guest invite's page grant, waiting for the invitee to accept ("Sharing a page with an email that
+ * isn't a workspace member creates a guest invite"). Applied through the Workspace DO on accept
+ * (`appliedAt` set); the nightly job retries the ones that failed.
+ */
+export const pendingGrant = s
+	.model({
+		id: s.string().id(),
+		workspaceId: s.string(),
+		inviteId: s.string(),
+		invite: s.toOne(() => invite).fields('inviteId').references('id').onDelete('cascade'),
+		pageId: s.string(),
+		/** read | comment | update | full */
+		level: s.string(),
+		createdBy: s.string(),
+		createdAt: s.dateTime(),
+		appliedAt: s.dateTime().nullable()
+	})
+	.map('pendingGrant')
+	.index(['inviteId'])
+	.index(['workspaceId', 'pageId']);
+
+/**
+ * Ledger of the DO grants given to guests through `page.grants.set`, so converting a guest to a member or
+ * removing them can revoke every grant they hold (the Workspace DO lists grants per page only).
+ */
+export const guestGrant = s
+	.model({
+		id: s.string().id(),
+		workspaceId: s.string(),
+		userId: s.string(),
+		pageId: s.string(),
+		/** The Workspace DO's grant id. */
+		grantId: s.string(),
+		createdBy: s.string(),
+		createdAt: s.dateTime()
+	})
+	.map('guestGrant')
+	.index(['grantId'], { unique: true })
+	.index(['workspaceId', 'userId']);
 
 // ───────────────────────────── API tokens and share links (used from P2/P4) ─────────────────────────────
 
@@ -180,7 +224,12 @@ export const publicShare = s
 		pageId: s.string(),
 		createdBy: s.string(),
 		createdAt: s.dateTime(),
-		revokedAt: s.dateTime().nullable()
+		/** Set first when a link is revoked: the route dies at once, the DO grant right after. */
+		revokedAt: s.dateTime().nullable(),
+		/** The Workspace DO grant behind the route (revoke by grant id, reconcile). */
+		grantId: s.string().nullable(),
+		/** Set once the DO grant of a revoked route is confirmed gone; the reconcile retries until then. */
+		doRevokedAt: s.dateTime().nullable()
 	})
 	.map('publicShare')
 	// A revoked token is free to be reissued; live tokens are unique.
@@ -218,6 +267,8 @@ export const globalSchema = {
 	workspace,
 	membership,
 	invite,
+	pendingGrant,
+	guestGrant,
 	apiToken,
 	publicShare,
 	outbox

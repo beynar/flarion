@@ -27,10 +27,11 @@ import type {
 } from '../../../lib/shared/protocol';
 import { MAX_SUBSCRIPTIONS_PER_SOCKET, MAX_WINDOW } from '../../../lib/shared/protocol';
 import { TITLE_PROP_ID } from '../../../lib/shared/property-types';
-import { stubAccess, visibilityScope } from './actor';
+import { visibilityScope } from './actor';
+import type { VisibilityView } from './access';
 import type { Actor } from '../../auth/session';
 import type { LogRow } from './changelog';
-import { RowReader, type Access } from './rows';
+import { RowReader, type AccessOf } from './rows';
 import { chunks, MAX_PARAMS, qmarks } from './util';
 
 export type UnitKind = 'tree' | 'page' | 'backlinks' | 'view';
@@ -66,6 +67,8 @@ export interface LiveHost {
 	send(socketId: string, message: ServerMessage): boolean;
 	/** The actor stored in the socket's attachment. */
 	actorOf(socketId: string): Actor | null;
+	/** The actor's visibility set, current as of the commit being fanned out (fails closed: nothing visible). */
+	view(actor: Actor): VisibilityView;
 }
 
 const fnv = (text: string): string => {
@@ -219,6 +222,11 @@ export function analyze(rows: readonly LogRow[]): Touch {
 				t.structural = true;
 				t.all = true;
 				break;
+			case 'grant.set':
+			case 'grant.revoke':
+			case 'member.sync':
+				// Access changes: no unit changes, but every affected actor's windows do (their visibility delta).
+				break;
 			default:
 				if (row.page && row.prop && VALUE_KINDS.has(row.kind)) {
 					addTo(t.valueProps, row.page, row.prop);
@@ -241,6 +249,8 @@ export class LiveHub {
 	readonly #sql: SqlStorage;
 	/** Evaluations performed by this instance (per wake), for the "evaluated once" guarantee. */
 	evaluations = 0;
+	/** Page id -> dense number: numbers never change, so this never needs invalidating. */
+	readonly #nums = new Map<string, number>();
 
 	constructor(host: LiveHost) {
 		this.#host = host;
@@ -250,6 +260,29 @@ export class LiveHub {
 
 	get reader(): RowReader {
 		return this.#reader;
+	}
+
+	// ───────────────────────── visibility ─────────────────────────
+
+	#numsOf(ids: readonly string[]): void {
+		const missing = ids.filter((id) => !this.#nums.has(id));
+		if (missing.length === 0) return;
+		for (const [id, num] of this.#reader.nums(missing)) this.#nums.set(id, num);
+		if (this.#nums.size > 200_000) this.#nums.clear();
+	}
+
+	/** `ids` ANDed with a visibility predicate on dense numbers (a page that is gone has no number: dropped). */
+	#visible(ids: readonly string[], has: (num: number) => boolean): string[] {
+		this.#numsOf(ids);
+		return ids.filter((id) => {
+			const num = this.#nums.get(id);
+			return num !== undefined && has(num);
+		});
+	}
+
+	#numOf(id: string): number | undefined {
+		this.#numsOf([id]);
+		return this.#nums.get(id);
 	}
 
 	// ───────────────────────── storage helpers ─────────────────────────
@@ -444,7 +477,7 @@ export class LiveHub {
 
 	// ───────────────────────── rows ─────────────────────────
 
-	#rowsFor(sub: Subscription, ids: readonly string[], access: Access): Map<string, AnyRow> {
+	#rowsFor(sub: Subscription, ids: readonly string[], access: AccessOf): Map<string, AnyRow> {
 		switch (sub.kind) {
 			case 'tree':
 				return this.#reader.treeRows(ids, access);
@@ -462,9 +495,10 @@ export class LiveHub {
 	snapshot(socketId: string, subId: string, actor: Actor, seq: number): ServerMessage | null {
 		const row = this.#loadSub(socketId, subId);
 		if (!row) return null;
-		const all = this.#concat(row.unitKeys);
+		const view = this.#host.view(actor);
+		const all = this.#visible(this.#concat(row.unitKeys), (n) => view.has(n));
 		const window = row.lim === null ? all : all.slice(0, row.lim);
-		const rows = this.#rowsFor(row.sub, window, stubAccess(actor.role));
+		const rows = this.#rowsFor(row.sub, window, view.level);
 		const list = window.map((id) => rows.get(id)).filter((r): r is AnyRow => !!r);
 		const base = { t: 'snapshot' as const, id: subId, total: all.length, seq };
 		switch (row.kind) {
@@ -493,10 +527,11 @@ export class LiveHub {
 		if (!row || (row.kind !== 'view' && row.kind !== 'backlinks')) return null;
 		const sub = { ...row.sub, limit } as Subscription;
 		this.#run('UPDATE socket_sub SET spec = ?, lim = ? WHERE socket_id = ? AND sub_id = ?', JSON.stringify(sub), limit, socketId, subId);
-		const all = this.#concat(row.unitKeys);
+		const view = this.#host.view(actor);
+		const all = this.#visible(this.#concat(row.unitKeys), (n) => view.has(n));
 		const oldW = row.lim === null ? all : all.slice(0, row.lim);
 		const newW = all.slice(0, limit);
-		const rows = this.#rowsFor(sub, newW, stubAccess(actor.role));
+		const rows = this.#rowsFor(sub, newW, view.level);
 		const ops = diffWindows(oldW, newW, (id) => rows.get(id));
 		return ops.length ? ops : null;
 	}
@@ -525,7 +560,16 @@ export class LiveHub {
 		const streaming = new Set(streams);
 		const diffs = new Map<string, { id: string; ops: DiffOp[] }[]>();
 
-		if (units.length > 0 && streams.length > 0) {
+		// Sockets whose actor's visibility changed in this commit: every window of theirs is re-derived.
+		const visibilityHit: { socketId: string; subId: string }[] = [];
+		for (const socketId of streams) {
+			const actor = this.#host.actorOf(socketId);
+			if (actor && this.#host.view(actor).delta.size > 0) {
+				for (const entry of this.subscriptions(socketId)) visibilityHit.push({ socketId, subId: entry.id });
+			}
+		}
+
+		if ((units.length > 0 && streams.length > 0) || visibilityHit.length > 0) {
 			// 1. Re-evaluate the units the commit can touch and keep the ones whose ids changed.
 			const changed = new Map<string, { old: string[]; next: string[] }>();
 			for (const u of units) {
@@ -544,8 +588,11 @@ export class LiveHub {
 			const holding = this.#unitsHolding([...updated]);
 			const affected = new Set<string>([...changed.keys(), ...holding]);
 
-			if (affected.size > 0) {
-				const subs = this.#subsOfUnits([...affected]);
+			const subs = this.#subsOfUnits([...affected]);
+			const seen = new Set(subs.map((l) => `${l.socketId}\u0000${l.subId}`));
+			for (const hit of visibilityHit) if (!seen.has(`${hit.socketId}\u0000${hit.subId}`)) subs.push(hit);
+
+			if (subs.length > 0) {
 				const cache = new CommitCache(this.#reader, updated);
 				const ids = new Map<string, string[]>();
 				const currentOf = (key: string) => {
@@ -557,19 +604,31 @@ export class LiveHub {
 					const row = this.#loadSub(link.socketId, link.subId);
 					const actor = this.#host.actorOf(link.socketId);
 					if (!row || !actor || !streaming.has(link.socketId)) continue;
+					const view = this.#host.view(actor);
 					const oldMap = new Map<string, string[]>();
 					for (const key of row.unitKeys) oldMap.set(key, changed.get(key)?.old ?? currentOf(key));
-					const newAll = this.#concat(row.unitKeys);
-					const oldAll = this.#concat(row.unitKeys, oldMap);
+					// ANDed with the actor's visibility: before the commit for the old window, after it for the new.
+					const newAll = this.#visible(this.#concat(row.unitKeys), (n) => view.has(n));
+					const oldAll = this.#visible(this.#concat(row.unitKeys, oldMap), (n) => view.hadBefore(n));
 					const lim = row.lim;
 					const oldW = lim === null ? oldAll : oldAll.slice(0, lim);
 					const newW = lim === null ? newAll : newAll.slice(0, lim);
-					const access = stubAccess(actor.role);
-					const added = newW.filter((id) => !oldW.includes(id));
-					const rows = added.length ? this.#rowsFor(row.sub, added, access) : new Map<string, AnyRow>();
+					const oldSet = new Set(oldW);
+					const added = newW.filter((id) => !oldSet.has(id));
+					const rows = added.length ? this.#rowsFor(row.sub, added, view.level) : new Map<string, AnyRow>();
 					const ops = diffWindows(oldW, newW, (id) => rows.get(id));
-					const inBoth = newW.filter((id) => oldW.includes(id));
+					const inBoth = newW.filter((id) => oldSet.has(id));
 					ops.push(...cache.updatesFor(row.sub, row.kind, inBoth, touch));
+					if (row.kind === 'tree' || row.kind === 'page' || row.kind === 'view') {
+						// A level that changed on a page the actor keeps seeing.
+						for (const id of inBoth) {
+							const num = this.#numOf(id);
+							const d = num === undefined ? undefined : view.delta.get(num);
+							if (d && d.before >= 0 && d.after >= 0 && d.before !== d.after) {
+								ops.push({ op: 'update', id, prop: '$access', value: view.level(num as number) });
+							}
+						}
+					}
 					if (oldAll.length !== newAll.length) ops.push({ op: 'count', total: newAll.length });
 					if (ops.length) {
 						const list = diffs.get(link.socketId) ?? [];
@@ -649,6 +708,9 @@ export class LiveHub {
 	planResume(lastSeq: number, changes: readonly LogRow[] | null): { mode: 'replay' | 'snapshot'; touch: Touch | null } {
 		const head = this.headSeq();
 		if (lastSeq > head || lastSeq < this.logFloor() || changes === null) return { mode: 'snapshot', touch: null };
+		// A gap with access changes (shares, memberships, roles): what each actor may see moved, and the log
+		// does not say how for them. Fresh snapshots.
+		if (changes.some((r) => ACCESS_KINDS.has(r.kind))) return { mode: 'snapshot', touch: null };
 		const touch = analyze(changes);
 		if (touch.subtreeRoots.length || touch.teamspaceRoots.length) {
 			for (const id of this.#reader.subtree([...touch.subtreeRoots, ...touch.teamspaceRoots])) touch.structPages.add(id);
@@ -665,7 +727,8 @@ export class LiveHub {
 		if (!row) return null;
 		const touched = new Set<string>([...touch.structPages, ...touch.valueProps.keys(), ...touch.fields.keys()]);
 		for (const parent of touch.parents) if (parent) touched.add(parent);
-		const all = this.#concat(row.unitKeys);
+		const view = this.#host.view(actor);
+		const all = this.#visible(this.#concat(row.unitKeys), (n) => view.has(n));
 		const window = row.lim === null ? all : all.slice(0, row.lim);
 		if (row.kind === 'view' || row.kind === 'backlinks') {
 			const hit = touch.structural || touch.backlinkTargets.size > 0 || window.some((id) => touched.has(id));
@@ -678,7 +741,7 @@ export class LiveHub {
 					window.some((id) => touched.has(id))
 				: row.sub.kind === 'page' && row.sub.pageIds.some((id) => touched.has(id));
 		if (!relevant) return null;
-		const rows = this.#rowsFor(row.sub, window.filter((id) => touched.has(id)), stubAccess(actor.role));
+		const rows = this.#rowsFor(row.sub, window.filter((id) => touched.has(id)), view.level);
 		const ops: DiffOp[] = [...touched].map((id) => ({ op: 'remove' as const, id }));
 		window.forEach((id, index) => {
 			const r = rows.get(id);
@@ -688,6 +751,9 @@ export class LiveHub {
 		return { t: 'diff', seq, subs: [{ id: subId, ops }] };
 	}
 }
+
+/** Change kinds that alter who can see what. */
+const ACCESS_KINDS: ReadonlySet<string> = new Set(['grant.set', 'grant.revoke', 'member.sync', 'teamspace.member', 'teamspace.update', 'archiveTeamspace']);
 
 /** Replays touching more pages (or log rows) than this are answered with fresh snapshots instead. */
 export const MAX_REPLAY_PAGES = 200;

@@ -1,8 +1,16 @@
 /**
  * Page covers. A cover is stored as one string on the page: a preset key (`dawn`, `lake`, `moss`,
- * `dusk`, the gradients below), or an image address (`https:`, a same-origin path, a data image),
- * which P2's files upload fills. Anything else is treated as no cover.
+ * `dusk`, the gradients below), or an image address (`https:`, a same-origin path, a data image). An uploaded
+ * cover is the stable reference `/files/<fileId>?ws=<workspaceId>` (see editor/uploads.ts), shown as a resized
+ * variant (`w=`, through Cloudflare Images). Anything else is treated as no cover.
  */
+/** The widest cover image a screen needs (the cover is a full-bleed banner). */
+export const COVER_IMAGE_WIDTH = 2000;
+
+/** A file reference gets a resized variant (`&w=`); any other address is shown as it is. */
+export const coverImageUrl = (url: string): string =>
+	/^\/files\/[^/?#]+\?/.test(url) && !/[?&]w=/.test(url) ? `${url}&w=${COVER_IMAGE_WIDTH}` : url;
+
 export const COVER_PRESETS = {
 	dawn: 'linear-gradient(120deg, #f6d5c4 0%, #f2b7a0 45%, #d98e9a 100%)',
 	lake: 'linear-gradient(120deg, #b7d4e6 0%, #8fb6d0 50%, #6a97b5 100%)',
@@ -29,7 +37,7 @@ export function coverBackground(cover: string | null | undefined): { image: stri
 	if (!cover) return null;
 	if (isCoverPreset(cover)) return { image: COVER_PRESETS[cover], isImage: false };
 	const url = safeCoverUrl(cover);
-	return url ? { image: `url("${url.replaceAll('"', '%22')}")`, isImage: true } : null;
+	return url ? { image: `url("${coverImageUrl(url).replaceAll('"', '%22')}")`, isImage: true } : null;
 }
 
 /** A cover position is a percentage from the top (0) to the bottom (100) of the image; 50 centres it. */

@@ -97,6 +97,12 @@ export interface Connection {
 
 /** Opens `/ws/:workspaceId` through the Worker route and wraps the socket in the oRPC v1 WebSocket link. */
 export async function connect(workspaceId: string, headers: Record<string, string> = {}): Promise<Connection> {
+	// A real caller is a workspace member the Accounts track mirrored into the object (`syncMember`); the dev
+	// actor of a test is made one unless the workspace already knows them, so the policy has a user to judge.
+	const devUser = headers['x-flarion-dev-actor'] ?? 'user-1';
+	if (devUser && (await workspaceStub(workspaceId).getMemberRole(devUser)) === null) {
+		await workspaceStub(workspaceId).syncMember({ userId: devUser, role: (headers['x-flarion-dev-role'] ?? 'member') as 'member', name: devUser });
+	}
 	const response = await upgradeRequest(workspaceId, headers);
 	if (response.status !== 101 || !response.webSocket) throw new Error(`upgrade failed: ${response.status}`);
 	const ws = response.webSocket;

@@ -6,7 +6,7 @@
 	const ws = $derived(page.params.ws);
 	const tabs = [
 		{ slug: 'members', label: 'Members', ready: true },
-		{ slug: 'teamspaces', label: 'Teamspaces', ready: false },
+		{ slug: 'teamspaces', label: 'Teamspaces', ready: true },
 		{ slug: 'passkeys', label: 'Passkeys', ready: true },
 		{ slug: 'tokens', label: 'API tokens', ready: false }
 	];

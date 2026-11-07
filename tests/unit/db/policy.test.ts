@@ -14,6 +14,18 @@ describe('workspace policies (draft)', () => {
 	});
 });
 
+describe('the final policy', () => {
+	test('governs pages, teamspaces, members and grants, and opens the bookkeeping models', () => {
+		const compiled = policy.compile(workspaceSchema);
+		for (const model of ['page', 'teamspace', 'teamspaceMember', 'grant'] as const) expect(compiled.models[model]).toBeDefined();
+		// The rules the plan names: four page levels and the placement rule.
+		expect(Object.keys(compiled.models.page!.predicates)).toEqual(expect.arrayContaining(['read', 'comment', 'update', 'full']));
+		for (const model of ['change', 'mutation', 'meta', 'property', 'pText', 'collection', 'view', 'openRoom'] as const) {
+			expect(compiled.models[model], model).toBeDefined();
+		}
+	});
+});
+
 describe('actor facts', () => {
 	const teamspaces = [
 		{ id: 'open', defaultLevel: 'update' },
@@ -48,6 +60,12 @@ describe('actor facts', () => {
 		const visitor = actorFacts({ role: 'anonymous', shareToken: 'abc', memberships: [], teamspaces });
 		expect(visitor.userId).toBeUndefined();
 		expect(visitor.subjects).toEqual(['public:abc']);
+	});
+
+	test('guests hold no teamspace, whatever membership rows say', () => {
+		const guest = actorFacts({ userId: 'g', role: 'guest', memberships: [{ teamspaceId: 'open', role: 'owner' }], teamspaces });
+		expect(guest.teamspaces).toEqual({ read: [], comment: [], update: [], full: [] });
+		expect(guest.subjects).toEqual(['user:g']);
 	});
 
 	test('owners and admins are admins', () => {

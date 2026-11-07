@@ -9,7 +9,8 @@ import { handleRpc } from './server/http/rpc-route';
 import { handlePublicApi } from './server/http/public-api-route';
 import { handleWorkspaceSocket } from './server/http/workspace-socket-route';
 import { handleRoom } from './server/http/room-route';
-import { handleFiles } from './server/http/files-route';
+import { handleFiles, isFilesHost } from './server/http/files-route';
+import { handleShareData } from './server/share/route';
 
 type Env = App.Platform['env'];
 
@@ -17,12 +18,15 @@ export const fetch: WorkerFetch<Env> = async (request, env, ctx) => {
 	const url = new URL(request.url);
 	const path = url.pathname;
 	if (path === '/healthz') return Response.json({ ok: true, version: env.APP_VERSION });
+	// The files origin (a separate host, no session cookie) serves user files and nothing else.
+	if (isFilesHost(request, env) && !path.startsWith('/files/')) return new Response('Not found', { status: 404 });
 	if (path.startsWith('/api/auth/')) return handleAuth(request, env, ctx);
 	if (path.startsWith('/rpc/') || path === '/rpc') return handleRpc(request, env, ctx);
 	if (path.startsWith('/v1/') || path === '/v1') return handlePublicApi(request, env, ctx);
 	if (path.startsWith('/ws/')) return handleWorkspaceSocket(request, env, ctx);
 	if (path.startsWith('/rooms/')) return handleRoom(request, env, ctx);
 	if (path.startsWith('/files/')) return handleFiles(request, env, ctx);
+	if (path.startsWith('/share-data/')) return handleShareData(request, env);
 	// Returning void falls through to SvelteKit.
 };
 

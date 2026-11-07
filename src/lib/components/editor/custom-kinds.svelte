@@ -1,67 +1,124 @@
 <!--
-	The custom block kinds of src/lib/shared/blocks/kinds.ts, registered on the client. P2 replaces the
-	placeholders: `database_view` renders a live view of its collection, `breadcrumb` reads the ancestors
-	from the workspace store, `date_mention` becomes the `@` date picker. Here each one is a void block
-	(or inline atom) that shows what it holds, so a document that contains one opens and syncs today.
+	The custom block kinds of src/lib/shared/blocks/kinds.ts, registered on the client: `database_view` (a void
+	block rendering a collection's view through `views/ViewHost.svelte`), `breadcrumb` (a void block reading the
+	page's ancestors from the workspace store) and `date_mention` (an inline atom with a date picker).
 
-	The structural rows (`void`, `rendersContent`, `atomic`) are spread from `customKindRows`, the same
-	rows the Page DO's `semantics` come from, so every replica reads the same roles.
+	The structural rows (`void`, `rendersContent`, `atomic`) are spread from `customKindRows`, the same rows the Page
+	DO's `semantics` come from, so every replica reads the same roles. The snippets render components that read the
+	page around the editor through Svelte context (`context.ts`); the slash-menu commands close over `host`.
 -->
 <script module lang="ts">
-	import type { BlockSnippetPayload, InlineBlockSnippetPayload, Plugin } from 'edytor';
+	import {
+		convertToKind,
+		type BlockSnippetPayload,
+		type EditorCommand,
+		type InlineBlockSnippetPayload,
+		type KindRow,
+		type Plugin
+	} from 'edytor';
 	import { BLOCK_KIND, INLINE_KIND, customKindRows } from '#lib/shared/blocks/kinds.ts';
+	import { composeIso } from '#lib/shared/blocks/date-label.ts';
+	import BreadcrumbBlock from './blocks/BreadcrumbBlock.svelte';
+	import DatabaseViewBlock from './blocks/DatabaseViewBlock.svelte';
+	import DateMention from './blocks/DateMention.svelte';
 
-	export const customKindsPlugin: Plugin = () => ({
-		blocks: {
-			[BLOCK_KIND.databaseView]: {
-				...customKindRows[BLOCK_KIND.databaseView],
-				atomic: [...customKindRows[BLOCK_KIND.databaseView].atomic],
-				snippet: databaseView
-			},
-			[BLOCK_KIND.breadcrumb]: {
-				...customKindRows[BLOCK_KIND.breadcrumb],
-				snippet: breadcrumb,
-				presets: [{ label: 'Breadcrumb', icon: '⌂', keywords: ['breadcrumb', 'path', 'trail'], group: 'Advanced' }],
-				empty: { content: [], children: [] }
-			}
-		},
-		inlineBlocks: {
-			[INLINE_KIND.dateMention]: { snippet: dateMention, plain: (data) => String(data?.start ?? '') }
-		}
-	});
+	/** What the commands ask of the editor view around them. */
+	export interface CustomKindsHost {
+		/** Creates the database behind an inline `database_view` block (its page, collection and default table view). */
+		createInlineDatabase: (id: string) => Promise<void>;
+		/** Whether the page may not change (locked, or the viewer only reads). */
+		readonly: () => boolean;
+	}
+
+	const newId = () => `db_${crypto.randomUUID().replaceAll('-', '').slice(0, 22)}`;
+
+	export function createCustomKindsPlugin(host: CustomKindsHost): Plugin {
+		return (edytor) => {
+			const caretBlock = () => edytor.selection.caret?.block;
+			const databaseCommand = (id: string, label: string, keywords: string[], make: () => string | null): EditorCommand => ({
+				id,
+				label,
+				icon: '▦',
+				keywords,
+				group: 'Database',
+				isEnabled: (view = edytor) => Boolean(view.selection.caret?.block.convertible),
+				run: () => {
+					const block = caretBlock();
+					if (!block?.convertible || !edytor.dispatcher.permits() || host.readonly()) return false;
+					const collectionId = make();
+					const row: KindRow = {
+						id,
+						label,
+						value: {
+							type: BLOCK_KIND.databaseView,
+							data: { collectionId, viewId: null, localFilter: null },
+							content: [],
+							children: []
+						},
+						replaces: true
+					};
+					const applied = convertToKind(edytor, block, row);
+					// An inline database exists the moment the block does (the id is ours to choose); a failure removes the block.
+					if (applied && collectionId) void host.createInlineDatabase(collectionId);
+					return applied;
+				}
+			});
+			const dateCommand: EditorCommand = {
+				id: 'date.mention',
+				label: 'Date',
+				icon: '📅',
+				keywords: ['date', 'today', 'mention', 'calendar', 'reminder', 'time'],
+				group: 'Inline',
+				isEnabled: (view = edytor) => Boolean(view.selection.caret),
+				run: () => {
+					const caret = edytor.selection.caret;
+					if (!caret || !edytor.dispatcher.permits() || host.readonly()) return false;
+					const start = composeIso(new Date(), null);
+					return (
+						edytor.insertInline(caret.block.id, caret.offset, { type: INLINE_KIND.dateMention, data: { start } }).status === 'applied'
+					);
+				}
+			};
+			return {
+				blocks: {
+					[BLOCK_KIND.databaseView]: {
+						...customKindRows[BLOCK_KIND.databaseView],
+						atomic: [...customKindRows[BLOCK_KIND.databaseView].atomic],
+						snippet: databaseView,
+						empty: { content: [], children: [] }
+					},
+					[BLOCK_KIND.breadcrumb]: {
+						...customKindRows[BLOCK_KIND.breadcrumb],
+						snippet: breadcrumb,
+						presets: [{ label: 'Breadcrumb', icon: '⌂', keywords: ['breadcrumb', 'path', 'trail'], group: 'Advanced blocks' }],
+						empty: { content: [], children: [] }
+					}
+				},
+				inlineBlocks: {
+					[INLINE_KIND.dateMention]: { snippet: dateMention, plain: (data) => String(data?.start ?? '') }
+				},
+				commands: [
+					databaseCommand('database.inline', 'Database – inline', ['database', 'table', 'inline', 'new', 'collection'], newId),
+					databaseCommand('database.linked', 'Linked view of database', ['database', 'linked', 'view', 'link', 'table'], () => null),
+					dateCommand
+				]
+			};
+		};
+	}
 </script>
 
-{#snippet databaseView({ block }: BlockSnippetPayload<{ collectionId?: string }>)}
-	<div use:block.void class="flarion-placeholder" data-flarion-kind="database_view" contenteditable="false">
-		<span aria-hidden="true">▦</span>
-		<span>Database view{block.data?.collectionId ? ` · ${block.data.collectionId}` : ''}</span>
+{#snippet databaseView({ block }: BlockSnippetPayload<Record<string, unknown>>)}
+	<div use:block.void class="flarion-block" data-flarion-kind="database_view" contenteditable="false">
+		<DatabaseViewBlock {block} />
 	</div>
 {/snippet}
 
 {#snippet breadcrumb({ block }: BlockSnippetPayload)}
-	<div use:block.void class="flarion-placeholder" data-flarion-kind="breadcrumb" contenteditable="false">
-		<span aria-hidden="true">⌂</span>
-		<span>Breadcrumb</span>
+	<div use:block.void class="flarion-block" data-flarion-kind="breadcrumb" contenteditable="false">
+		<BreadcrumbBlock />
 	</div>
 {/snippet}
 
 {#snippet dateMention({ block }: InlineBlockSnippetPayload<{ start?: string; end?: string }>)}
-	<span class="edytor-mention" data-flarion-kind="date_mention" data-selected={block.selected ? 'true' : undefined}>
-		@{block.data?.start ?? 'date'}{block.data?.end ? ` → ${block.data.end}` : ''}
-	</span>
+	<DateMention {block} />
 {/snippet}
-
-<style>
-	.flarion-placeholder {
-		display: flex;
-		align-items: center;
-		gap: 8px;
-		margin: 4px 0;
-		padding: 8px 12px;
-		border-radius: 6px;
-		background: var(--app-hover);
-		color: var(--app-text-secondary);
-		font-size: 14px;
-		user-select: none;
-	}
-</style>

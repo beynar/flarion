@@ -7,7 +7,7 @@ import { handleRoom } from '../../../src/server/http/room-route';
 import { PageDO } from '../../../src/server/objects/page/page-do';
 import { issueRoomToken } from '../../../src/server/rooms/issue-token';
 import { verifyRoomToken } from '../../../src/server/rooms/token';
-import { claimsFor, connect, dialOutcome, mint, pageStub, para, seed, testEnv, textOf, uniqueId, waitSaved } from './helpers';
+import { claimsFor, connect, dialOutcome, ensureRoomAccess, mint, pageStub, para, seed, testEnv, textOf, uniqueId, waitSaved } from './helpers';
 
 const wait = { timeout: 10_000, interval: 25 };
 
@@ -197,6 +197,16 @@ describe('room tokens', () => {
 	it('page.roomToken issues write for members and read for guests, bound to workspace and page', async () => {
 		const ws = uniqueId('ws');
 		const page = uniqueId('pg');
+		await ensureRoomAccess(claimsFor(ws, page, 'u-owner'));
+		const stub = testEnv.WORKSPACE.getByName(ws);
+		for (const [role, access] of [['owner', 'write'], ['admin', 'write'], ['member', 'write'], ['guest', 'read']] as const) {
+			await stub.syncMember({ userId: `u-${role}`, role, name: role });
+		}
+		// A guest sees only what is shared with them: here, read access on this page.
+		await stub.setGrant(
+			{ userId: 'room-owner', sessionId: 's', workspaceId: ws, role: 'owner', name: 'Owner' },
+			{ pageId: page, subjectKind: 'user', subjectId: 'u-guest', level: 'read' }
+		);
 		for (const [role, access] of [['owner', 'write'], ['admin', 'write'], ['member', 'write'], ['guest', 'read']] as const) {
 			const issued = await issueRoomToken(testEnv, { userId: `u-${role}`, workspaceId: ws, role }, page);
 			expect(issued.access).toBe(access);
@@ -204,11 +214,21 @@ describe('room tokens', () => {
 			const verified = await verifyRoomToken(testEnv, issued.token);
 			expect(verified).toMatchObject({ ok: true, claims: { userId: `u-${role}`, workspaceId: ws, pageId: page, access } });
 		}
+		// A guest with no grant gets no token at all.
+		await stub.syncMember({ userId: 'u-stray', role: 'guest', name: 'stray' });
+		await expect(issueRoomToken(testEnv, { userId: 'u-stray', workspaceId: ws, role: 'guest' }, page)).rejects.toThrow('no access');
 	});
 
 	it('a guest token opens the room read-only', async () => {
 		const ws = uniqueId('ws');
 		const page = uniqueId('pg');
+		await ensureRoomAccess(claimsFor(ws, page, 'u-owner'));
+		const stub = testEnv.WORKSPACE.getByName(ws);
+		await stub.syncMember({ userId: 'guest1', role: 'guest', name: 'guest1' });
+		await stub.setGrant(
+			{ userId: 'room-owner', sessionId: 's', workspaceId: ws, role: 'owner', name: 'Owner' },
+			{ pageId: page, subjectKind: 'user', subjectId: 'guest1', level: 'read' }
+		);
 		const issued = await issueRoomToken(testEnv, { userId: 'guest1', workspaceId: ws, role: 'guest' }, page);
 		const guest = connect(page, issued.token, { userId: 'guest1', value: seed('x') });
 		await vi.waitFor(() => expect(guest.access).toContain('read'), wait);
@@ -234,5 +254,28 @@ describe('dev token endpoint', () => {
 		expect(await verifyRoomToken(testEnv, body.token)).toMatchObject({ ok: true, claims: { userId: 'ada', workspaceId: 'w1', pageId: 'p1', access: 'comment' } });
 		expect((await handleRoom(post({ workspaceId: 'bad/id', pageId: 'p1', userId: 'ada' }), dev, ctx))?.status).toBe(400);
 		expect((await handleRoom(post({ workspaceId: 'w', pageId: 'p', userId: 'u', access: 'admin' }), dev, ctx))?.status).toBe(400);
+	});
+});
+
+describe('dev token endpoint opens a real room', () => {
+	it('creates the throwaway workspace, member and page, so the standalone editor page can dial', async () => {
+		const dev = { ...testEnv, ENVIRONMENT: 'development' } as unknown as Env;
+		const ctx = { waitUntil() {}, passThroughOnException() {} };
+		const ws = uniqueId('devws');
+		const page = uniqueId('devpg');
+		const mintFor = async (userId: string, extra: Record<string, unknown> = {}) => {
+			const response = await handleRoom(
+				new Request('http://flarion.test/rooms/dev/token', { method: 'POST', body: JSON.stringify({ workspaceId: ws, pageId: page, userId, ...extra }), headers: { 'content-type': 'application/json' } }),
+				dev,
+				ctx
+			);
+			return ((await response!.json()) as { token: string }).token;
+		};
+		expect(await dialOutcome(page, { token: await mintFor('ada'), workspace: ws })).toBe('open');
+		// A second person, and one with full access (the owner), join the same page.
+		expect(await dialOutcome(page, { token: await mintFor('bob', { access: 'comment' }), workspace: ws })).toBe('open');
+		expect(await dialOutcome(page, { token: await mintFor('carol', { full: true }), workspace: ws })).toBe('open');
+		// Minting again is idempotent.
+		expect(await dialOutcome(page, { token: await mintFor('ada'), workspace: ws })).toBe('open');
 	});
 });

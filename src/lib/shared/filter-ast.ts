@@ -572,6 +572,8 @@ export function evaluate(ast: FilterNode, values: PageValues, ctx: EvalCtx): boo
 export interface Row {
 	id: string;
 	values: PageValues;
+	/** Sibling rank (or the hand-picked member's): breaks ties between equal sort keys before the id does. */
+	rank?: string;
 }
 
 function sortKeyForRow(row: Row, prop: string, registry: PropertyRegistry) {
@@ -580,7 +582,7 @@ function sortKeyForRow(row: Row, prop: string, registry: PropertyRegistry) {
 	return sortKeyOf(def, row.values[prop] ?? null);
 }
 
-/** Order of rows under sort specs; ties break by id, so the order is total and stable. */
+/** Order of rows under sort specs; ties break by rank (when rows carry one), then id, so the order is total and stable. */
 export function compareRows(a: Row, b: Row, sorts: readonly SortSpec[], registry: PropertyRegistry): number {
 	for (const s of sorts) {
 		const c = compareOptionalKeys(
@@ -591,6 +593,7 @@ export function compareRows(a: Row, b: Row, sorts: readonly SortSpec[], registry
 		);
 		if (c !== 0) return c;
 	}
+	if (a.rank !== undefined && b.rank !== undefined && a.rank !== b.rank) return a.rank < b.rank ? -1 : 1;
 	return compareText(a.id, b.id);
 }
 

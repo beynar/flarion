@@ -1,26 +1,20 @@
 /**
- * The bookmark unfurl seam. P2's Worker fetches the page, parses it with HTMLRewriter and caches the
- * answer in KV (docs/PLAN.md "Files and media"). The client calls it through `/rpc`; until the
- * procedure exists the call is refused and the bookmark card shows the bare URL, which is the
- * plugin's documented fallback.
+ * The bookmark unfurl: `files.unfurl`, answered by the Worker (it fetches the page behind an SSRF guard, parses it
+ * with HTMLRewriter and caches the result in KV: src/server/files/unfurl.ts). A refused or failed unfurl is
+ * `null`, and the bookmark card shows the bare URL, which is the plugin's documented fallback.
  */
 import type { BookmarkPreview } from 'edytor';
+import type { Rpc } from '#lib/client/rpc.ts';
 
 export type Unfurl = (url: string) => Promise<BookmarkPreview | null>;
 
-/** `POST /rpc/files/unfurl`, oRPC's JSON envelope. Anything but a 200 with a title-bearing body is `null`. */
+/** The oRPC call `files.unfurl` (the client adds the CSRF header, the app version and the workspace). */
 export const rpcUnfurl =
-	(workspaceId: string, fetcher: typeof fetch = fetch): Unfurl =>
+	(rpc: Pick<Rpc['files'], 'unfurl'> | { files: Pick<Rpc['files'], 'unfurl'> }): Unfurl =>
 	async (url) => {
 		try {
-			const response = await fetcher('/rpc/files/unfurl', {
-				method: 'POST',
-				headers: { 'content-type': 'application/json', 'x-workspace-id': workspaceId },
-				body: JSON.stringify({ json: { url } })
-			});
-			if (!response.ok) return null;
-			const body = (await response.json()) as { json?: BookmarkPreview | null };
-			return body.json ?? null;
+			const files = 'files' in rpc ? rpc.files : rpc;
+			return (await files.unfurl({ url })) ?? null;
 		} catch {
 			return null;
 		}

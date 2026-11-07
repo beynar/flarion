@@ -45,3 +45,25 @@ export function resolvePageIdentity(sql: SqlStorage, name: string | undefined): 
 	if (stored) return stored;
 	throw new Error('page object has no identity: it must be addressed as workspaceId:pageId');
 }
+
+/**
+ * Records an identity the Worker names explicitly (`PageDO.recordIdentity`). `ctx.id.name` is not available to an
+ * object reached through every kind of stub (under `vite dev` the Worker's `getByName` goes through a platform proxy
+ * that does not carry it), so the room route tells the object who it is before the room loads. Idempotent; an
+ * identity that contradicts the name or what is stored is refused, like in {@link resolvePageIdentity}.
+ */
+export function recordPageMeta(sql: SqlStorage, name: string | undefined, identity: PageIdentity): void {
+	if (!parseRoomName(`${identity.workspaceId}:${identity.pageId}`)) throw new Error('invalid page identity');
+	const named = parseRoomName(name);
+	if (named && (named.workspaceId !== identity.workspaceId || named.pageId !== identity.pageId)) {
+		throw new Error('page object identity does not match its name');
+	}
+	const stored = readPageMeta(sql);
+	if (stored) {
+		if (stored.workspaceId !== identity.workspaceId || stored.pageId !== identity.pageId) {
+			throw new Error('page object identity does not match its name');
+		}
+		return;
+	}
+	sql.exec('INSERT INTO page_meta (page_id, workspace_id) VALUES (?, ?)', identity.pageId, identity.workspaceId);
+}

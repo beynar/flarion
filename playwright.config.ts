@@ -13,7 +13,7 @@ const origin = `http://localhost:${port}`;
 
 export default defineConfig({
 	testDir: './tests/e2e',
-	testIgnore: '**/editor/**', // the Editor track has its own config (tests/e2e/editor/playwright.config.ts)
+	testIgnore: ['**/editor/**', '**/app/**'], // the Editor and App UI tracks have their own configs (tests/e2e/{editor,app}/playwright.config.ts)
 	globalSetup: './tests/e2e/global-setup.ts',
 	timeout: 90_000,
 	expect: { timeout: 15_000 },

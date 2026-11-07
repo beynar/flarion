@@ -13,13 +13,14 @@ import {
 	closedSocket,
 	routeDocumentComments,
 	routeDocumentSocket,
+	type AuthorizeDocumentSocket,
 	type DocumentNamespace
 } from 'edytor/cloudflare';
 import { checkKindsVersion } from '../../lib/shared/blocks/kinds.js';
 import { CLOSE } from '../../lib/shared/protocol.js';
 import { createRoomAuthorize } from '../rooms/authorize';
 import { isValidRoomId, roomName } from '../rooms/names';
-import { mintRoomToken, verifyRoomToken, type RoomAccess, type VerifyRoomTokenResult } from '../rooms/token';
+import { mintRoomToken, verifyRoomToken, type RoomAccess, type RoomClaims, type VerifyRoomTokenResult } from '../rooms/token';
 import type { RouteHandler } from './types';
 
 const ROOM_PATH = /^\/rooms\/([^/]+)\/?$/;
@@ -27,6 +28,8 @@ const ROOM_PATH = /^\/rooms\/([^/]+)\/?$/;
 const COMMENTS_PATH = /^\/rooms\/comments\/([^/]+)\/?$/;
 /** Development only: mints a room token for the editor test page (never answers outside `development`). */
 const DEV_TOKEN_PATH = '/rooms/dev/token';
+/** Development only: locks or unlocks a page's room, as a user with full access (the e2e tests for page locks). */
+const DEV_LOCK_PATH = '/rooms/dev/lock';
 /** The query parameter a client sends its block `KINDS_VERSION` in (see `src/lib/shared/blocks/kinds.ts`). */
 export const KINDS_PARAM = 'kinds';
 
@@ -51,7 +54,8 @@ function roomOriginPolicy(env: Pick<Env, 'APP_ORIGIN' | 'ENVIRONMENT'>): string[
 const ACCESS: readonly RoomAccess[] = ['read', 'comment', 'write'];
 
 /**
- * `POST /rooms/dev/token` `{ workspaceId, pageId, userId, access?, ttlSeconds? }` answers `{ token, expiresAt, access }`.
+ * `POST /rooms/dev/token` `{ workspaceId, pageId, userId, access?, ttlSeconds?, full? }` answers `{ token, expiresAt, access }`;
+ * `full: true` also tells the room this user has full access on the page (they edit through a page lock).
  * It exists for `src/routes/(dev)/editor-test` and the Playwright co-edit test, and refuses everywhere
  * but `ENVIRONMENT=development`: anyone could mint any identity with it.
  */
@@ -76,6 +80,8 @@ async function handleDevToken(request: Request, env: Env): Promise<Response> {
 	) {
 		return new Response('Invalid claims', { status: 400 });
 	}
+	await ensureDevRoom(env, { workspaceId, pageId, userId, access }, body.full === true);
+	if (body.full === true) await pageRoom(env, workspaceId, pageId).noteBypass(userId, true);
 	const ttl = Number(body.ttlSeconds);
 	const minted = await mintRoomToken(
 		env,
@@ -85,9 +91,74 @@ async function handleDevToken(request: Request, env: Env): Promise<Response> {
 	return Response.json({ ...minted, access });
 }
 
+/** The page room's lock methods, hand-typed (edytor's generated RPC types are too deep for tsc). */
+interface PageRoomApi {
+	recordIdentity(workspaceId: string, pageId: string): Promise<void>;
+	noteBypass(userId: string, bypass: boolean): Promise<void>;
+	setLocked(userId: string, locked: boolean, full: boolean): Promise<unknown>;
+}
+const pageRoom = (env: Env, workspaceId: string, pageId: string) =>
+	env.PAGE.getByName(roomName(workspaceId, pageId)) as unknown as PageRoomApi;
+
+/**
+ * Since P2 a dial asks the Workspace DO what the user may do on the page, so the standalone editor test page
+ * needs a real (throwaway) workspace, member and page behind its dev token: created here, idempotently. A token's
+ * `full: true` makes the user the workspace owner (full access), anyone else a member (update).
+ */
+async function ensureDevRoom(env: Env, claims: RoomClaims, full: boolean): Promise<void> {
+	const workspace = env.WORKSPACE.getByName(claims.workspaceId) as unknown as {
+		init(args: { workspaceId: string; name: string; ownerId: string; ownerName: string }): Promise<{ teamspaceId: string | null }>;
+		syncMember(args: { userId: string; role: 'owner' | 'member'; name: string }): Promise<void>;
+		pageAccess(actor: { userId: string }, pageId: string): Promise<string | null>;
+		createPage(actor: unknown, input: unknown): Promise<unknown>;
+	};
+	const owner = { userId: 'dev-owner', sessionId: 'dev', workspaceId: claims.workspaceId, role: 'owner' as const, name: 'Dev owner' };
+	const { teamspaceId } = await workspace.init({ workspaceId: claims.workspaceId, name: claims.workspaceId, ownerId: owner.userId, ownerName: owner.name });
+	// A workspace left over from an earlier dev run may not know our owner yet.
+	await workspace.syncMember({ userId: owner.userId, role: 'owner', name: owner.name });
+	if (claims.userId !== owner.userId) await workspace.syncMember({ userId: claims.userId, role: full ? 'owner' : 'member', name: claims.userId });
+	if ((await workspace.pageAccess({ userId: owner.userId }, claims.pageId)) === null) {
+		await workspace
+			.createPage(owner, { id: claims.pageId, parentId: null, teamspaceId, appVersion: env.APP_VERSION })
+			.catch((error) => console.warn('[rooms] dev page creation failed:', error instanceof Error ? error.message : error));
+	}
+}
+
+/** `POST /rooms/dev/lock` `{ workspaceId, pageId, userId, locked }`: development only. */
+async function handleDevLock(request: Request, env: Env): Promise<Response> {
+	if (env.ENVIRONMENT !== 'development') return new Response('Not found', { status: 404 });
+	if (request.method !== 'POST') return new Response('Method not allowed', { status: 405 });
+	const body = (await request.json().catch(() => null)) as Record<string, unknown> | null;
+	const { workspaceId, pageId, userId, locked } = body ?? {};
+	if (typeof workspaceId !== 'string' || typeof pageId !== 'string' || typeof userId !== 'string' || typeof locked !== 'boolean') {
+		return new Response('Invalid lock request', { status: 400 });
+	}
+	if (!isValidRoomId(workspaceId) || !isValidRoomId(pageId)) return new Response('Invalid ids', { status: 400 });
+	return Response.json(await pageRoom(env, workspaceId, pageId).setLocked(userId, locked, true));
+}
+
+/**
+ * At every dial, tells the room whether the user has full access on the page (they edit through a page
+ * lock). Best effort and only when the Workspace DO knows the user: an unknown level changes nothing.
+ */
+async function noteFullAccess(env: Env, claims: RoomClaims): Promise<void> {
+	// First, who the room is: an object reached through a stub without its name could not tell (see `recordPageMeta`).
+	await pageRoom(env, claims.workspaceId, claims.pageId).recordIdentity(claims.workspaceId, claims.pageId);
+	try {
+		const workspace = env.WORKSPACE.getByName(claims.workspaceId) as unknown as {
+			editorUserLevel(userId: string, pageId: string): Promise<string | null>;
+		};
+		const level = await workspace.editorUserLevel(claims.userId, claims.pageId);
+		if (level !== null) await pageRoom(env, claims.workspaceId, claims.pageId).noteBypass(claims.userId, level === 'full');
+	} catch (error) {
+		console.warn('[rooms] could not read the dialing user level:', error instanceof Error ? error.message : error);
+	}
+}
+
 export const handleRoom: RouteHandler = async (request, env) => {
 	const url = new URL(request.url);
 	if (url.pathname === DEV_TOKEN_PATH) return handleDevToken(request, env);
+	if (url.pathname === DEV_LOCK_PATH) return handleDevLock(request, env);
 	const comments = COMMENTS_PATH.exec(url.pathname);
 	const match = comments ?? ROOM_PATH.exec(url.pathname);
 	if (!match) return new Response('Not found', { status: 404 });
@@ -114,7 +185,20 @@ export const handleRoom: RouteHandler = async (request, env) => {
 	}
 
 	const verified: VerifyRoomTokenResult = await verifyRoomToken(env, url.searchParams.get('token'));
-	const authorize = createRoomAuthorize({ env, verified, workspaceHint: url.searchParams.get('workspace') });
+	const authorizeBase = createRoomAuthorize({ env, verified, workspaceHint: url.searchParams.get('workspace') });
+	const authorize: AuthorizeDocumentSocket = async (req, documentId) => {
+		const identity = await authorizeBase(req, documentId);
+		if (identity && 'userId' in identity && verified.ok) {
+			try {
+				await noteFullAccess(env, verified.claims);
+			} catch (error) {
+				// The room could not be told who it is (an identity that contradicts its name): nobody gets in.
+				console.warn('[rooms] refused a dial:', error instanceof Error ? error.message : error);
+				return null;
+			}
+		}
+		return identity;
+	};
 	// Only reachable once `authorize` accepted, i.e. `verified.ok`: the workspace comes from the token.
 	const rooms: DocumentNamespace = {
 		getByName: (id) => {

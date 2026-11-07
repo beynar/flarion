@@ -3,14 +3,19 @@
 	a room connection to `/rooms/:pageId` kept alive with short-lived tokens. The page header (icon,
 	cover, title, properties) is outside it: `#lib/components/page-header/PageHeader.svelte`.
 
-	Props are the contract the App UI codes against; `upload` and `unfurl` are seams P2 fills.
+	Props are the contract the App UI codes against. Uploads (`files.begin` -> `PUT /files/:id` -> `files.complete`),
+	bookmark unfurls (`files.unfurl`), the inline database and the page lock (`page.lock.*`, shown as a banner and a
+	read-only view) are wired here; `upload`, `unfurl` and `fetchLock` override them for the standalone test page.
 -->
 <script lang="ts">
 	import { onMount, untrack } from 'svelte';
 	import 'katex/dist/katex.min.css';
 	import type { SyncRefusedError, Uploader, EdytorInstance } from 'edytor';
+	import type { Rpc } from '#lib/client/rpc.ts';
 	import { CLOSE } from '#lib/shared/protocol.ts';
 	import EditorView from './EditorView.svelte';
+	import type { AncestorRef, DatabaseRef } from './context.ts';
+	import { pageLocks, rpcLockFetcher, type LockFetcher } from './page-lock.svelte.ts';
 	import type { Unfurl } from './unfurl.ts';
 	import type { PagesSearch, PeopleSearch } from './mentions.ts';
 
@@ -26,9 +31,14 @@
 		resolvePage,
 		searchPages,
 		searchPeople,
+		resolvePerson,
 		onNavigate,
 		upload,
 		unfurl,
+		resolveAncestors,
+		searchDatabases,
+		fetchLock,
+		client,
 		edytor = $bindable()
 	}: {
 		workspaceId: string;
@@ -40,11 +50,21 @@
 		resolvePage?: (id: string) => { title: string; icon: string | null } | undefined;
 		searchPages?: PagesSearch;
 		searchPeople?: PeopleSearch;
+		/** A person's name by id (comment authors): the workspace's members. */
+		resolvePerson?: (id: string) => { name: string } | undefined;
 		onNavigate?: (pageId: string) => void;
-		/** Stores an image, file, video or audio and answers its URL. Defaults to a stub that throws "uploads arrive in P2". */
+		/** Stores an image, file, video or audio and answers its URL. Default: R2 through `files.begin`/`PUT`/`files.complete`. */
 		upload?: Uploader;
-		/** Reads a bookmark's title and cover. Defaults to the `/rpc` seam P2 fills. */
+		/** Reads a bookmark's title and cover. Default: `files.unfurl` (the Worker fetches it, cached in KV). */
 		unfurl?: Unfurl;
+		/** The pages above a page, root first: the breadcrumb block reads them (reactive in the App UI store). */
+		resolveAncestors?: (pageId: string) => AncestorRef[];
+		/** Databases matching a search (the linked view's picker). */
+		searchDatabases?: (query: string) => DatabaseRef[] | Promise<DatabaseRef[]>;
+		/** Reads the page lock (default `page.lock.get`). */
+		fetchLock?: LockFetcher;
+		/** The `/rpc` client the editor's own calls use (default: the app's). */
+		client?: Rpc;
 		/** The editor instance, once it exists. */
 		edytor?: EdytorInstance;
 	} = $props();
@@ -79,9 +99,25 @@
 
 	let mounted = $state(false);
 	onMount(() => (mounted = true));
+
+	// The page lock lives in the room: read it now and while the page is open. A locked page is read-only for
+	// everyone without full access (the room refuses their edits anyway); the banner says why.
+	$effect(() => {
+		const id = pageId;
+		const fetcher = fetchLock ?? rpcLockFetcher;
+		return pageLocks.watch(id, fetcher);
+	});
+	const lock = $derived(pageLocks.get(pageId));
+	const lockedOut = $derived(!!lock?.locked && !lock.bypass);
 </script>
 
 <div class="flarion-editor edytor-notion" data-flarion-editor data-testid="editor">
+	{#if lock?.locked}
+		<div class="flarion-editor-banner flarion-editor-lock" role="status" data-testid="editor-locked">
+			<span aria-hidden="true">🔒</span>
+			{lockedOut ? 'This page is locked. Only people with full access can edit it.' : 'This page is locked. You can still edit it because you have full access.'}
+		</div>
+	{/if}
 	{#if failure === 'reload'}
 		<div class="flarion-editor-banner" role="alert" data-testid="editor-reload">
 			Flarion was updated. <button type="button" onclick={() => location.reload()}>Reload to continue</button>
@@ -103,14 +139,18 @@
 				{initial}
 				{getRoomToken}
 				{user}
-				readonly={readonly || initial.access === 'read'}
+				readonly={readonly || initial.access !== 'write' || lockedOut}
 				{onSubpage}
 				{resolvePage}
 				{searchPages}
 				{searchPeople}
+				{resolvePerson}
 				{onNavigate}
 				{upload}
 				{unfurl}
+				{resolveAncestors}
+				{searchDatabases}
+				{client}
 				onRefused={refused}
 				bind:edytor
 			/>

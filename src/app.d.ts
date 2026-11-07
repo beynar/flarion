@@ -31,6 +31,7 @@ declare namespace Cloudflare {
 		JOBS: Queue;
 		RL_AUTH: RateLimit;
 		RL_API: RateLimit;
+		RL_PUBLIC: RateLimit;
 		EMAIL: SendEmail;
 		ASSETS: Fetcher;
 		AI: Ai;

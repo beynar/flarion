@@ -77,6 +77,7 @@ import {
 	pageCreateSchema,
 	pageDuplicateSchema,
 	pageIdSchema,
+	pageLockSchema,
 	pageMoveSchema,
 	pageRefSchema,
 	propertyUpdateSchema,
@@ -179,6 +180,11 @@ const pageRouter = {
 			})
 		),
 	trashList: priv.input(trashListInputSchema).output(trashListResultSchema),
+	/** Page lock: kept by the page's room. Locking needs `update`; unlocking, the locker or `full`. */
+	lock: {
+		get: priv.input(pageIdSchema).output(pageLockSchema),
+		set: priv.input(v.object({ id: idSchema, locked: v.boolean() })).output(pageLockSchema)
+	},
 	history: {
 		list: priv.input(historyListInputSchema).output(historyListResultSchema),
 		restore: priv.input(historyRestoreInputSchema).output(seqSchema)
@@ -241,7 +247,11 @@ const filesRouter = {
 	/** Finishes an upload (and a multipart one's parts). */
 	complete: priv.input(fileCompleteInputSchema).output(fileInfoSchema),
 	abort: priv.input(fileIdSchema).output(emptySchema),
-	get: priv.input(fileIdSchema).output(fileInfoSchema)
+	get: priv.input(fileIdSchema).output(fileInfoSchema),
+	/** A bookmark's title, description, icon and cover, fetched by the Worker (cached in KV); `null` when none. */
+	unfurl: priv
+		.input(v.object({ url: v.pipe(v.string(), v.maxLength(2048)) }))
+		.output(v.nullable(v.object({ title: v.optional(v.string()), description: v.optional(v.string()), image: v.optional(v.string()), icon: v.optional(v.string()) })))
 };
 
 const tokensRouter = {

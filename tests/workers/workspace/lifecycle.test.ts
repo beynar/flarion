@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'vitest';
+import { CLOSE } from '../../../src/lib/shared/protocol';
 import type { PageIndexItem } from '../../../src/server/queues/types';
 import { decodeWorkspaceError } from '../../../src/server/objects/workspace/errors';
 import { connect, workspaceStub } from '../socket/helpers';
@@ -87,16 +88,35 @@ describe('membership mirror', () => {
 		expect(await rows(ws.stub, "SELECT name FROM member WHERE user_id = 'ana'")).toEqual([{ name: 'Ana B' }]);
 	});
 
-	test('removing a member closes their sockets with FORBIDDEN; a role change reaches the attachment', async () => {
+	test('a role change makes the member reconnect (their visibility is another actor\'s); removing them closes with FORBIDDEN', async () => {
 		const ws = await createWorkspace('members-socket');
 		await ws.stub.syncMember({ userId: 'bob', role: 'member', name: 'Bob' });
 		const bob = await connect(ws.id, { 'x-flarion-dev-actor': 'bob', 'x-flarion-dev-role': 'member' });
 		await bob.hello();
 		await ws.stub.syncMember({ userId: 'bob', role: 'admin', name: 'Bob' });
+		expect((await bob.closed).code).toBe(CLOSE.TRY_AGAIN);
+		// Back with the new role: the attachment carries it, and the removal closes for good.
+		const again = await connect(ws.id, { 'x-flarion-dev-actor': 'bob', 'x-flarion-dev-role': 'admin' });
+		await again.hello();
 		const attached = await inside(ws.stub, (_sql, state) => state.getWebSockets().map((s) => s.deserializeAttachment()));
-		expect(attached[0].actor.role).toBe('admin');
+		expect(attached.at(-1).actor.role).toBe('admin');
 		await ws.stub.syncMember({ userId: 'bob', role: null });
-		expect((await bob.closed).code).toBe(4403);
+		expect((await again.closed).code).toBe(4403);
+	});
+
+	test('a new member joins the default teamspace; a guest does not; removal leaves every teamspace', async () => {
+		const ws = await createWorkspace('members-join');
+		await ws.stub.syncMember({ userId: 'ann', role: 'member', name: 'Ann' });
+		await ws.stub.syncMember({ userId: 'gus', role: 'guest', name: 'Gus' });
+		const joined = (user: string) => rows<{ teamspace_id: string }>(ws.stub, 'SELECT teamspace_id FROM teamspace_member WHERE user_id = ?', user);
+		expect(await joined('ann')).toEqual([{ teamspace_id: ws.generalId }]);
+		expect(await joined('gus')).toEqual([]);
+		// Promoted from guest: joins; a second sync of the same role changes nothing.
+		await ws.stub.syncMember({ userId: 'gus', role: 'member', name: 'Gus' });
+		await ws.stub.syncMember({ userId: 'gus', role: 'member', name: 'Gus' });
+		expect(await joined('gus')).toEqual([{ teamspace_id: ws.generalId }]);
+		await ws.stub.syncMember({ userId: 'ann', role: null });
+		expect(await joined('ann')).toEqual([]);
 	});
 });
 
@@ -125,8 +145,11 @@ describe('teamspaces', () => {
 		await ws.stub.setTeamspaceMemberRole(ana, { teamspaceId: ts.id, userId: 'owner-1', role: 'owner' });
 		await ws.stub.setTeamspaceMemberRole(ana, { teamspaceId: ts.id, userId: 'ana', role: 'member' });
 		// The last owner cannot leave.
-		expect((await failure(ws.stub.setTeamspaceMemberRole(ana, { teamspaceId: ts.id, userId: 'owner-1', role: 'member' })))?.code).toBe('CONFLICT');
-		expect((await failure(ws.stub.removeTeamspaceMember(ana, { teamspaceId: ts.id, userId: 'owner-1' })))?.code).toBe('CONFLICT');
+		// Ana demoted herself: she no longer manages the teamspace, and the only owner left cannot step down.
+		expect((await failure(ws.stub.setTeamspaceMemberRole(ana, { teamspaceId: ts.id, userId: 'owner-1', role: 'member' })))?.code).toBe('FORBIDDEN');
+		expect((await failure(ws.stub.setTeamspaceMemberRole(ws.owner, { teamspaceId: ts.id, userId: 'owner-1', role: 'member' })))?.code).toBe('CONFLICT');
+		expect((await failure(ws.stub.removeTeamspaceMember(ana, { teamspaceId: ts.id, userId: 'owner-1' })))?.code).toBe('FORBIDDEN');
+		expect((await failure(ws.stub.removeTeamspaceMember(ws.owner, { teamspaceId: ts.id, userId: 'owner-1' })))?.code).toBe('CONFLICT');
 		await ws.stub.removeTeamspaceMember(ws.owner, { teamspaceId: ts.id, userId: 'ana' });
 		expect((await ws.stub.teamspaceMembers(ws.owner, ts.id)).map((m) => m.userId)).toEqual(['owner-1']);
 

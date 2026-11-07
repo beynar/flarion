@@ -27,7 +27,8 @@
 		onTitle,
 		onIcon,
 		onCover,
-		onEnter
+		onEnter,
+		uploadCover
 	}: {
 		page: PageHeaderPage;
 		access: PageHeaderAccess;
@@ -39,6 +40,11 @@
 		onTitle: (title: string) => void;
 		onIcon: (icon: string | null) => void;
 		onCover: (cover: string | null, position?: number) => void;
+		/**
+		 * Stores an image chosen from the device and answers the string to save as the cover (the files flow:
+		 * `createCoverUploader` in the editor's `uploads.ts`). Without it the cover menu has no Upload.
+		 */
+		uploadCover?: (file: File) => Promise<string>;
 		/** Enter in the title. Default: focus the editor below (`[data-flarion-editor]`). */
 		onEnter?: () => void;
 	} = $props();
@@ -129,6 +135,26 @@
 		close();
 	};
 
+	let uploading = $state(false);
+	let uploadError = $state('');
+	let picker = $state<HTMLInputElement>();
+	const chooseFile = async (event: Event, close: () => void) => {
+		const input = event.currentTarget as HTMLInputElement;
+		const file = input.files?.[0];
+		input.value = '';
+		if (!file || !uploadCover) return;
+		uploading = true;
+		uploadError = '';
+		try {
+			onCover(await uploadCover(file), 50);
+			close();
+		} catch (error) {
+			uploadError = error instanceof Error && error.message ? error.message : 'The upload failed';
+		} finally {
+			uploading = false;
+		}
+	};
+
 	const iconSize = 'var(--app-page-icon-size)';
 </script>
 
@@ -189,6 +215,22 @@
 										></button>
 									{/each}
 								</div>
+								{#if uploadCover}
+									<div class="cover-upload">
+										<input
+											bind:this={picker}
+											type="file"
+											accept="image/png,image/jpeg,image/webp,image/gif,image/avif"
+											hidden
+											data-testid="cover-file"
+											onchange={(event) => chooseFile(event, () => popover.close())}
+										/>
+										<button type="button" class="chip" data-testid="cover-upload" disabled={uploading} onclick={() => picker?.click()}>
+											{uploading ? 'Uploading…' : 'Upload an image'}
+										</button>
+										{#if uploadError}<span class="cover-error" role="alert" data-testid="cover-upload-error">{uploadError}</span>{/if}
+									</div>
+								{/if}
 								<form
 									class="cover-url"
 									onsubmit={(event) => {
@@ -374,6 +416,16 @@
 	.cover-url {
 		display: flex;
 		gap: 8px;
+	}
+	.cover-upload {
+		display: flex;
+		flex-direction: column;
+		align-items: flex-start;
+		gap: 6px;
+	}
+	.cover-error {
+		color: var(--app-danger, #c4554d);
+		font-size: var(--app-font-size-chrome);
 	}
 	.cover-url input {
 		flex: 1;

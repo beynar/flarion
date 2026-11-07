@@ -9,6 +9,11 @@
  * `PageDO.setAccess`, which records the level in the object's KV storage.
  *
  * Levels that cannot edit: `read`, `comment`, `none`. No record means the room's own access applies.
+ *
+ * Page lock (docs/PLAN.md "Lock page"): the lock lives in the room's KV (`lock:page`). While it is set, a
+ * frame that touches the document is denied (and compensated) unless its sender may bypass: users with full
+ * access on the page, noted by the route at every dial (`bypass:<userId>`) and cleared when their access
+ * changes. Per-block locks (`lockedBy` data, `subtree: true`) ride on edytor's `locks` option with the same bypass.
  */
 import type { FrameValidation } from 'edytor/cloudflare';
 
@@ -24,6 +29,30 @@ export function recordUserAccess(kv: SyncKvStorage, userId: string, access: Stor
 export function recordedUserAccess(kv: SyncKvStorage, userId: string): StoredAccess | undefined {
 	return kv.get<StoredAccess>(KEY(userId));
 }
+
+const LOCK_KEY = 'lock:page';
+const BYPASS_KEY = (userId: string) => `bypass:${userId}`;
+
+/** Who locked the page and when (ms). */
+export interface PageLockRecord {
+	by: string;
+	at: number;
+}
+
+export const readPageLock = (kv: SyncKvStorage): PageLockRecord | null => kv.get<PageLockRecord>(LOCK_KEY) ?? null;
+
+export function writePageLock(kv: SyncKvStorage, lock: PageLockRecord | null): void {
+	if (lock) kv.put(LOCK_KEY, lock);
+	else kv.delete(LOCK_KEY);
+}
+
+/** Records whether a user has full access on this page (they edit despite a lock). */
+export function recordBypass(kv: SyncKvStorage, userId: string, bypass: boolean): void {
+	if (bypass) kv.put(BYPASS_KEY(userId), true);
+	else kv.delete(BYPASS_KEY(userId));
+}
+
+export const canBypassLock = (kv: SyncKvStorage, userId: string): boolean => kv.get<boolean>(BYPASS_KEY(userId)) === true;
 
 const CANNOT_EDIT: ReadonlySet<StoredAccess> = new Set(['none', 'read', 'comment']);
 
@@ -41,7 +70,10 @@ export function lastEditor(kv: SyncKvStorage): string | null {
 export function createFrameValidator(kv: SyncKvStorage) {
 	return (frame: FrameValidation): boolean => {
 		const access = recordedUserAccess(kv, frame.user);
-		const allowed = access === undefined || !CANNOT_EDIT.has(access);
+		let allowed = access === undefined || !CANNOT_EDIT.has(access);
+		// A locked page takes no edit from anyone without full access.
+		const edits = frame.touched.length > 0 || frame.dataChanged;
+		if (allowed && edits && readPageLock(kv) && !canBypassLock(kv, frame.user)) allowed = false;
 		if (allowed && (frame.touched.length > 0 || frame.dataChanged) && kv.get<string>(LAST_EDITOR) !== frame.user) {
 			kv.put(LAST_EDITOR, frame.user);
 		}

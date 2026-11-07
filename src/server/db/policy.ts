@@ -1,7 +1,20 @@
 /**
- * Workspace access policy (viborm/permissions), DRAFT from the P0 policy spike. P2 owns the final
- * rules; this version is the plan's sketch translated to viborm 1.12.1's real vocabulary and measured
- * against Durable Object SQLite's statement limits (docs/spikes/p0-policy-limits.md).
+ * Workspace access policy (viborm/permissions), final for P2. The plan's rules ("Permissions"), in
+ * viborm 1.12.1's real vocabulary and shaped to fit Durable Object SQLite's statement limits
+ * (docs/spikes/p0-policy-limits.md, "P2 final numbers"):
+ *
+ * - four levels (`read`, `comment`, `update`, `full`), the level is DATA on grants and teamspaces;
+ * - workspace owners and admins hold every action on every page (`actor.admin`);
+ * - teamspace access comes from actor facts (`actorFacts()`), no join: members get the teamspace's
+ *   default level, teamspace owners `full`;
+ * - the Private section (`teamspaceId` null) belongs to its creator: the whole branch below a root page
+ *   the creator made there, whoever adds the subpages;
+ * - grants (user, teamspace, workspace for non-guests, public token) are inherited through the tree;
+ * - `create` (placement), `fields` (`parentId` and `teamspaceId` need `full`), and the teamspace,
+ *   teamspace-member and grant models;
+ * - the bookkeeping models (EAV tables, registry, change log...) are open to every actor: they are
+ *   reached only by the Workspace DO's own code, which asserts the page-level right first
+ *   (`objects/workspace/authorize.ts`).
  *
  * Vocabulary used (viborm 1.12.1):
  * - `{ actor: "path" }` in a value position is the actor's field, bound as one parameter;
@@ -77,7 +90,8 @@ export function actorFacts(input: ActorInput): Actor {
 	if (input.shareToken) subjects.push(grantSubjectKey('public', null, input.shareToken));
 	const defaults = new Map(input.teamspaces.map((t) => [t.id, t.defaultLevel]));
 	const teamspaces = { read: [] as string[], comment: [] as string[], update: [] as string[], full: [] as string[] };
-	for (const membership of input.memberships) {
+	// Guests see only what is shared with them directly: they hold no teamspace, whatever rows say.
+	for (const membership of guest ? [] : input.memberships) {
 		subjects.push(grantSubjectKey('teamspace', membership.teamspaceId));
 		const held = membership.role === 'owner' ? 'full' : (defaults.get(membership.teamspaceId) ?? 'read');
 		const rank = ACCESS_LEVELS.indexOf(held as never);
@@ -135,7 +149,8 @@ const sketchAccess = (level: string) => ({
 	]
 });
 
-const pageCreate = {
+/** The plan's placement rule, as written (for {@link sketchPolicy}). */
+const sketchCreate = {
 	OR: [
 		{ parent: 'update' },
 		{ parentId: null, teamspace: { is: isMember } },
@@ -143,23 +158,79 @@ const pageCreate = {
 	]
 } as const;
 
+/**
+ * Where a page may be created: under a page the caller can edit, at the root of a teamspace where the
+ * caller can edit (admins: any), or at the root of the caller's own Private section (not for guests).
+ * Tighter than the plan's sketch on one point: a teamspace member needs the teamspace's `update` level,
+ * not just membership, so a read-only member cannot add pages.
+ */
+const pageCreate = {
+	OR: [
+		{ parent: 'update' },
+		{ parentId: null, actor: { admin: true } },
+		{ parentId: null, teamspaceId: { in: { actor: 'teamspaces.update' } } },
+		{ parentId: null, teamspaceId: null, createdById: { actor: 'userId' }, actor: { guest: false } }
+	]
+} as const;
+
 const supportingModels = {
 	teamspace: {
-		read: {
-			OR: [{ AND: [{ privacy: { in: ['open', 'closed'] } }, { actor: { guest: false } }] }, isMember]
-		},
+		// Open and closed teamspaces are listed to every non-guest; private ones to their members only.
+		read: { OR: [{ AND: [{ privacy: { in: ['open', 'closed'] } }, { actor: { guest: false } }] }, isMember] },
 		'update, full': isOwner,
 		create: { actor: { guest: false } }
 	},
 	teamspaceMember: {
 		read: { teamspace: 'read' },
-		'create, update': { teamspace: 'update' }
+		// Owners (and workspace admins) add anyone; a non-guest joins an open teamspace on their own, as a member.
+		create: {
+			OR: [
+				{ teamspace: 'update' },
+				{
+					AND: [
+						{ actor: { guest: false } },
+						{ userId: { actor: 'userId' } },
+						{ role: 'member' },
+						{ teamspace: { is: { privacy: 'open' } } }
+					]
+				}
+			]
+		},
+		update: { teamspace: 'update' },
+		// Removing a member needs `update` on the teamspace; anyone may remove themselves (leave).
+		leave: { OR: [{ teamspace: 'update' }, { userId: { actor: 'userId' } }] },
+		operations: { delete: 'leave' }
 	},
 	grant: {
 		read: { page: 'read' },
 		'create, update': { page: 'full' },
 		operations: { delete: 'update' }
 	}
+} as const;
+
+/**
+ * Models no actor reads or writes directly: the property registry, the typed EAV tables, collections
+ * and views, the change log, mutation ids, links and open rooms are written by the Workspace DO's own
+ * code, after it asserted the page-level right (`authorizeOp`). They are open under `$as` so one
+ * governed transaction can hold a whole commit. `member` (the D1 mirror) is readable, never writable.
+ */
+const bookkeeping = { read: true, create: true, update: true, delete: true } as const;
+const bookkeepingModels = {
+	property: bookkeeping,
+	pText: bookkeeping,
+	pNum: bookkeeping,
+	pDate: bookkeeping,
+	pRef: bookkeeping,
+	valueCount: bookkeeping,
+	collection: bookkeeping,
+	collectionMember: bookkeeping,
+	view: bookkeeping,
+	change: bookkeeping,
+	mutation: bookkeeping,
+	meta: bookkeeping,
+	link: bookkeeping,
+	openRoom: bookkeeping,
+	member: { read: true }
 } as const;
 
 /**
@@ -176,7 +247,7 @@ export const sketchPolicy = permissions({
 			operations: { delete: 'full' },
 			'read, comment, update': sketchAccess,
 			full: (level) => ({ OR: [sketchAccess(level), { teamspace: { is: isOwner } }] }),
-			create: pageCreate,
+			create: sketchCreate,
 			fields: { parentId: { write: 'full' }, teamspaceId: { write: 'full' } }
 		},
 		...supportingModels
@@ -186,6 +257,13 @@ export const sketchPolicy = permissions({
 // ----- the compact policies -----
 
 const levelsFrom = (action: string) => ACCESS_LEVELS.slice(ACCESS_LEVELS.indexOf(action as never));
+
+/**
+ * The root of a Private section the caller made (a root page, no teamspace, created by the caller). Met on
+ * the way up from any page, it gives the whole branch to its creator; a subpage someone else adds to it
+ * is not "theirs" (it owns nothing for its author).
+ */
+const privateOf = { parentId: null, teamspaceId: null, createdById: { actor: 'userId' } } as const;
 
 /** A share on the page or an ancestor, matched in ONE flat condition against the actor's share keys. */
 const sharedWithActor = (levels: readonly string[]) =>
@@ -210,9 +288,9 @@ function compact(viaTeamspace: (action: string) => Rule) {
 		OR: [
 			{ actor: { admin: true } },
 			viaTeamspace(action),
-			// Private section: no teamspace, created by the caller.
-			{ teamspaceId: null, createdById: { actor: 'userId' } },
-			ancestorsOrSelf(sharedWithActor(levelsFrom(action)))
+			// Shares on the page or an ancestor, or a Private page of the caller's on the way up
+			// (no teamspace, created by the caller): both through ONE walk over the ancestors.
+			ancestorsOrSelf({ OR: [sharedWithActor(levelsFrom(action)), privateOf] })
 		]
 	});
 }
@@ -233,7 +311,8 @@ const governed = (access: (action: string) => Rule) => ({
 		create: pageCreate,
 		fields: { parentId: { write: 'full' }, teamspaceId: { write: 'full' } } as const
 	},
-	...supportingModels
+	...supportingModels,
+	...bookkeepingModels
 });
 
 /**

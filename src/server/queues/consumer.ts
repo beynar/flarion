@@ -5,6 +5,7 @@
  * A message nobody understands is acked and logged: retrying it would never help.
  */
 import type { WorkerQueue } from 'sveltekit-cloudflare-worker';
+import { handleEmail } from './email';
 import { indexPages, type JobMessage } from './index-pages';
 import type { AiPropertyJob, EmailJob, IndexPageJob, Job } from './types';
 
@@ -26,7 +27,7 @@ export const queue: WorkerQueue<App.Platform['env']> = async (batch, env) => {
 				await settle(message, () => handleAiPropertyJob(env as Env, body));
 				break;
 			case 'email':
-				await settle(message, () => handleEmailJob(env as Env, body));
+				await settle(message, async () => void (await handleEmail(env as Env, body)));
 				break;
 			default:
 				console.warn('queue: dropping a message of unknown type');

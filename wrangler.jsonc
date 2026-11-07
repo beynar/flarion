@@ -141,6 +141,14 @@
 				"limit": 300,
 				"period": 60
 			}
+		},
+		{
+			"name": "RL_PUBLIC",
+			"namespace_id": "1003",
+			"simple": {
+				"limit": 120,
+				"period": 60
+			}
 		}
 	],
 	"analytics_engine_datasets": [
@@ -269,6 +277,14 @@
 						"limit": 300,
 						"period": 60
 					}
+				},
+				{
+					"name": "RL_PUBLIC",
+					"namespace_id": "1013",
+					"simple": {
+						"limit": 120,
+						"period": 60
+					}
 				}
 			],
 			"analytics_engine_datasets": [
@@ -395,6 +411,14 @@
 					"namespace_id": "1002",
 					"simple": {
 						"limit": 300,
+						"period": 60
+					}
+				},
+				{
+					"name": "RL_PUBLIC",
+					"namespace_id": "1003",
+					"simple": {
+						"limit": 120,
 						"period": 60
 					}
 				}

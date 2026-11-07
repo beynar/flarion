@@ -4,6 +4,12 @@
 	import { sidebarSimpleIcon } from 'entasis/icons/sidebarSimple';
 	import { starIcon, starIconFill } from 'entasis/icons/star';
 	import { dotsThreeIcon } from 'entasis/icons/dotsThree';
+	import { lockIcon } from 'entasis/icons/lock';
+	import { lockKeyOpenIcon } from 'entasis/icons/lockKeyOpen';
+	import { PopupMenu } from 'entasis/popup-menu';
+	import type { MenuItem } from 'entasis/menu';
+	import { toast } from 'entasis/toast';
+	import { pageLocks } from '#lib/components/editor/page-lock.svelte.ts';
 	import { moonIcon } from 'entasis/icons/moon';
 	import { sunIcon } from 'entasis/icons/sun';
 	import { magnifyingGlassIcon } from 'entasis/icons/magnifyingGlass';
@@ -24,7 +30,10 @@
 		showPageActions = true,
 		onToggleFavorite,
 		onToggleDark,
-		onSearch
+		onSearch,
+		onShare,
+		pageId = null,
+		canLock = false
 	}: {
 		sidebar: SidebarApi;
 		crumbs: BreadcrumbItem[];
@@ -42,7 +51,41 @@
 		onToggleFavorite: () => void;
 		onToggleDark: () => void;
 		onSearch: () => void;
+		/** Opens the share dialog of the current page. */
+		onShare?: () => void;
+		/** The page the "…" menu acts on (its lock), when a page is open. */
+		pageId?: string | null;
+		/** Whether the viewer may lock the page (`update` access or more). */
+		canLock?: boolean;
 	} = $props();
+
+	// The page's "…" menu: Lock page lives in the page's room (docs/PLAN.md "Lock page"), read through `pageLocks`.
+	const lock = $derived(pageId ? pageLocks.get(pageId) : undefined);
+	async function toggleLock() {
+		if (!pageId) return;
+		const locking = !lock?.locked;
+		try {
+			await pageLocks.toggle(pageId, locking);
+			toast.success({ title: locking ? 'Page locked' : 'Page unlocked' });
+		} catch (error) {
+			toast.danger({ title: locking ? 'Could not lock the page' : 'Could not unlock the page', description: error instanceof Error ? error.message : undefined });
+		}
+	}
+	const pageMenu = $derived.by((): MenuItem[] =>
+		pageId
+			? [
+					{
+						type: 'option',
+						title: lock?.locked ? 'Unlock page' : 'Lock page',
+						prefix: lock?.locked ? lockKeyOpenIcon : lockIcon,
+						// Locking needs `update`; unlocking is the locker's or full access (the server decides).
+						disabled: !canLock,
+						onclick: () => void toggleLock(),
+						'data-testid': 'lock-page'
+					} as MenuItem
+				]
+			: []
+	);
 
 	// Notion keeps the toggle out of the way while the sidebar is open.
 	const showToggle = $derived(sidebar.isMobile || sidebar.displayState !== 'expanded');
@@ -94,7 +137,12 @@
 			<span class="mr-1 ml-1 hidden text-xs text-[color:var(--app-text-secondary)] md:inline" aria-live="polite">
 				{pending > 0 ? 'Saving…' : 'Saved'}
 			</span>
-			<Button variant="ghost" size="small" class="hidden md:inline-flex"disabled>Share</Button>
+			{#if lock?.locked}
+				<span class="mr-1 inline-flex items-center text-[color:var(--app-text-secondary)]" title="This page is locked" data-testid="lock-indicator">
+					{@render lockIcon({ size: 14 })}
+				</span>
+			{/if}
+			<Button variant="ghost" size="small" class="hidden md:inline-flex" onclick={onShare} data-testid="share-button">Share</Button>
 			<Button
 				variant="ghost"
 				size="small"
@@ -110,6 +158,14 @@
 			prefix={dark ? sunIcon : moonIcon}
 			onclick={onToggleDark}
 		/>
-		<Button variant="ghost" size="small" label="More actions" prefix={dotsThreeIcon} />
+		{#if pageMenu.length > 0}
+			<PopupMenu position="bottom-end" menu={{ items: pageMenu }}>
+				{#snippet trigger(popover)}
+					<Button variant="ghost" size="small" label="More actions" prefix={dotsThreeIcon} data-testid="page-menu" {@attach popover.trigger} />
+				{/snippet}
+			</PopupMenu>
+		{:else}
+			<Button variant="ghost" size="small" label="More actions" prefix={dotsThreeIcon} />
+		{/if}
 	</div>
 </header>

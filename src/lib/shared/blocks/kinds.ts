@@ -8,6 +8,9 @@
  * - `database_view`: a void block rendering a live view of any collection.
  *   `data: { collectionId, viewId, localFilter }`. All three are `atomic`, so two people changing
  *   the filter (or switching the collection) at once never merge into a value neither wrote.
+ *   `collectionId` is null until a "Linked view of database" block is pointed at a database (it shows a
+ *   picker); an inline database is inserted with its collection already named (the client chooses the id,
+ *   which is also its page's id: a database page's collection has the page's id).
  * - `breadcrumb`: a void block showing the page's ancestors, read from the workspace store.
  * - `date_mention`: an inline atom (`inlineBlocks`), `data: DateValue`. Inline atoms need no role.
  *
@@ -20,7 +23,7 @@ import { dateValueSchema, type DateValue } from '../dates.js';
 import { filterGroupSchema, type FilterGroup } from '../filter-ast.js';
 import { idSchema } from '../property-types.js';
 
-export const KINDS_VERSION = 1;
+export const KINDS_VERSION = 2;
 
 export const BLOCK_KIND = {
 	databaseView: 'database_view',
@@ -36,13 +39,14 @@ export type InlineKindName = (typeof INLINE_KIND)[keyof typeof INLINE_KIND];
 // ───────────────────────────── data ─────────────────────────────
 
 export const databaseViewDataSchema = v.object({
-	collectionId: idSchema,
+	/** The collection to show; null for a linked view that has not been pointed at one yet. */
+	collectionId: v.nullable(idSchema),
 	/** The view to show; null shows the collection's first view. */
 	viewId: v.nullable(idSchema),
 	/** An extra filter ANDed with the view's, local to this block; null for none. */
 	localFilter: v.nullable(filterGroupSchema)
 });
-export type DatabaseViewData = { collectionId: string; viewId: string | null; localFilter: FilterGroup | null };
+export type DatabaseViewData = { collectionId: string | null; viewId: string | null; localFilter: FilterGroup | null };
 
 export const breadcrumbDataSchema = v.object({});
 export type BreadcrumbData = Record<string, never>;
@@ -60,7 +64,7 @@ export const inlineDataSchemas = {
 
 /** The data of a freshly inserted block of each kind. */
 export const defaultBlockData = {
-	[BLOCK_KIND.databaseView]: (collectionId: string): DatabaseViewData => ({
+	[BLOCK_KIND.databaseView]: (collectionId: string | null = null): DatabaseViewData => ({
 		collectionId,
 		viewId: null,
 		localFilter: null

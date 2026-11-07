@@ -9,7 +9,8 @@
 import type { CreateOp, MoveOp, Op } from '../../../lib/shared/ops';
 import { isRank } from '../../../lib/shared/sort-keys';
 import type { WorkspaceTx } from '../../db/workspace.client';
-import { invalid, notFound } from './errors';
+import type { AccessLevel } from '../../db/workspace.schema';
+import { invalid, WorkspaceError } from './errors';
 import { writeInitialValues, type ChangeRecord } from './eav';
 import { isoTime, LIVE_SUBTREE_CTE, rawAll, rawRun, SUBTREE_CTE } from './util';
 
@@ -62,10 +63,20 @@ async function livePage(tx: WorkspaceTx, id: string, path: string): Promise<Page
 	return page;
 }
 
+/**
+ * A governed update that matches no row the actor may change does nothing, silently: so writes that matter
+ * ask first. (A governed `create` throws on its own.)
+ */
+async function assertCan(tx: WorkspaceTx, id: string, level: AccessLevel, what: string): Promise<void> {
+	const can = (await (tx.page as unknown as { can(a: AccessLevel, w: { id: string }): Promise<boolean> }).can(level, { id })) as boolean;
+	if (!can) throw new WorkspaceError('FORBIDDEN', `You do not have access to ${what}`);
+}
+
 async function assertTeamspace(tx: WorkspaceTx, id: string | null, path: string): Promise<void> {
 	if (id === null) return;
-	const ts = await tx.teamspace.findUnique({ where: { id }, select: { id: true, deletedAt: true } });
-	if (!ts || ts.deletedAt) throw invalid(path, 'not_found', `Teamspace "${id}" does not exist`);
+	// Raw: whether the teamspace exists is not the caller's to read (a guest cannot list teamspaces).
+	const ts = (await rawAll<{ deleted_at: string | null }>(tx, 'SELECT deleted_at FROM teamspace WHERE id = ?', id))[0];
+	if (!ts || ts.deleted_at) throw invalid(path, 'not_found', `Teamspace "${id}" does not exist`);
 }
 
 /** Whether `ancestor` is `id` itself or one of its ancestors. */
@@ -114,22 +125,27 @@ async function createPage(tx: WorkspaceTx, op: CreateOp, env: PageOpEnv): Promis
 	await env.noteParent(op.parentId);
 
 	const num = await env.allocateNum();
-	await tx.page.create({
-		data: {
-			id: op.id,
-			num,
-			parentId: op.parentId,
-			rank: op.rank,
-			teamspaceId,
-			icon: op.icon ?? null,
-			cover: op.cover ?? null,
-			isDatabase: op.isDatabase ?? false,
-			createdById: env.actorId,
-			createdAt: new Date(env.now),
-			updatedById: env.actorId,
-			updatedAt: new Date(env.now)
-		}
-	});
+	// A raw INSERT: viborm's governed `create` also asks to READ the teamspace the row references, which a guest
+	// (or a member shared one page of a private teamspace) cannot. Placement was checked by `authorizeOp`
+	// (`create` in authorize.ts: the policy's `pageCreate` rule), before this runs.
+	const stamp = isoTime(env.now);
+	await rawRun(
+		tx,
+		`INSERT INTO page (id, num, parent_id, rank, teamspace_id, title, icon, cover, is_database, created_by, created_at, updated_by, updated_at, props_json)
+		 VALUES (?, ?, ?, ?, ?, '', ?, ?, ?, ?, ?, ?, ?, '{}')`,
+		op.id,
+		num,
+		op.parentId,
+		op.rank,
+		teamspaceId,
+		op.icon ?? null,
+		op.cover ?? null,
+		op.isDatabase ? 1 : 0,
+		env.actorId,
+		stamp,
+		env.actorId,
+		stamp
+	);
 	const records: ChangeRecord[] = [
 		{
 			kind: 'create',
@@ -173,16 +189,20 @@ async function movePage(tx: WorkspaceTx, op: MoveOp, env: PageOpEnv): Promise<Ch
 	await env.noteParent(page.parentId);
 	await env.noteParent(op.parentId);
 
-	await tx.page.update({
-		where: { id: page.id },
-		data: {
-			parentId: op.parentId,
-			rank: op.rank,
-			teamspaceId,
-			updatedById: env.actorId,
-			updatedAt: new Date(env.now)
-		}
-	});
+	// A raw UPDATE, like the INSERT of `createPage`: viborm's governed update would also ask to read the new
+	// parent and teamspace rows. `authorizeOp` already asked what the policy asks: `update` on the page for a
+	// reorder, `full` to change its parent or teamspace, `update` on the destination page, or a place to add
+	// pages (a teamspace the mover edits in, their own Private section; admins anywhere).
+	await rawRun(
+		tx,
+		'UPDATE page SET parent_id = ?, rank = ?, teamspace_id = ?, updated_by = ?, updated_at = ? WHERE id = ?',
+		op.parentId,
+		op.rank,
+		teamspaceId,
+		env.actorId,
+		isoTime(env.now),
+		page.id
+	);
 	if (teamspaceId !== page.teamspaceId) {
 		// Rewrite the teamspace across the whole subtree (tombstones included, so a restore stays consistent).
 		await rawRun(
@@ -210,6 +230,7 @@ async function setPage(
 	env: PageOpEnv
 ): Promise<ChangeRecord[]> {
 	const page = await livePage(tx, op.page, '/page');
+	await assertCan(tx, page.id, 'update', 'edit this page');
 	const data: { icon?: string | null; cover?: string | null } = {};
 	const before: Record<string, unknown> = {};
 	const after: Record<string, unknown> = {};

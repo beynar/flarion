@@ -2,13 +2,14 @@
 	import { goto } from '$app/navigation';
 	import { page as route } from '$app/state';
 	import Editor from '#lib/components/editor/Editor.svelte';
+	import { createCoverUploader } from '#lib/components/editor/uploads.ts';
 	import PageHeader from '#lib/components/page-header/PageHeader.svelte';
 	import type { PageHeaderAccess } from '#lib/components/page-header/types.ts';
 	import { rpc } from '#lib/client/rpc.ts';
 	import { isMock, userColor } from '#lib/client/runtime.ts';
 	import { useWorkspace } from '#lib/client/workspace.svelte.ts';
 	import DocumentPlaceholder from '#lib/components/shell/DocumentPlaceholder.svelte';
-	import PagePropertyRows from '#lib/components/shell/PagePropertyRows.svelte';
+	import PropertiesPanel from '#lib/components/properties/PropertiesPanel.svelte';
 
 	const store = useWorkspace();
 	const ws = $derived(route.params.ws ?? store.workspace.slug);
@@ -41,6 +42,13 @@
 	const mock = isMock();
 
 	const guard = <T,>(p: Promise<T>) => p.catch(() => undefined);
+	// Covers and inline images go through the files flow (R2); databases are what a linked view can point at.
+	const uploadCover = $derived(createCoverUploader({ workspaceId: store.workspace.id, pageId, rpc }));
+	const searchDatabases = (q: string) =>
+		[...store.pages.values()]
+			.filter((p) => p.isDatabase && (p.title || 'Untitled').toLowerCase().includes(q.trim().toLowerCase()))
+			.slice(0, 20)
+			.map((p) => ({ id: p.id, title: p.title, icon: p.icon }));
 </script>
 
 <svelte:head><title>{entity ? entity.title || 'Untitled' : status === 'error' ? 'Not found' : 'Flarion'} · Flarion</title></svelte:head>
@@ -55,9 +63,10 @@
 			onTitle={(title) => store.setTitle(pageId, title)}
 			onIcon={(icon) => guard(store.setPage(pageId, { icon }))}
 			onCover={(cover) => guard(store.setPage(pageId, { cover }))}
+			{uploadCover}
 		>
 			{#snippet properties()}
-				<PagePropertyRows page={entity} properties={store.properties} members={store.members} />
+				<PropertiesPanel {store} page={entity} />
 			{/snippet}
 		</PageHeader>
 
@@ -75,8 +84,11 @@
 					const p = store.resolvePage(id);
 					return p ? { title: p.title, icon: p.icon } : undefined;
 				}}
+				resolveAncestors={(id) => store.ancestors(id)}
+				{searchDatabases}
 				searchPages={async (q) => store.searchPages(q)}
 				searchPeople={async (q) => store.searchPeople(q).map((m) => ({ id: m.id, name: m.name }))}
+				resolvePerson={(id) => store.members.find((m) => m.userId === id)}
 				onNavigate={(id) => goto(`/${ws}/${id}`)}
 			/>
 		{/if}

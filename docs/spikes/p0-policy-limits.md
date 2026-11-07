@@ -101,3 +101,75 @@ below (`comment` on the root: `read` and `comment` yes, `update` and `full` no, 
 - A governed client reads `db.$as(actor).page.findMany(...)`, `can(action | actions[], where)` and
   `select: { $access: true }` (one boolean per action, plus `create`).
 - Soft delete (`viborm/soft-delete`) was not composed with the policy in this spike (P2).
+
+---
+
+# P2 final numbers (Sync core)
+
+The policy of `src/server/db/policy.ts` is final for P2. It is the compact `policy` of the spike plus the rules
+the spike left out; `tests/workers/db/policy-limits.test.ts` still measures it (same 4,000-page workspace) and
+now also covers the statements the Workspace DO really sends (`objects/workspace/access.ts`). Bound values /
+SQL bytes, limits 100 / 100,000.
+
+| Statement (final `policy`) | values / bytes |
+|---|---|
+| `page.findMany` visible set, member / guest / anonymous with token / admin | 13 / 1,035 &nbsp; 6 / 940 &nbsp; 5 / 835 &nbsp; 0 / 77 |
+| same, member that also holds a share token | 14 / 1,038 |
+| `page.can` x4 actions, depth-50 page | 44 / 3,970 (48 with a token) |
+| visibility entry: `findMany(num, $access)` of every live page | 56 / 5,244 (61 with a token), 49 ms for 1,643 pages |
+| `pageAccess`: `findFirst({ id, deletedAt: null }, $access)` | 58 / 5,266 (**63** with a token, the peak) |
+| `can(ids)`: `id in 60 ids` with `$access` | 57 / 5,309 |
+| dirty subtree recompute: `num in 60 nums` with `$access` | 57 / 5,297 |
+| tree window (`take 200`) | 14 / 1,138 |
+| `page.update` title / `parentId` move / `page.delete` | 24 / 2,409 &nbsp; 56 / 8,501 &nbsp; 17 / 2,380 |
+| `page.create` (placement under an editable parent) | 35 / 3,839 |
+
+The test pins the peak at 64 (it was 60 for the reads measured in P0); the largest statement is 63 values, 36
+under the limit. The plan's sketch still fails on a move (expression depth 100) and is kept only to show it.
+
+## What P2 changed in the rules
+
+- **Private section.** The plan's `{ teamspaceId: null, createdById: me }` is applied to the ROOT of the chain
+  (`parentId: null` too) inside the same ancestor walk as the shares, so the creator of a Private root owns the
+  whole branch and nobody gains ownership of a page by adding it under someone else's branch.
+- **`create`** (placement): `{ parent: 'update' }`, or a root in a teamspace where the caller holds `update`
+  (`actor.teamspaces.update`; the sketch said "member": a read-only member could add pages), or any root for
+  admins, or a root in the caller's own Private section (never guests).
+- **Guests** hold no teamspace (`actorFacts` ignores membership rows for them; demoting a member to guest drops
+  them), and cannot read teamspaces.
+- **Teamspace models**: `read` (open and closed for non-guests, private for members), `update, full` (owners),
+  `create` (non-guests); `teamspaceMember`: `read`, `create` (owners add anyone, a non-guest joins an open
+  teamspace as a member), `update` (owners), delete is `leave` (owners, or the member themselves); `grant` as in
+  the plan.
+- **Bookkeeping models** (EAV tables, registry, collections, views, change log, mutation ids, meta, links, open
+  rooms, `member` read-only) are open under `$as`: unlisted models are refused by `$as`, and a whole commit has
+  to run in one governed transaction. The Workspace DO's code asserts the page-level right first
+  (`authorize.ts`), and everything it writes goes through that path.
+
+## viborm facts learned in P2
+
+- Unlisted models are **refused** under `$as` (`ForbiddenError`): list them, even as `{ read: true, ... }`.
+- A governed **`update` or `delete` that matches no row the actor may change does nothing, silently**; only
+  `create` throws. Writes that matter ask `can`/`assert` first (`authorize.ts`, `teamspaces.ts`).
+- A governed **write that references a row the actor cannot read is refused**: `page.create` with a `teamspaceId`
+  needs read on that teamspace, which a guest, or a member shared one page of a private teamspace, lacks. Page
+  creation and moves are therefore raw INSERT/UPDATE statements after the same checks the policy states
+  (`createPage`, `movePage`), covered by the matrix test.
+- `$access` selections and `can` run inside a governed `$transaction`; `tx.page.can([...])` is one statement.
+
+## The matrix (`tests/workers/permissions/`)
+
+`model.ts` is the plan's rules in 50 lines of plain TypeScript, written without the policy; `scenario.ts`
+generates workspaces (8 users: owner, admin, 4 members, 2 guests; 3 to 5 teamspaces of every privacy and default
+level; 28 to 52 pages in a random tree with trashed subtrees; grants of every kind, some revoked); the callers
+are every user plus anonymous visitors with no token, a wrong token, a live public link and a revoked one, and a
+member that also holds a token.
+
+- **Static** (30 seeds): `can` at all four levels for every page, `pageAccess` on a sample and `visibleNums`
+  equal the model for every caller.
+- **Incremental** (12 seeds, 30 steps each): with every set hot in memory, random grants, revokes, moves across
+  teamspaces and into Private, page creation by any role (the outcome, `FORBIDDEN` or `not_found`, is compared
+  too), new teamspaces, teamspace membership changes, role changes, member removals, trashes and restores go
+  through the DO's API; after every step the lazily invalidated sets of all callers equal a fresh evaluation of
+  the model, and the access answers of a rotating subset do too.
+- A share on a 720-page subtree (more than `MAX_SUBTREE`) takes the full-rebuild fallback and still matches.

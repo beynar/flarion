@@ -9,8 +9,10 @@
  *   Index       ingestPages, openRoom, closeRoom
  *   Sockets     fetch (upgrade) + the hibernatable handlers
  *
- * Writes go through `#writeDb(actor)`, the one seam P2 switches to `db.$as(actor)`; the visibility set is
- * "every live page" until then (`actor.ts`).
+ * Every call runs on `db.$as(actor)` (`#writeDb`, `AccessService.governed`): the base client is reserved for
+ * migrations, init, member sync, the indexing queue and other system work. Reads of pages and views are
+ * ANDed with the actor's visibility set (`access.ts`); access changes reach open rooms (`room-sync.ts`).
+ *   Access      pageAccess, can, listGrants, setGrant, revokeGrant, grantByToken, visibleNums
  */
 import { DurableObject } from 'cloudflare:workers';
 import {
@@ -32,9 +34,9 @@ import type {
 import { rankAfter } from '../../../lib/shared/sort-keys';
 import type * as v from 'valibot';
 import type { Actor, WorkspaceRole } from '../../auth/session';
-import { createWorkspaceClient, type WorkspaceClient } from '../../db/workspace.client';
+import { createWorkspaceClient, type WorkspaceClient, type WorkspaceDb, type WorkspaceTx } from '../../db/workspace.client';
 import type { PageIndexItem } from '../../queues/types';
-import { stubAccess, type WorkspaceSocketActor } from './actor';
+import type { WorkspaceSocketActor } from './actor';
 import { pruneLog, LOG_RETENTION_MS, type PruneResult } from './changelog';
 import { runCommit, type CommitResult } from './commit';
 import {
@@ -54,6 +56,7 @@ import { ingestInTransaction, type IngestResult } from './ingest';
 import { LiveHub, unitEvaluations, type CommitInfo } from './live';
 import { migrateWorkspace } from './migrations';
 import { applyPageOp, isPageOp } from './page-ops';
+import { processMentions } from './mentions';
 import { Presence } from './presence';
 import {
 	ACTOR_HEADER,
@@ -70,6 +73,7 @@ import {
 	assertNotGuest,
 	insertTeamspace,
 	listTeamspaceMembers,
+	nextMemberRank,
 	listTeamspaces,
 	readTeamspace,
 	removeTeamspaceMemberRecords,
@@ -78,6 +82,38 @@ import {
 	type TeamspaceInput
 } from './teamspaces';
 import { checkVersions } from './versions';
+import { ForbiddenError } from 'viborm';
+import {
+	AccessService,
+	actorKey,
+	type CommitAccess,
+	type AccessActor,
+	type AccessLevel,
+	type GovernedTx
+} from './access';
+import { createAuthorizer } from './authorize';
+import { queryViewRows, type QueryViewInput, type QueryViewResult } from '../../engine/view';
+import { revokeGrantRecords, setGrantRecords, toGrant, type GrantInput } from './grants';
+import { syncRooms, type RoomStub } from './room-sync';
+import type { Grant } from '../../../lib/shared/schemas';
+import {
+	abortUpload,
+	beginUpload,
+	completeUpload,
+	ensureFilesTable,
+	filesUsage,
+	getFile,
+	normalizeLevel,
+	pendingUpload,
+	purgeFilesOfPages,
+	readableFile,
+	recordUploadId,
+	setStorageQuota,
+	sweepUncommitted,
+	type BeginInput,
+	type FilesContext,
+	type PageLevel
+} from './files';
 import { APP_VERSION_HEADER, APP_VERSION_PARAM } from '../../../lib/shared/protocol';
 
 type TrashListInput = v.InferOutput<typeof trashListInputSchema>;
@@ -114,6 +150,7 @@ export class WorkspaceDO extends DurableObject<Env> {
 	readonly instanceId = crypto.randomUUID();
 
 	readonly #db: WorkspaceClient;
+	readonly #access: AccessService;
 	readonly #hub: LiveHub;
 	readonly #presence = new Presence();
 	readonly #api: WorkspaceSocketApi;
@@ -126,7 +163,9 @@ export class WorkspaceDO extends DurableObject<Env> {
 	constructor(ctx: DurableObjectState, env: Env) {
 		super(ctx, env);
 		WorkspaceDO.constructed++;
+		ensureFilesTable(ctx.storage.sql);
 		this.#db = createWorkspaceClient(ctx.storage);
+		this.#access = new AccessService({ db: this.#db, sql: ctx.storage.sql });
 		// Raw steps, the viborm estate and the EAV layout, before any request or socket message is served.
 		void ctx.blockConcurrencyWhile(async () => {
 			await migrateWorkspace(ctx, this.#db);
@@ -135,7 +174,8 @@ export class WorkspaceDO extends DurableObject<Env> {
 		this.#hub = new LiveHub({
 			sql: ctx.storage.sql,
 			send: (socketId, message) => this.#send(socketId, message),
-			actorOf: (socketId) => this.#socket(socketId)?.actor ?? null
+			actorOf: (socketId) => this.#socket(socketId)?.actor ?? null,
+			view: (actor) => this.#access.view(actor)
 		});
 		this.#api = new WorkspaceSocketApi({
 			env,
@@ -197,6 +237,8 @@ export class WorkspaceDO extends DurableObject<Env> {
 			return new Response(null, { status: 101, webSocket: pair[0] });
 		}
 		try {
+			// The actor's visibility set is built before the socket is served, so every handler can read it synchronously.
+			await this.#access.ensure(actor);
 			return this.#transport.accept(actor);
 		} catch (error) {
 			if (error instanceof AttachmentTooLargeError) return new Response(error.message, { status: 413 });
@@ -210,6 +252,9 @@ export class WorkspaceDO extends DurableObject<Env> {
 	 * goes to the oRPC transport, so the same connection also serves the oRPC `hello` stream and `ping`.
 	 */
 	override async webSocketMessage(ws: WebSocket, message: string | ArrayBuffer): Promise<void> {
+		// After hibernation the in-memory visibility sets are gone: rebuild the sender's before serving it.
+		const sender = this.#transport.handle(ws);
+		if (sender) await this.#access.ensure(sender.actor);
 		if (typeof message === 'string' && PROTOCOL_FRAME.test(message)) return this.#protocolFrame(ws, message);
 		return this.#transport.message(ws, message);
 	}
@@ -258,12 +303,13 @@ export class WorkspaceDO extends DurableObject<Env> {
 	}
 
 	/**
-	 * The one seam for permissions. P2 returns `this.#db.$as(actor)`; until then the base client is used and
-	 * the only rule is that guests do not write.
+	 * The one seam for permissions: the client every call of `actor` runs on, `db.$as(actor)` (viborm
+	 * policy with the actor's facts). A user the workspace has no membership for holds nothing.
 	 */
 	#writeDb(actor: Actor): WorkspaceClient {
-		assertNotGuest(actor, 'edit this workspace');
-		return this.#db;
+		const governed = this.#access.governed(actor);
+		if (!governed) throw new WorkspaceError('FORBIDDEN', 'You are not a member of this workspace');
+		return governed as unknown as WorkspaceClient;
 	}
 
 	#serialize<T>(work: () => Promise<T>): Promise<T> {
@@ -272,17 +318,43 @@ export class WorkspaceDO extends DurableObject<Env> {
 		return run;
 	}
 
-	/** A commit and its fan-out, as one unit in the serial queue. */
+	/**
+	 * A commit and its fan-out, as one unit in the serial queue. Between the two, the actors' visibility sets
+	 * are brought up to date (`noteCommit` marks what the commit invalidates, `settle` recomputes it for the
+	 * connected sockets' actors), so the fan-out ANDs every window with the sets as they are after the commit
+	 * and knows the pages that entered or left each of them. Access changes then reach the open rooms.
+	 */
 	async #commit(
 		db: WorkspaceClient,
 		actorId: string,
 		body: Parameters<typeof runCommit>[1]['body'],
 		options: { mid?: string; backlinkTargets?: () => readonly string[]; definition?: boolean } = {}
 	): Promise<CommitResult> {
+		const roomWork: { value: { scope: CommitAccess; changes: ReturnType<AccessService['changedActors']> } | null } = { value: null };
 		const result = await this.#serialize(async () => {
-			const commit = await runCommit(db, { actorId, now: Date.now(), mid: options.mid, body });
+			let commit: CommitResult;
+			try {
+				commit = await runCommit(db, { actorId, now: Date.now(), mid: options.mid, body });
+			} catch (error) {
+				throw mapPolicyError(error);
+			}
 			if (!commit.replayed) {
 				if (options.definition) invalidateRegistry();
+				const access = this.#access.noteCommit(commit.rows);
+				try {
+					const sockets = this.#transport.sockets();
+					const { cold } = await this.#access.settle(sockets.map((s) => s.actor));
+					if (access.affecting && cold.size > 0) {
+						// A socket whose visibility set was lost (the object slept) cannot be diffed: it reconnects.
+						for (const socket of sockets) {
+							if (!cold.has(actorKey(socket.actor))) continue;
+							this.#hub.dropSocket(socket.socketId);
+							socket.ws.close(CLOSE.TRY_AGAIN, 'resync');
+						}
+					}
+				} catch (error) {
+					this.#resync(error);
+				}
 				const info: CommitInfo = {
 					seq: commit.seq,
 					rows: commit.rows,
@@ -296,11 +368,33 @@ export class WorkspaceDO extends DurableObject<Env> {
 					// reconnect: `hello` with its last seq replays or resnapshots.
 					this.#resync(error);
 				}
+				if (access.affecting) roomWork.value = { scope: access, changes: this.#access.changedActors() };
+				this.#access.clearDeltas();
 			}
 			return commit;
 		});
+		if (roomWork.value) await this.#syncRooms(roomWork.value.scope, roomWork.value.changes);
 		void this.#armAlarm();
 		return result;
+	}
+
+	/** Pushes access changes into the open rooms (best effort: a room that fails keeps its 10-minute token). */
+	async #syncRooms(scope: CommitAccess, changes: ReturnType<AccessService['changedActors']>): Promise<void> {
+		const workspaceId = this.ctx.id.name ?? '';
+		try {
+			await syncRooms(
+				{
+					sql: this.ctx.storage.sql,
+					workspaceId,
+					access: this.#access,
+					changes,
+					room: (pageId) => this.env.PAGE.getByName(`${workspaceId}:${pageId}`) as unknown as RoomStub
+				},
+				scope
+			);
+		} catch (error) {
+			console.warn('[workspace] room access sync failed:', error instanceof Error ? error.message : error);
+		}
 	}
 
 	#resync(error: unknown): void {
@@ -386,29 +480,82 @@ export class WorkspaceDO extends DurableObject<Env> {
 		return { created, teamspaceId };
 	}
 
-	/** Mirrors a D1 membership into `member`: upserts the role and name, or marks the user removed. */
+	/**
+	 * Mirrors a D1 membership into `member`: upserts the role and name, or marks the user removed.
+	 *
+	 * A change of who may do what (a new member, a role change, a removal) is a commit (`member.sync`), so the
+	 * visibility sets are rebuilt and open rooms re-checked. A new non-guest member joins the workspace's
+	 * default open teamspace ("General") as a member, as in Notion; a removed or demoted-to-guest one leaves
+	 * every teamspace.
+	 * A role change reconnects the member's sockets (their actor key changes); a removal closes them.
+	 */
 	async syncMember(args: SyncMemberArgs): Promise<void> {
 		const removed = args.removed === true || args.role === null;
 		const existing = await this.#db.member.findUnique({ where: { userId: args.userId } });
 		const role = args.role ?? existing?.role ?? 'guest';
 		const name = args.name ?? existing?.name ?? '';
+		const wasActive = !!existing && !existing.removedAt;
+		const changed = removed ? wasActive : !wasActive || existing?.role !== role;
 		const removedAt = removed ? new Date() : null;
-		await this.#db.member.upsert({
-			where: { userId: args.userId },
-			create: { userId: args.userId, role, name, removedAt },
-			update: { role, name, removedAt }
-		});
+		const upsert = (db: WorkspaceDb) =>
+			db.member.upsert({
+				where: { userId: args.userId },
+				create: { userId: args.userId, role, name, removedAt },
+				update: { role, name, removedAt }
+			});
+		if (removed) {
+			// The user lost access: close their sockets with FORBIDDEN so they do not reconnect.
+			for (const socket of this.#transport.sockets()) {
+				if (socket.actor.userId === args.userId) socket.ws.close(CLOSE.FORBIDDEN, 'removed from the workspace');
+			}
+		}
+		if (changed) {
+			await this.#commit(this.#db, SYSTEM_ACTOR, async (tx) => {
+				await upsert(tx);
+				if (removed || (role === 'guest' && wasActive && existing?.role !== 'guest')) {
+					// Guests hold no teamspace: a demoted member leaves them all, like a removed one.
+					await tx.teamspaceMember.deleteMany({ where: { userId: args.userId } });
+				} else if (role !== 'guest' && (!wasActive || existing?.role === 'guest')) {
+					await this.#joinDefaultTeamspace(tx, args.userId);
+				}
+				return [
+					{
+						kind: 'member.sync',
+						page: null,
+						prop: args.userId,
+						old: existing ? { role: existing.role, removed: !!existing.removedAt } : null,
+						new: { role, removed }
+					}
+				];
+			});
+		} else {
+			await upsert(this.#db);
+		}
 		for (const socket of this.#transport.sockets()) {
 			if (socket.actor.userId !== args.userId) continue;
 			if (removed) {
-				// The user lost access: close their sockets with FORBIDDEN so they do not reconnect.
-				socket.ws.close(CLOSE.FORBIDDEN, 'removed from the workspace');
 				continue;
+			} else if (socket.actor.role !== role) {
+				// Their visibility is another actor's now: a fresh session (hello) builds it.
+				this.#hub.dropSocket(socket.socketId);
+				socket.ws.close(CLOSE.TRY_AGAIN, 'role changed');
+			} else if (socket.actor.name !== name) {
+				socket.ws.serializeAttachment({ socketId: socket.socketId, actor: { ...socket.actor, name } });
 			}
-			// The attachment carries the role: refresh it so the open socket sees the change.
-			socket.ws.serializeAttachment({ socketId: socket.socketId, actor: { ...socket.actor, role, name } });
 		}
 		this.#socketCache = null;
+	}
+
+	/** Puts a user in the default teamspace the workspace was created with (`init`), when it is still live. */
+	async #joinDefaultTeamspace(tx: WorkspaceTx, userId: string): Promise<void> {
+		const row = await tx.meta.findUnique({ where: { key: META_INITIALIZED } });
+		const teamspaceId = typeof row?.value === 'string' ? row.value : null;
+		if (!teamspaceId) return;
+		const ts = await tx.teamspace.findUnique({ where: { id: teamspaceId } });
+		if (!ts || ts.deletedAt || ts.privacy !== 'open') return;
+		const key = { teamspaceId_userId: { teamspaceId, userId } };
+		if (await tx.teamspaceMember.findUnique({ where: key })) return;
+		await tx.teamspaceMember.create({ data: { teamspaceId, userId, role: 'member', rank: await nextMemberRank(tx, userId) } });
 	}
 
 	/** The workspace was renamed in D1 (`workspace.settings`): keeps the display name in `meta`. Idempotent. */
@@ -440,6 +587,13 @@ export class WorkspaceDO extends DurableObject<Env> {
 			throw new WorkspaceError('APP_OUTDATED', 'This version of the app is outdated. Reload to continue.');
 		}
 		const db = this.#writeDb(actor);
+		const resolved = this.#access.resolve(actor);
+		if (!resolved) throw new WorkspaceError('FORBIDDEN', 'You are not a member of this workspace');
+		const authorizer = createAuthorizer({
+			role: resolved.role,
+			userId: actor.userId,
+			updatableTeamspaces: this.#access.facts(resolved).teamspaces.update
+		});
 		const registry = await loadRegistry(db);
 		const checked = validateBatch(batch, registry);
 		if (!checked.ok) throw new WorkspaceError('VALIDATION_FAILED', 'Validation failed', checked.issues);
@@ -452,6 +606,7 @@ export class WorkspaceDO extends DurableObject<Env> {
 				const records: ChangeRecord[] = [];
 				for (const [index, op] of ops.entries()) {
 					try {
+						await authorizer.check(tx as unknown as GovernedTx, op);
 						records.push(...(await this.#applyOp(tx, op, env)));
 					} catch (error) {
 						throw withOpPath(error, index);
@@ -516,40 +671,62 @@ export class WorkspaceDO extends DurableObject<Env> {
 
 	/** One-shot read of a page's header and properties. */
 	async getPage(actor: Actor, id: string): Promise<PageRow> {
-		const row = this.#hub.reader.pageRows([id], stubAccess(actor.role)).get(id);
+		const level = await this.#access.pageAccess(actor, id);
+		// A page the caller cannot see does not exist for them.
+		const row = level ? this.#hub.reader.pageRows([id], () => level).get(id) : undefined;
 		if (!row) throw notFound(`Page "${id}"`);
 		return row;
 	}
 
-	/** Trash roots, newest first, with the number of pages each took along. */
-	async listTrash(_actor: Actor, input: TrashListInput) {
+	/** Trash roots the caller may read, newest first, with the number of pages each took along. */
+	async listTrash(actor: Actor, input: TrashListInput) {
 		const limit = input.limit ?? 50;
 		const offset = input.cursor ? Number(input.cursor) || 0 : 0;
 		const order =
 			input.sort === 'deleted_asc' ? 'deleted_at ASC' : input.sort === 'title' ? 'title COLLATE NOCASE ASC' : 'deleted_at DESC';
 		const like = input.q ? `%${input.q.replace(/[\\%_]/g, (c) => `\\${c}`)}%` : null;
-		const rows = this.ctx.storage.sql
-			.exec<{
-				id: string;
-				title: string;
-				icon: string | null;
-				deleted_at: string;
-				deleted_by: string | null;
-				parent_id: string | null;
-				page_count: number;
-			}>(
-				`SELECT p.id, p.title, p.icon, p.deleted_at, p.deleted_by, p.parent_id,
-				        (SELECT COUNT(*) FROM page c WHERE c.trash_root = p.id) AS page_count
-				 FROM page p
-				 WHERE p.deleted_at IS NOT NULL AND p.trash_root = p.id
-				   ${like ? "AND p.title LIKE ? ESCAPE '\\'" : ''}
-				 ORDER BY ${order}, p.id LIMIT ? OFFSET ?`,
-				...(like ? [like] : []),
-				limit + 1,
-				offset
-			)
-			.toArray();
-		const page = rows.slice(0, limit);
+		const gov = this.#writeDb(actor);
+		type Row = {
+			id: string;
+			title: string;
+			icon: string | null;
+			deleted_at: string;
+			deleted_by: string | null;
+			parent_id: string | null;
+			page_count: number;
+		};
+		// Candidates are read in windows and ANDed with what the caller may read (a trashed page keeps its grants).
+		const visible: Row[] = [];
+		let exhausted = false;
+		let next = offset;
+		while (visible.length <= limit && !exhausted) {
+			const rows = this.ctx.storage.sql
+				.exec<Row>(
+					`SELECT p.id, p.title, p.icon, p.deleted_at, p.deleted_by, p.parent_id,
+					        (SELECT COUNT(*) FROM page c WHERE c.trash_root = p.id) AS page_count
+					 FROM page p
+					 WHERE p.deleted_at IS NOT NULL AND p.trash_root = p.id
+					   ${like ? "AND p.title LIKE ? ESCAPE '\\'" : ''}
+					 ORDER BY ${order}, p.id LIMIT ? OFFSET ?`,
+					...(like ? [like] : []),
+					limit + 1,
+					next
+				)
+				.toArray();
+			exhausted = rows.length < limit + 1;
+			const ids = rows.map((r) => r.id);
+			const allowed = new Set(
+				ids.length === 0
+					? []
+					: ((await gov.page.findMany({ where: { id: { in: ids } }, select: { id: true } })) as { id: string }[]).map((r) => r.id)
+			);
+			for (const r of rows) {
+				next++;
+				if (allowed.has(r.id)) visible.push(r);
+				if (visible.length > limit) break;
+			}
+		}
+		const page = visible.slice(0, limit);
 		return {
 			items: page.map((r) => ({
 				id: r.id,
@@ -560,66 +737,93 @@ export class WorkspaceDO extends DurableObject<Env> {
 				pageCount: r.page_count,
 				parentId: r.parent_id
 			})),
-			nextCursor: rows.length > limit ? String(offset + limit) : null
+			// `next` stopped right after the first row beyond the page, so the page's own last row is one before.
+			nextCursor: visible.length > limit ? String(next - 1) : null
 		};
 	}
 
-	/** The workspace's live properties (Databases' `property.list`). */
-	async readProperties(_actor: Actor) {
+	/** The workspace's live properties (Databases' `property.list`): the registry holds names and types, for any member. */
+	async readProperties(actor: Actor) {
+		this.#writeDb(actor); // a user without a membership holds nothing
 		return readProperties(this.#db);
 	}
 
-	/** A collection and its views, or null (Databases' `collection.get`). */
-	async readCollection(_actor: Actor, id: string) {
-		return readCollection(this.#db, id);
+	/** A collection and its views, or null (Databases' `collection.get`): only for a caller who can read its page. */
+	async readCollection(actor: Actor, id: string) {
+		const found = await readCollection(this.#db, id);
+		if (!found) return null;
+		return (await this.#access.pageAccess(actor, found.collection.pageId)) ? found : null;
 	}
 
-	/** The views of a collection (Databases' `view.list`). */
-	async readViews(_actor: Actor, collectionId: string) {
+	/** The views of a collection (Databases' `view.list`), for a caller who can read its database page. */
+	async readViews(actor: Actor, collectionId: string) {
+		const row = this.ctx.storage.sql.exec<{ page_id: string }>('SELECT page_id FROM collection WHERE id = ? AND deleted_at IS NULL', collectionId).toArray()[0];
+		if (!row || !(await this.#access.pageAccess(actor, row.page_id))) return [];
 		return readViews(this.#db, collectionId);
+	}
+
+	/**
+	 * One-shot read of a collection's view (Databases' query engine, `collection.query`): the window, total,
+	 * groups (a grouped view) and referenced properties. Every result is intersected with the actor's
+	 * visibility set (`visibleNums`), the collection's membership and the live pages: the engine runs raw SQL,
+	 * which the viborm policy does not govern. Throws `NOT_FOUND` for a collection or view the actor cannot read.
+	 */
+	async queryView(actor: Actor, input: QueryViewInput): Promise<QueryViewResult> {
+		const row = this.ctx.storage.sql.exec<{ page_id: string }>('SELECT page_id FROM collection WHERE id = ? AND deleted_at IS NULL', input.collectionId).toArray()[0];
+		if (!row || !(await this.#access.pageAccess(actor, row.page_id))) throw notFound(`Collection "${input.collectionId}"`);
+		const visible = await this.visibleNums(actor);
+		const levels = await this.#access.levelsOf(actor);
+		return queryViewRows(this.#db, input, {
+			userId: actor.userId,
+			visible,
+			levels,
+			seq: this.#hub.headSeq(),
+			now: Date.now()
+		});
 	}
 
 	// ───────────────────────── teamspaces ─────────────────────────
 
 	async teamspaces(actor: Actor): Promise<Teamspace[]> {
-		return listTeamspaces(this.#db, actor);
+		return listTeamspaces(this.#writeDb(actor), actor);
 	}
 
+	/** Creating a teamspace needs a non-guest; its first owner row is then a system write (policy: `create`). */
 	async createTeamspace(actor: Actor, input: TeamspaceInput): Promise<Teamspace> {
-		const db = this.#writeDb(actor);
+		this.#writeDb(actor);
+		assertNotGuest(actor, 'create teamspaces');
 		let id = '';
-		await this.#commit(db, actor.userId, async (tx) => {
+		await this.#commit(this.#db, actor.userId, async (tx) => {
 			const out = await insertTeamspace(tx, actor.userId, input);
 			id = out.id;
 			return out.records;
 		});
-		return readTeamspace(this.#db, actor, id);
+		return readTeamspace(this.#writeDb(actor), actor, id);
 	}
 
 	async updateTeamspace(actor: Actor, patch: Partial<TeamspaceInput> & { id: string }): Promise<Teamspace> {
-		const db = this.#writeDb(actor);
-		await this.#commit(db, actor.userId, (tx) => updateTeamspaceRecords(tx, patch));
-		return readTeamspace(this.#db, actor, patch.id);
+		await this.#commit(this.#writeDb(actor), actor.userId, (tx) => updateTeamspaceRecords(tx, patch));
+		return readTeamspace(this.#writeDb(actor), actor, patch.id);
 	}
 
 	/** Tombstones the teamspace and all its pages with one shared timestamp. */
 	async archiveTeamspace(actor: Actor, id: string): Promise<{ seq: number }> {
-		const db = this.#writeDb(actor);
-		const { seq } = await this.#commit(db, actor.userId, (tx, env) => archiveTeamspaceRecords(tx, id, env.actorId, env.now));
+		const { seq } = await this.#commit(this.#writeDb(actor), actor.userId, (tx, env) =>
+			archiveTeamspaceRecords(tx, id, env.actorId, env.now)
+		);
 		return { seq };
 	}
 
 	async teamspaceMembers(actor: Actor, teamspaceId: string): Promise<TeamspaceMember[]> {
-		return listTeamspaceMembers(this.#db, actor, teamspaceId);
+		return listTeamspaceMembers(this.#writeDb(actor), actor, teamspaceId);
 	}
 
 	async addTeamspaceMember(
 		actor: Actor,
 		input: { teamspaceId: string; userId: string; role?: 'owner' | 'member' }
 	): Promise<TeamspaceMember> {
-		const db = this.#writeDb(actor);
 		let member: TeamspaceMember | undefined;
-		await this.#commit(db, actor.userId, async (tx) => {
+		await this.#commit(this.#writeDb(actor), actor.userId, async (tx) => {
 			const out = await addTeamspaceMemberRecords(tx, input);
 			member = out.member;
 			return out.records;
@@ -631,9 +835,8 @@ export class WorkspaceDO extends DurableObject<Env> {
 		actor: Actor,
 		input: { teamspaceId: string; userId: string; role: 'owner' | 'member' }
 	): Promise<TeamspaceMember> {
-		const db = this.#writeDb(actor);
 		let member: TeamspaceMember | undefined;
-		await this.#commit(db, actor.userId, async (tx) => {
+		await this.#commit(this.#writeDb(actor), actor.userId, async (tx) => {
 			const out = await setTeamspaceMemberRoleRecords(tx, input);
 			member = out.member;
 			return out.records;
@@ -642,8 +845,83 @@ export class WorkspaceDO extends DurableObject<Env> {
 	}
 
 	async removeTeamspaceMember(actor: Actor, input: { teamspaceId: string; userId: string }): Promise<void> {
-		const db = this.#writeDb(actor);
-		await this.#commit(db, actor.userId, (tx) => removeTeamspaceMemberRecords(tx, input));
+		await this.#commit(this.#writeDb(actor), actor.userId, (tx) => removeTeamspaceMemberRecords(tx, input));
+	}
+
+	// ───────────────────────── access: pages, grants, visibility ─────────────────────────
+
+	/**
+	 * The highest level `actor` holds on a live page, or null (no access, trashed, unknown). Rooms and files
+	 * ask this. `actor.role` may be left out (a user id alone): the `member` mirror then decides, and a user
+	 * who is not a current member holds nothing.
+	 */
+	async pageAccess(actor: AccessActor, pageId: string): Promise<AccessLevel | null> {
+		return this.#access.pageAccess(actor, pageId);
+	}
+
+	/** Whether `actor` holds `level` on each of the pages: `{ [pageId]: boolean }`. */
+	async can(actor: AccessActor, pageIds: string[], level: AccessLevel): Promise<Record<string, boolean>> {
+		return this.#access.can(actor, pageIds, level);
+	}
+
+	/** The live grants of a page (the policy's `grant` read: whoever can read the page). Tokens only for `full`. */
+	async listGrants(actor: Actor, pageId: string): Promise<Grant[]> {
+		const level = await this.#access.pageAccess(actor, pageId);
+		if (!level) throw notFound(`Page "${pageId}"`);
+		const rows = (await this.#writeDb(actor).grant.findMany({
+			where: { pageId, deletedAt: null },
+			orderBy: { id: 'asc' }
+		})) as Parameters<typeof toGrant>[0][];
+		return rows.map((r) => toGrant(r, level === 'full'));
+	}
+
+	/**
+	 * Shares a page with a user, a teamspace, the workspace or the world (`public` mints a random link token).
+	 * Needs `full` on the page. Setting a grant that exists changes its level; a page has one public link.
+	 */
+	async setGrant(actor: Actor, input: GrantInput): Promise<Grant> {
+		let grant: Grant | undefined;
+		await this.#commit(this.#writeDb(actor), actor.userId, async (tx) => {
+			const out = await setGrantRecords(tx as unknown as GovernedTx, actor.userId, input);
+			grant = out.grant;
+			return out.records;
+		});
+		return grant as Grant;
+	}
+
+	/** Revokes a grant (tombstones it). Needs `full` on its page. Returns the commit's `seq`. */
+	async revokeGrant(actor: Actor, grantId: string): Promise<{ seq: number }> {
+		const { seq } = await this.#commit(this.#writeDb(actor), actor.userId, (tx, env) =>
+			revokeGrantRecords(tx as unknown as GovernedTx, grantId, env.now)
+		);
+		return { seq };
+	}
+
+	/**
+	 * The page a public share token opens and the level it gives, or null (unknown or revoked token,
+	 * trashed page). The token IS the credential: this is the one lookup that runs before an actor exists,
+	 * and what it returns is confirmed by the policy for an anonymous visitor holding that token.
+	 */
+	async grantByToken(token: string): Promise<{ pageId: string; level: AccessLevel } | null> {
+		if (typeof token !== 'string' || token.length < 16) return null;
+		const grant = await this.#db.grant.findFirst({ where: { subjectKind: 'public', token, deletedAt: null } });
+		if (!grant) return null;
+		const level = await this.#access.pageAccess({ role: 'anonymous', shareToken: token }, grant.pageId);
+		return level ? { pageId: grant.pageId, level } : null;
+	}
+
+	/**
+	 * The `num` of every live page `actor` can read: the visibility set the query engine ANDs into
+	 * `queryView` (and search and AI use). Cached per actor, recomputed lazily when a grant, a move, a
+	 * teamspace membership or a workspace membership changes. Empty for a user without a membership.
+	 */
+	async visibleNums(actor: AccessActor): Promise<Set<number>> {
+		return (await this.#access.visibleNums(actor)) ?? new Set();
+	}
+
+	/** Test and diagnostics hook: whether the actor's visibility set is held in memory right now. */
+	async visibilityCached(actor: AccessActor): Promise<boolean> {
+		return this.#access.cached(actor);
 	}
 
 	// ───────────────────────── index ingestion and rooms ─────────────────────────
@@ -664,6 +942,10 @@ export class WorkspaceDO extends DurableObject<Env> {
 			},
 			{ backlinkTargets: () => result?.backlinkTargets ?? [] }
 		);
+		// Mention emails: new @mentions become `email` jobs (never fails the index batch).
+		await processMentions({ db: this.#db, env: this.env, host: this, workspaceId: this.ctx.id.name ?? '' }, items).catch((error) =>
+			console.warn('[mentions] failed:', String(error))
+		);
 		return { indexed: result?.indexed ?? 0, skipped: result?.skipped ?? 0 };
 	}
 
@@ -680,6 +962,78 @@ export class WorkspaceDO extends DurableObject<Env> {
 		await this.#db.openRoom.deleteMany({ where: { pageId } });
 	}
 
+	// ───────────────────────── files (Editor and files track, see ./files.ts) ─────────────────────────
+
+	/** The level `actor` holds on a page for the files, comments and lock features: `pageAccess`, as a {@link PageLevel}. */
+	async editorPageLevel(actor: Actor, pageId: string): Promise<PageLevel | null> {
+		return normalizeLevel(await this.pageAccess(actor, pageId));
+	}
+
+	/** `editorPageLevel` for a user known only by id (the room route, at a dial): the member mirror decides the role. */
+	async editorUserLevel(userId: string, pageId: string): Promise<PageLevel | null> {
+		return normalizeLevel(await this.pageAccess({ userId }, pageId));
+	}
+
+	#filesContext(actor: Actor): FilesContext {
+		return {
+			sql: this.ctx.storage.sql,
+			env: this.env,
+			workspaceId: actor.workspaceId,
+			level: (pageId) => this.editorPageLevel(actor, pageId)
+		};
+	}
+
+	/** `files.begin`: `update` on the page and room in the quota, then the upload's id and where to send it. */
+	filesBegin(actor: Actor, input: BeginInput) {
+		return beginUpload(this.#filesContext(actor), actor, input);
+	}
+
+	/** The caller's pending upload (`PUT /files/:fileId`, the parts endpoints), checked again for access. */
+	filesPending(actor: Actor, fileId: string) {
+		return pendingUpload(this.#filesContext(actor), actor, fileId);
+	}
+
+	async filesRecordUploadId(actor: Actor, fileId: string, uploadId: string): Promise<void> {
+		const ctx = this.#filesContext(actor);
+		await pendingUpload(ctx, actor, fileId);
+		recordUploadId(ctx, fileId, uploadId);
+	}
+
+	/** `files.complete`: assembles a multipart upload, checks the bytes, commits the row. */
+	filesComplete(actor: Actor, fileId: string, parts?: { partNumber: number; etag: string }[]) {
+		return completeUpload(this.#filesContext(actor), actor, fileId, parts);
+	}
+
+	filesAbort(actor: Actor, fileId: string) {
+		return abortUpload(this.#filesContext(actor), actor, fileId);
+	}
+
+	/** A committed file's metadata when `actor` may read its page (`files.get`, and the download route). */
+	filesGet(actor: Actor, fileId: string) {
+		return getFile(this.#filesContext(actor), fileId);
+	}
+
+	/** Like `filesGet` with the R2 key, or `null` (the download route turns that into a 404). */
+	filesResolve(actor: Actor, fileId: string) {
+		return readableFile(this.#filesContext(actor), fileId);
+	}
+
+	/** The weekly sweep for this workspace: uploads never committed are removed. */
+	filesSweep(options: { now?: number; maxAgeMs?: number } = {}) {
+		return sweepUncommitted(this.ctx.storage.sql, this.env, this.ctx.id.name ?? '', options);
+	}
+
+	/** Purge: the files of these pages lose their rows and bytes. */
+	filesPurgePages(pageIds: string[]) {
+		return purgeFilesOfPages(this.ctx.storage.sql, this.env, this.ctx.id.name ?? '', pageIds);
+	}
+
+	/** Storage used and the quota; `setQuota` (bytes, or `null` for the default) changes it. */
+	filesStorage(setQuota?: number | null) {
+		if (setQuota !== undefined) setStorageQuota(this.ctx.storage.sql, setQuota);
+		return filesUsage(this.ctx.storage.sql);
+	}
+
 	// ───────────────────────── diagnostics ─────────────────────────
 
 	/** Live-loop counters, for tests and operators: shared units, evaluations, sockets with a stream. */
@@ -693,6 +1047,14 @@ export class WorkspaceDO extends DurableObject<Env> {
 			stale: this.#hub.staleUnits()
 		};
 	}
+}
+
+/** The policy's refusal as the workspace error the `/rpc` layer maps to 403. */
+function mapPolicyError(error: unknown): unknown {
+	if (error instanceof ForbiddenError || (error instanceof Error && error.name === 'ForbiddenError')) {
+		return new WorkspaceError('FORBIDDEN', 'You do not have permission to do that');
+	}
+	return error;
 }
 
 /** Prefixes the issues of a failed op with `/ops/<index>` and maps Databases' `EavError` to `VALIDATION_FAILED`. */

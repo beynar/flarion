@@ -15,6 +15,7 @@ import { chunks, MAX_PARAMS, qmarks } from './util';
 
 interface PageSqlRow extends Record<string, SqlStorageValue> {
 	id: string;
+	num: number;
 	parent_id: string | null;
 	rank: string;
 	title: string;
@@ -30,7 +31,7 @@ interface PageSqlRow extends Record<string, SqlStorageValue> {
 	updated_at: string | null;
 }
 
-const PAGE_COLUMNS = `p.id, p.parent_id, p.rank, p.title, p.icon, p.cover, p.is_database, p.teamspace_id,
+const PAGE_COLUMNS = `p.id, p.num, p.parent_id, p.rank, p.title, p.icon, p.cover, p.is_database, p.teamspace_id,
 	EXISTS (SELECT 1 FROM page c WHERE c.parent_id = p.id AND c.deleted_at IS NULL) AS has_children,
 	p.props_json, p.created_by, p.created_at, p.updated_by, p.updated_at`;
 
@@ -45,6 +46,8 @@ const parseValues = (json: string | null): Values => {
 };
 
 export type Access = TreeRow['access'];
+/** The level the actor holds on a page, by its dense number (the visibility set carries it). */
+export type AccessOf = (num: number) => Access;
 
 export class RowReader {
 	readonly #sql: SqlStorage;
@@ -134,13 +137,13 @@ export class RowReader {
 		return out;
 	}
 
-	treeRows(ids: readonly string[], access: Access): Map<string, TreeRow> {
+	treeRows(ids: readonly string[], access: AccessOf): Map<string, TreeRow> {
 		const out = new Map<string, TreeRow>();
 		for (const [id, r] of this.#pageRows(ids)) out.set(id, toTreeRow(r, access));
 		return out;
 	}
 
-	pageRows(ids: readonly string[], access: Access): Map<string, PageRow> {
+	pageRows(ids: readonly string[], access: AccessOf): Map<string, PageRow> {
 		const out = new Map<string, PageRow>();
 		for (const [id, r] of this.#pageRows(ids)) {
 			out.set(id, {
@@ -155,12 +158,12 @@ export class RowReader {
 		return out;
 	}
 
-	viewRows(ids: readonly string[], access: Access, props?: readonly string[]): Map<string, ViewRow> {
+	viewRows(ids: readonly string[], access: AccessOf, props?: readonly string[]): Map<string, ViewRow> {
 		const out = new Map<string, ViewRow>();
 		for (const [id, r] of this.#pageRows(ids)) {
 			let values = parseValues(r.props_json);
 			if (props) values = Object.fromEntries(Object.entries(values).filter(([k]) => props.includes(k)));
-			out.set(id, { id, title: r.title, icon: r.icon, cover: r.cover, values, access });
+			out.set(id, { id, title: r.title, icon: r.icon, cover: r.cover, values, access: access(r.num) });
 		}
 		return out;
 	}
@@ -206,6 +209,17 @@ export class RowReader {
 				isDatabase: !!r.is_database,
 				hasChildren: !!r.has_children
 			});
+		}
+		return out;
+	}
+
+	/** Dense numbers of pages by id (they never change: callers may cache them). */
+	nums(ids: readonly string[]): Map<string, number> {
+		const out = new Map<string, number>();
+		for (const part of chunks(ids, MAX_PARAMS)) {
+			for (const r of this.#all<{ id: string; num: number }>(`SELECT id, num FROM page WHERE id IN (${qmarks(part.length)})`, ...part)) {
+				out.set(r.id, r.num);
+			}
 		}
 		return out;
 	}
@@ -260,7 +274,7 @@ export class RowReader {
 	}
 }
 
-function toTreeRow(r: PageSqlRow, access: Access): TreeRow {
+function toTreeRow(r: PageSqlRow, access: AccessOf): TreeRow {
 	return {
 		id: r.id,
 		parentId: r.parent_id,
@@ -270,7 +284,7 @@ function toTreeRow(r: PageSqlRow, access: Access): TreeRow {
 		isDatabase: !!r.is_database,
 		teamspaceId: r.teamspace_id,
 		hasChildren: !!r.has_children,
-		access,
+		access: access(r.num),
 		createdBy: r.created_by
 	};
 }

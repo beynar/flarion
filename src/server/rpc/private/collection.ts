@@ -1,8 +1,15 @@
 /** `collection` procedures of the private contract. Owner: Databases (`query` waits for the P2 engine). */
 import { ORPCError } from '@orpc/server';
 import { rankAfter } from '../../../lib/shared/sort-keys';
-import { notImplemented, os, requireWorkspace } from './base';
+import type { Actor } from '../../auth/session';
+import type { QueryViewInput, QueryViewResult } from '../../engine/view';
+import { os, requireWorkspace } from './base';
 import { applyOps, dbWorkspace, newId } from './databases';
+
+/** The Workspace DO's `queryView`, typed narrowly like the other handlers' view of the stub. */
+interface QueryWorkspace {
+	queryView(actor: Actor, input: QueryViewInput): Promise<QueryViewResult>;
+}
 
 export const collectionHandlers = {
 	get: os.collection.get.use(requireWorkspace).handler(async ({ input, context }) => {
@@ -51,5 +58,22 @@ export const collectionHandlers = {
 				applyOps(context, [{ op: 'moveMember', collection: input.collectionId, page: input.pageId, rank: input.rank }])
 			)
 	},
-	query: os.collection.query.handler(() => notImplemented('collection.query'))
+	/**
+	 * A one-shot read of a view, flat (the schema has no groups: a grouped view is read ungrouped here; the
+	 * socket's `view` subscription carries groups). The cursor is the offset of the next row.
+	 */
+	query: os.collection.query.use(requireWorkspace).handler(async ({ input, context }) => {
+		const offset = input.cursor ? Math.max(0, Number(input.cursor) || 0) : 0;
+		const limit = input.limit ?? 50;
+		const workspace = context.workspace as unknown as QueryWorkspace;
+		const result = await workspace.queryView(context.actor, {
+			collectionId: input.collectionId,
+			...(input.viewId ? { viewId: input.viewId } : {}),
+			spec: { ...(input.spec ?? {}), groupBy: null },
+			window: { offset, limit },
+			...(input.props ? { props: input.props } : {})
+		});
+		const next = offset + result.rows.length;
+		return { rows: result.rows, total: result.total, nextCursor: next < result.total && result.rows.length > 0 ? String(next) : null, seq: result.seq };
+	})
 };

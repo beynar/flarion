@@ -12,7 +12,9 @@
  * - The first socket tells the Workspace DO (`openRoom`), the last closing one too (`closeRoom`).
  * - `seedFrom(json)` seeds a brand-new room (duplicate, template); `onLoad` restores from R2, else
  *   returns the pending seed, else nothing.
- * - History (`r2History`) and locks arrive in P3.
+ * - Page lock: `setLocked` / `lockState` keep the lock in the room's KV, `validate` denies edits of a locked page
+ *   unless the sender has full access (`noteBypass`, called by the route at each dial); see `validate.ts`.
+ * - History (`r2History`) arrives in P3.
  */
 import { DurableObject } from 'cloudflare:workers';
 import type { JSONDoc } from 'edytor/crdt/edytor';
@@ -27,9 +29,17 @@ import {
 import { roomSemantics } from '../../../lib/shared/blocks/kinds.js';
 import type { IndexPageJob } from '../../queues/types';
 import { enqueueIndexJob } from './index-job';
-import { ensurePageMetaTable, resolvePageIdentity, type PageIdentity } from './page-meta';
+import { ensurePageMetaTable, recordPageMeta, resolvePageIdentity, type PageIdentity } from './page-meta';
 import { loadSnapshot, saveSnapshot } from './snapshot-store';
-import { createFrameValidator, lastEditor, recordUserAccess } from './validate';
+import {
+	canBypassLock,
+	createFrameValidator,
+	lastEditor,
+	readPageLock,
+	recordBypass,
+	recordUserAccess,
+	writePageLock
+} from './validate';
 
 /** edytor's default document quota is 2 MiB; long pages need more (docs/PLAN.md "Pages and blocks"). */
 export const MAX_DOCUMENT_BYTES = 16 * 1024 * 1024;
@@ -56,6 +66,14 @@ export interface PageIndexSource {
 	editedBy: string | null;
 }
 
+/** A page's lock as its room reports it. */
+export interface PageLockState {
+	locked: boolean;
+	lockedBy: string | null;
+	lockedAt: number | null;
+	bypass: boolean;
+}
+
 export class PageDO extends DurableObject<Env> {
 	readonly document: AttachedDocument;
 
@@ -68,8 +86,18 @@ export class PageDO extends DurableObject<Env> {
 			semantics: roomSemantics,
 			onLoad: () => this.restore(),
 			onSave: (saved) => this.persist(saved),
-			validate: createFrameValidator(ctx.storage.kv)
+			validate: createFrameValidator(ctx.storage.kv),
+			// Per-block locks (a block whose data names a user under `lockedBy`) hold their subtree; full access bypasses.
+			locks: { key: 'lockedBy', subtree: true, bypass: (user) => canBypassLock(ctx.storage.kv, user) }
 		});
+	}
+
+	/**
+	 * The room route tells the object who it is before the room loads (see `recordPageMeta`): not every stub
+	 * carries the object's name. Idempotent; a contradicting identity throws.
+	 */
+	recordIdentity(workspaceId: string, pageId: string): void {
+		recordPageMeta(this.ctx.storage.sql, this.ctx.id.name, { workspaceId, pageId });
 	}
 
 	/** This object's page, from its name (recorded in `page_meta` on first use). */
@@ -191,7 +219,57 @@ export class PageDO extends DurableObject<Env> {
 	 */
 	setAccess(userId: string, access: DocumentAccessLevel | 'none') {
 		recordUserAccess(this.ctx.storage.kv, userId, access);
+		// Full access is re-noted at the user's next dial.
+		recordBypass(this.ctx.storage.kv, userId, false);
 		return this.document.setAccess(userId, access);
+	}
+
+	/** The user ids with an open socket in this room (the Workspace DO's access sync asks before it re-checks them). */
+	roomUsers(): string[] {
+		const users = new Set<string>();
+		for (const ws of this.ctx.getWebSockets(SOCKET_TAG)) {
+			if (ws.readyState !== WebSocket.OPEN) continue;
+			const user = (ws.deserializeAttachment() as { user?: unknown } | null)?.user;
+			if (typeof user === 'string') users.add(user);
+		}
+		return [...users];
+	}
+
+	// ───────────── page lock ─────────────
+
+	/** The page's lock, and whether `userId` edits despite it. */
+	lockState(userId?: string): PageLockState {
+		const lock = readPageLock(this.ctx.storage.kv);
+		return {
+			locked: lock !== null,
+			lockedBy: lock?.by ?? null,
+			lockedAt: lock?.at ?? null,
+			bypass: userId ? canBypassLock(this.ctx.storage.kv, userId) : false
+		};
+	}
+
+	/**
+	 * Lock or unlock the page for `userId`. Anyone who may lock can; only the locker or a user with full access
+	 * (`full`) unlocks: otherwise `refused` is set and the lock stands (the RPC maps it to FORBIDDEN). A refusal is
+	 * a value, not a throw, so it crosses the Durable Object RPC boundary cleanly.
+	 */
+	setLocked(userId: string, locked: boolean, full: boolean): PageLockState & { refused?: true } {
+		const kv = this.ctx.storage.kv;
+		const current = readPageLock(kv);
+		let refused = false;
+		if (locked) {
+			if (!current) writePageLock(kv, { by: userId, at: Date.now() });
+		} else if (current) {
+			if (current.by !== userId && !full) refused = true;
+			else writePageLock(kv, null);
+		}
+		recordBypass(kv, userId, full);
+		return { ...this.lockState(userId), ...(refused ? { refused: true as const } : {}) };
+	}
+
+	/** The route tells the room, at each dial, whether the dialing user has full access (they edit through a lock). */
+	noteBypass(userId: string, bypass: boolean): void {
+		recordBypass(this.ctx.storage.kv, userId, bypass);
 	}
 
 	/** Close every socket of a user; 4401 makes the provider refresh its token and redial. */

@@ -5,14 +5,15 @@ import type { SocketActor } from './socket';
 export type WorkspaceSocketActor = Actor & SocketActor;
 
 /**
- * Where P2 plugs in the viborm policy: the object's writes and reads all go through here. Until then the
- * "visibility set" is every live page (docs/PLAN.md "Implementation phases", stand-ins), so the scope key
- * is constant and every actor shares each subscription unit.
+ * Subscription units are shared by every actor: a unit holds the ids a query returns, and each socket's
+ * window is that list ANDed with ITS visibility set (`access.ts`) when a snapshot or a diff is built. So the
+ * scope key of a unit stays constant (docs/PLAN.md "Real-time sync": "intersects it with the actor's
+ * visibility set").
  */
 export const VISIBILITY_SCOPE_ALL = 'all';
 export const visibilityScope = (_actor: Actor): string => VISIBILITY_SCOPE_ALL;
 
-/** The access level a role holds on pages until P2 computes it per page (`$access`). */
+/** A role-based stand-in for a page level (no longer used by the live loop: rows carry the real `$access`). */
 export function stubAccess(role: Actor['role']): 'read' | 'update' | 'full' {
 	return role === 'owner' || role === 'admin' ? 'full' : role === 'guest' ? 'read' : 'update';
 }

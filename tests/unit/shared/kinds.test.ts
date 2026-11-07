@@ -45,6 +45,8 @@ describe('custom block kinds', () => {
 			v.safeParse(databaseViewDataSchema, { collectionId: 'c1', viewId: 'v1', localFilter: { and: [{ prop: 'status', op: 'is', value: 'todo' }] } }).success
 		).toBe(true);
 		expect(v.safeParse(databaseViewDataSchema, { collectionId: '', viewId: null, localFilter: null }).success).toBe(false);
+		// A linked view that has not been pointed at a database yet.
+		expect(v.safeParse(databaseViewDataSchema, defaultBlockData.database_view()).success).toBe(true);
 		expect(v.safeParse(databaseViewDataSchema, { collectionId: 'c1', viewId: null, localFilter: { and: [{ nope: 1 }] } }).success).toBe(false);
 		expect(v.safeParse(dateMentionDataSchema, { start: '2026-11-07', end: '2026-11-09' }).success).toBe(true);
 		expect(v.safeParse(dateMentionDataSchema, { start: 'soon' }).success).toBe(false);

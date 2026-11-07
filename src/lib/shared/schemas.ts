@@ -189,14 +189,25 @@ export const grantSchema = v.object({
 	level: accessLevelSchema,
 	/** The share token of a `public` grant. */
 	token: v.nullable(v.string()),
-	createdBy: idSchema
+	createdBy: idSchema,
+	/** Set on grants that come from an ancestor page (`fromPageId` says which); absent on direct grants. */
+	inherited: v.optional(v.boolean()),
+	fromPageId: v.optional(idSchema),
+	/** A guest invite waiting for acceptance: `subjectId` is null and `email` says who it is for. */
+	pending: v.optional(v.boolean()),
+	email: v.optional(v.string())
 });
 export type Grant = v.InferOutput<typeof grantSchema>;
 export const grantSetSchema = v.object({
 	pageId: idSchema,
 	subjectKind: v.picklist(GRANT_SUBJECTS),
 	subjectId: v.nullable(idSchema),
-	level: accessLevelSchema
+	level: accessLevelSchema,
+	/**
+	 * Share with a person by email (use `subjectKind: 'user'` and a null `subjectId`): a workspace member or
+	 * known user gets the grant at once; anybody else gets a guest invite with a pending grant.
+	 */
+	email: v.optional(v.pipe(v.string(), v.trim(), v.email()))
 });
 export const grantRevokeSchema = v.object({ grantId: idSchema });
 
@@ -371,6 +382,16 @@ export const fileInfoSchema = v.object({
 	url: v.string()
 });
 export const fileIdSchema = v.object({ fileId: idSchema });
+
+/** A page's lock as its room holds it: who locked it, when (ms), or `locked: false`. */
+export const pageLockSchema = v.object({
+	locked: v.boolean(),
+	lockedBy: v.nullable(v.string()),
+	lockedAt: v.nullable(v.number()),
+	/** Whether the caller edits the page despite the lock (full access). */
+	bypass: v.boolean()
+});
+export type PageLock = v.InferOutput<typeof pageLockSchema>;
 
 // ───────────────────────────── tokens ─────────────────────────────
 

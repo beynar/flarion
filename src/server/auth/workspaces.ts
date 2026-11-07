@@ -6,11 +6,12 @@
 import { ORPCError } from '@orpc/server';
 import { createDirectoryClient, type DirectoryClient } from '../db/global.client';
 import { INVITE_TTL_DAYS, hashInviteToken, isInviteUsable, lookupInvite, newInviteToken } from './invites';
-import { inviteMail, sendMail } from '../mail';
+import { guestInviteMail, inviteMail, sendMail } from '../mail';
 import { drainOutbox, outboxInsert, runOutbox } from './outbox';
 import type { SessionInfo, WorkspaceRole } from './session';
+import { applyPendingGrants, revokeGuestGrants } from '../share/guests';
 
-type Services = { env: Env; ctx: Pick<ExecutionContext, 'waitUntil'> };
+export type Services = { env: Env; ctx: Pick<ExecutionContext, 'waitUntil'> };
 
 const SLUG = /^[a-z0-9][a-z0-9-]{1,38}[a-z0-9]$/;
 const iso = (date: Date) => date.toISOString();
@@ -57,9 +58,11 @@ const isUniqueViolation = (error: unknown) =>
 	error instanceof Error && /unique|constraint/i.test(`${error.name} ${error.message} ${(error as { code?: string }).code ?? ''}`);
 
 /** Delivers the outbox rows right away; whatever fails is retried by a later drain. */
-async function deliver(services: Services, ids: string[]): Promise<void> {
-	for (const id of ids) await runOutbox(services.env, id);
+export async function deliver(services: Services, ids: string[]): Promise<boolean> {
+	let delivered = true;
+	for (const id of ids) delivered = (await runOutbox(services.env, id)) && delivered;
 	services.ctx.waitUntil(drainOutbox(services.env).catch(() => undefined));
+	return delivered;
 }
 
 export async function listWorkspaces(env: Env, userId: string): Promise<WorkspaceDto[]> {
@@ -186,7 +189,8 @@ export async function deleteWorkspace(
 
 // ───────────────────────────── members ─────────────────────────────
 
-export async function listMembers(env: Env, workspaceId: string) {
+export async function listMembers(env: Env, workspaceId: string, role: WorkspaceRole) {
+	if (role === 'guest') throw new ORPCError('FORBIDDEN', { message: 'Guests cannot see the members list' });
 	const members = await createDirectoryClient(env.DB).membership.findMany({
 		where: { workspaceId },
 		include: { user: true },
@@ -235,6 +239,8 @@ export async function setMemberRole(
 		outbox.operation
 	]);
 	await deliver(services, [outbox.id]);
+	// A guest who becomes a member (or admin) no longer needs the page-by-page grants they were given.
+	if (target.role === 'guest' && input.role !== 'guest') await revokeGuestGrants(services.env, actor.workspaceId, input.userId, actor.userId);
 }
 
 export async function removeMember(
@@ -253,6 +259,7 @@ export async function removeMember(
 	const outbox = outboxInsert(db, actor.workspaceId, { kind: 'syncMember', payload: { userId, role: null } });
 	await db.$transaction([db.membership.deleteMany({ where: { workspaceId: actor.workspaceId, userId } }), outbox.operation]);
 	await deliver(services, [outbox.id]);
+	if (target.role === 'guest') await revokeGuestGrants(services.env, actor.workspaceId, userId, actor.userId);
 }
 
 // ───────────────────────────── invites ─────────────────────────────
@@ -277,28 +284,48 @@ const inviteDto = (row: InviteRow) => ({
 	acceptedAt: row.acceptedAt ? iso(row.acceptedAt) : null
 });
 
+/** The inviter's email must be verified (the cookie cache can lag a fresh verification: only a "no" is re-checked). */
+export async function requireVerifiedInviter(env: Env, session: SessionInfo): Promise<void> {
+	if (session.emailVerified) return;
+	const row = await createDirectoryClient(env.DB).user.findFirst({ where: { id: session.userId }, select: { emailVerified: true } });
+	if (row?.emailVerified !== true) throw new ORPCError('FORBIDDEN', { message: 'Verify your email before inviting others' });
+}
+
+export async function limitInvites(env: Env, userId: string): Promise<void> {
+	const limited = await env.RL_AUTH.limit({ key: `invite:${userId}` }).catch(() => ({ success: true }));
+	if (!limited.success) throw new ORPCError('TOO_MANY_REQUESTS', { message: 'Too many invitations. Try again in a minute.' });
+}
+
+/** A page a guest invite carries: applied as a grant when the invite is accepted. */
+export interface InvitePage {
+	pageId: string;
+	level: 'read' | 'comment' | 'update' | 'full';
+	title: string;
+}
+
 export async function createInvite(
 	services: Services,
 	actor: { userId: string; name: string; role: WorkspaceRole; workspaceId: string },
 	session: SessionInfo,
-	input: { email: string; role: 'admin' | 'member' | 'guest' }
+	input: { email: string; role: 'admin' | 'member' | 'guest' },
+	/** Set by `page.grants.set` with an email: the invite also carries that page's grant. */
+	page?: InvitePage
 ) {
 	const { env } = services;
-	if (actor.role !== 'owner' && actor.role !== 'admin') throw new ORPCError('FORBIDDEN', { message: 'Only owners and admins can invite people' });
+	// Sharing a page by email is gated by the page's `full` access (checked by the caller); a plain invite
+	// is for owners and admins.
+	if (!page && actor.role !== 'owner' && actor.role !== 'admin') throw new ORPCError('FORBIDDEN', { message: 'Only owners and admins can invite people' });
+	if (actor.role === 'guest') throw new ORPCError('FORBIDDEN', { message: 'Guests cannot invite people' });
 	const email = input.email.trim().toLowerCase();
 	const db = createDirectoryClient(env.DB, actor.userId);
-	// The cookie cache can lag a fresh verification by a few minutes: only a "not verified" answer is re-checked.
-	const verified =
-		session.emailVerified || (await db.user.findFirst({ where: { id: session.userId }, select: { emailVerified: true } }))?.emailVerified === true;
-	if (!verified) throw new ORPCError('FORBIDDEN', { message: 'Verify your email before inviting others' });
+	await requireVerifiedInviter(env, session);
+	await limitInvites(env, actor.userId);
 
-	const limited = await env.RL_AUTH.limit({ key: `invite:${actor.userId}` }).catch(() => ({ success: true }));
-	if (!limited.success) throw new ORPCError('TOO_MANY_REQUESTS', { message: 'Too many invitations. Try again in a minute.' });
-
-	const [workspace, existingUser, pending] = await Promise.all([
+	const [workspace, existingUser, pending, earlier] = await Promise.all([
 		db.workspace.findFirst({ where: { id: actor.workspaceId }, select: { name: true } }),
 		db.user.findFirst({ where: { email }, select: { id: true } }),
-		db.invite.count({ where: { workspaceId: actor.workspaceId, acceptedAt: null, expiresAt: { gt: new Date() } } })
+		db.invite.count({ where: { workspaceId: actor.workspaceId, acceptedAt: null, expiresAt: { gt: new Date() } } }),
+		db.invite.findMany({ where: { workspaceId: actor.workspaceId, email, acceptedAt: null }, select: { id: true, role: true } })
 	]);
 	if (!workspace) throw new ORPCError('NOT_FOUND', { message: 'Workspace not found' });
 	if (existingUser && (await db.membership.findFirst({ where: { workspaceId: actor.workspaceId, userId: existingUser.id }, select: { id: true } }))) {
@@ -306,42 +333,72 @@ export async function createInvite(
 	}
 	if (pending >= MAX_PENDING_INVITES) throw new ORPCError('BAD_REQUEST', { message: 'Too many pending invitations. Revoke some first.' });
 
+	// Sharing a page never lowers a pending invite's role (a member invite stays a member invite).
+	const role = page ? (earlier.find((invite) => invite.role !== 'guest')?.role ?? input.role) : input.role;
 	const token = newInviteToken();
 	const id = crypto.randomUUID();
 	const now = new Date();
 	const expiresAt = new Date(now.getTime() + INVITE_TTL_DAYS * 24 * 60 * 60 * 1000);
+	const earlierIds = earlier.map((invite) => invite.id);
+	const pendingGrantId = crypto.randomUUID();
 	await db.$transaction([
-		// A re-invite replaces the earlier pending one: only the newest link works.
-		db.invite.deleteMany({ where: { workspaceId: actor.workspaceId, email, acceptedAt: null } }),
 		db.invite.create({
 			data: {
 				id,
 				workspaceId: actor.workspaceId,
 				email,
-				role: input.role,
+				role,
 				tokenHash: await hashInviteToken(token),
 				createdBy: actor.userId,
 				createdAt: now,
 				expiresAt
 			}
-		})
+		}),
+		// A re-invite replaces the earlier pending one (only the newest link works) and takes its pending grants along.
+		...(earlierIds.length > 0
+			? [
+					...(page ? [db.pendingGrant.deleteMany({ where: { inviteId: { in: earlierIds }, pageId: page.pageId } })] : []),
+					db.pendingGrant.updateMany({ where: { inviteId: { in: earlierIds } }, data: { inviteId: id } }),
+					db.invite.deleteMany({ where: { id: { in: earlierIds } } })
+				]
+			: []),
+		...(page
+			? [
+					db.pendingGrant.create({
+						data: {
+							id: pendingGrantId,
+							workspaceId: actor.workspaceId,
+							inviteId: id,
+							pageId: page.pageId,
+							level: page.level,
+							createdBy: actor.userId,
+							createdAt: now
+						}
+					})
+				]
+			: [])
 	]);
+	const url = `${env.APP_ORIGIN}/invite/${token}`;
 	try {
 		await sendMail(env, {
 			to: email,
-			...inviteMail({
-				inviterName: actor.name,
-				workspaceName: workspace.name,
-				url: `${env.APP_ORIGIN}/invite/${token}`,
-				expiresInDays: INVITE_TTL_DAYS
-			})
+			...(page
+				? guestInviteMail({
+						inviterName: actor.name,
+						workspaceName: workspace.name,
+						pageTitle: page.title,
+						level: page.level,
+						url,
+						expiresInDays: INVITE_TTL_DAYS
+					})
+				: inviteMail({ inviterName: actor.name, workspaceName: workspace.name, url, expiresInDays: INVITE_TTL_DAYS }))
 		});
 	} catch (error) {
 		console.error('[invite] mail failed:', error instanceof Error ? error.message : error);
-		await db.invite.deleteMany({ where: { id } });
+		await db.invite.deleteMany({ where: { id } }); // its pending grants cascade
 		throw new ORPCError('INTERNAL_SERVER_ERROR', { message: 'The invitation email could not be sent. Try again.' });
 	}
-	return inviteDto({ id, email, role: input.role, createdBy: actor.userId, expiresAt, acceptedAt: null });
+	return { ...inviteDto({ id, email, role, createdBy: actor.userId, expiresAt, acceptedAt: null }), pendingGrantId: page ? pendingGrantId : null };
 }
 
 export async function listInvites(env: Env, workspaceId: string, role: WorkspaceRole) {
@@ -379,6 +436,7 @@ export async function acceptInvite(services: Services, session: SessionInfo, tok
 	const now = new Date();
 	if (existing) {
 		await db.invite.updateMany({ where: { id: invite.id, acceptedAt: null }, data: { acceptedAt: now } });
+		await applyPendingGrants(env, { inviteId: invite.id, userId: session.userId, guest: existing.role === 'guest' });
 		return dto(workspace, existing.role as WorkspaceRole);
 	}
 	const outbox = outboxInsert(db, invite.workspaceId, {
@@ -395,5 +453,7 @@ export async function acceptInvite(services: Services, session: SessionInfo, tok
 		outbox.operation
 	]);
 	await deliver(services, [outbox.id]);
+	// A guest invite carried page grants: they apply now that the DO knows the member.
+	await applyPendingGrants(env, { inviteId: invite.id, userId: session.userId, guest: invite.role === 'guest' });
 	return dto(workspace, invite.role as WorkspaceRole);
 }

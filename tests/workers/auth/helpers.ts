@@ -22,6 +22,7 @@ export class FakeWorkspaces {
 	names = new Map<string, string>();
 	getRoleCalls = 0;
 	failing = false;
+	readonly fakeGrants = new FakeGrants();
 
 	private ws(id: string) {
 		let members = this.members.get(id);
@@ -33,7 +34,9 @@ export class FakeWorkspaces {
 		const guard = () => {
 			if (this.failing) throw new Error('workspace DO unavailable');
 		};
+		const grants = this.fakeGrants.api(workspaceId, (userId) => this.members.get(workspaceId)?.get(userId) ?? null);
 		return {
+			...grants,
 			init: async (args: { workspaceId: string; name: string; ownerId: string; ownerName: string }) => {
 				guard();
 				this.inits.push(args);
@@ -54,6 +57,109 @@ export class FakeWorkspaces {
 				guard();
 				this.getRoleCalls++;
 				return this.members.get(workspaceId)?.get(userId) ?? null;
+			}
+		};
+	}
+}
+
+type FakeGrant = {
+	id: string;
+	pageId: string;
+	subjectKind: 'user' | 'workspace' | 'teamspace' | 'public';
+	subjectId: string | null;
+	level: 'read' | 'comment' | 'update' | 'full';
+	token: string | null;
+	createdBy: string;
+};
+const LEVELS = ['read', 'comment', 'update', 'full'] as const;
+
+/**
+ * In-memory stand-in for the Sync core's grant methods on the Workspace DO (`pageAccess`, `listGrants`,
+ * `setGrant`, `revokeGrant`, `grantByToken`, `getPage`), with the same rules the policy enforces: owners and
+ * admins hold `full`, everybody else holds what grants give them, a visitor with a share token holds the
+ * public grant's level and nothing else. `failRevoke` / `failSet` simulate a DO outage.
+ */
+export class FakeGrants {
+	grants = new Map<string, FakeGrant[]>(); // workspaceId -> grants
+	pages = new Map<string, { title: string; icon: string | null }>(); // `${workspaceId}:${pageId}`
+	failRevoke = false;
+	failSet = false;
+	/** The token the next `public` grant mints (random when unset). */
+	nextToken: string | null = null;
+	/** The actor `getPage` last saw (a visitor must arrive with a share token and no user id). */
+	lastPageActor: unknown = null;
+	calls: string[] = [];
+
+	private list(workspaceId: string) {
+		let grants = this.grants.get(workspaceId);
+		if (!grants) this.grants.set(workspaceId, (grants = []));
+		return grants;
+	}
+
+	addPage(workspaceId: string, pageId: string, title: string, icon: string | null = null) {
+		this.pages.set(`${workspaceId}:${pageId}`, { title, icon });
+	}
+
+	api(workspaceId: string, roleOf: (userId: string) => string | null) {
+		const levelFor = (actor: { userId?: string; shareToken?: string; role?: string }, pageId: string) => {
+			if (!this.pages.has(`${workspaceId}:${pageId}`)) return null;
+			if (actor.userId && (actor.role === 'owner' || actor.role === 'admin')) return 'full' as const;
+			let best = -1;
+			for (const grant of this.list(workspaceId)) {
+				if (grant.pageId !== pageId) continue;
+				const matches =
+					(grant.subjectKind === 'user' && !!actor.userId && grant.subjectId === actor.userId) ||
+					(grant.subjectKind === 'workspace' && !!actor.userId && actor.role !== 'guest') ||
+					(grant.subjectKind === 'public' && !!actor.shareToken && grant.token === actor.shareToken);
+				if (matches) best = Math.max(best, LEVELS.indexOf(grant.level));
+			}
+			return best >= 0 ? LEVELS[best]! : null;
+		};
+		return {
+			pageAccess: async (actor: never, pageId: string) => levelFor(actor, pageId),
+			listGrants: async (actor: never, pageId: string) => {
+				if (!levelFor(actor, pageId)) throw new Error('NOT_FOUND');
+				return this.list(workspaceId).filter((g) => g.pageId === pageId);
+			},
+			setGrant: async (actor: { userId?: string }, input: { pageId: string; subjectKind: FakeGrant['subjectKind']; subjectId: string | null; level: FakeGrant['level'] }) => {
+				this.calls.push(`set:${input.subjectKind}`);
+				if (this.failSet) throw new Error('workspace DO unavailable');
+				if (levelFor(actor as never, input.pageId) !== 'full') throw new Error('FORBIDDEN: full access required');
+				if (input.subjectKind === 'user' && !roleOf(input.subjectId!)) throw new Error('BAD_REQUEST: not a member');
+				const existing = this.list(workspaceId).find(
+					(g) => g.pageId === input.pageId && g.subjectKind === input.subjectKind && g.subjectId === input.subjectId && input.subjectKind !== 'public'
+				);
+				if (existing) {
+					existing.level = input.level;
+					return { ...existing };
+				}
+				const grant: FakeGrant = {
+					id: crypto.randomUUID(),
+					...input,
+					token: input.subjectKind === 'public' ? (this.nextToken ?? `tok_${crypto.randomUUID().replace(/-/g, '')}`) : null,
+					createdBy: actor.userId ?? 'system'
+				};
+				this.list(workspaceId).push(grant);
+				return { ...grant };
+			},
+			revokeGrant: async (actor: { userId?: string }, grantId: string) => {
+				this.calls.push('revoke');
+				if (this.failRevoke) throw new Error('workspace DO unavailable');
+				const grants = this.list(workspaceId);
+				const index = grants.findIndex((g) => g.id === grantId);
+				if (index < 0) throw new Error('NOT_FOUND: no such grant');
+				if (levelFor(actor as never, grants[index]!.pageId) !== 'full') throw new Error('FORBIDDEN: full access required');
+				grants.splice(index, 1);
+				return { seq: 7 };
+			},
+			grantByToken: async (token: string) => {
+				const grant = this.list(workspaceId).find((g) => g.subjectKind === 'public' && g.token === token);
+				return grant ? { id: grant.id, pageId: grant.pageId, level: grant.level } : null;
+			},
+			getPage: async (actor: never, pageId: string) => {
+				this.lastPageActor = actor;
+				if (!levelFor(actor, pageId)) throw new Error('NOT_FOUND: page');
+				return this.pages.get(`${workspaceId}:${pageId}`)!;
 			}
 		};
 	}

@@ -48,6 +48,8 @@
     }
   },
   "dependencies": {
+    "@atlaskit/pragmatic-drag-and-drop": "4.0.0",
+    "@atlaskit/pragmatic-drag-and-drop-auto-scroll": "3.2.1",
     "@better-auth/passkey": "1.7.18",
     "@floating-ui/dom": "1.8.0",
     "@orpc/client": "1.16.2",

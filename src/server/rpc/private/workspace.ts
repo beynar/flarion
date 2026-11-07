@@ -33,7 +33,7 @@ export const workspaceHandlers = {
 		.use(requireWorkspace)
 		.handler(({ context, input }) => deleteWorkspace(context, context.actor, input.confirmName)),
 	members: {
-		list: os.workspace.members.list.use(requireWorkspace).handler(({ context }) => listMembers(context.env, context.actor.workspaceId)),
+		list: os.workspace.members.list.use(requireWorkspace).handler(({ context }) => listMembers(context.env, context.actor.workspaceId, context.actor.role)),
 		setRole: os.workspace.members.setRole.use(requireWorkspace).handler(async ({ context, input }) => {
 			await setMemberRole(context, context.actor, input);
 			return {};

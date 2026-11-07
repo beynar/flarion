@@ -6,6 +6,7 @@ import { meHandler } from './me';
 import { workspaceHandlers } from './workspace';
 import { teamspacesHandlers } from './teamspaces';
 import { pageHandlers } from './page';
+import { pageLockHandlers } from './page-lock';
 import { propertyHandlers } from './property';
 import { collectionHandlers } from './collection';
 import { viewHandlers } from './view';
@@ -18,7 +19,7 @@ import { tokensHandlers } from './tokens';
 export const router = os.router({
 	me: meHandler,
 	workspace: { ...workspaceHandlers, teamspaces: teamspacesHandlers },
-	page: pageHandlers,
+	page: { ...pageHandlers, lock: pageLockHandlers },
 	property: propertyHandlers,
 	collection: collectionHandlers,
 	view: viewHandlers,

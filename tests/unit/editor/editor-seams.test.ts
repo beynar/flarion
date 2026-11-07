@@ -6,17 +6,16 @@ import { UPLOADS_UNAVAILABLE, stubUpload } from '../../../src/lib/components/edi
 import { WIRED_PLUGINS } from '../../../src/lib/components/editor/plugins';
 
 describe('upload and unfurl seams', () => {
-	it('the default upload fails with the P2 message', async () => {
-		await expect(stubUpload(new File(['x'], 'a.png'), { progress() {} })).rejects.toThrow('uploads arrive in P2');
-		expect(UPLOADS_UNAVAILABLE).toBe('uploads arrive in P2');
+	it('the standalone editor has no upload and says so on the block', async () => {
+		await expect(stubUpload(new File(['x'], 'a.png'), { progress() {} })).rejects.toThrow(UPLOADS_UNAVAILABLE);
 	});
 
-	it('unfurl calls /rpc with the workspace and degrades to null on any failure', async () => {
-		const fetcher = vi.fn(async () => Response.json({ json: { title: 'Launch', description: 'd' } }));
-		expect(await rpcUnfurl('ws1', fetcher as never)('https://example.com')).toEqual({ title: 'Launch', description: 'd' });
-		expect(fetcher).toHaveBeenCalledWith('/rpc/files/unfurl', expect.objectContaining({ method: 'POST', headers: expect.objectContaining({ 'x-workspace-id': 'ws1' }) }));
-		expect(await rpcUnfurl('ws1', (async () => new Response('nope', { status: 501 })) as never)('https://x.y')).toBeNull();
-		expect(await rpcUnfurl('ws1', (async () => Promise.reject(new Error('offline'))) as never)('https://x.y')).toBeNull();
+	it('unfurl is the files.unfurl procedure and degrades to null on any failure', async () => {
+		const call = vi.fn(async () => ({ title: 'Launch', description: 'd' }));
+		expect(await rpcUnfurl({ files: { unfurl: call } } as never)('https://example.com')).toEqual({ title: 'Launch', description: 'd' });
+		expect(call).toHaveBeenCalledWith({ url: 'https://example.com' });
+		expect(await rpcUnfurl({ files: { unfurl: async () => null } } as never)('https://x.y')).toBeNull();
+		expect(await rpcUnfurl({ files: { unfurl: async () => Promise.reject(new Error('refused')) } } as never)('https://x.y')).toBeNull();
 	});
 });
 

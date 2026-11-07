@@ -43,7 +43,7 @@ import {
 	type Uploader
 } from 'edytor';
 import * as chrome from './chrome/chrome.svelte';
-import { customKindsPlugin } from './custom-kinds.svelte';
+import { createCustomKindsPlugin, type CustomKindsHost } from './custom-kinds.svelte';
 import { mentionItems, pageLinkItems, type PagesSearch, type PeopleSearch } from './mentions.ts';
 import type { Unfurl } from './unfurl.ts';
 
@@ -64,6 +64,8 @@ export interface EditorPluginInput {
 	people: (id: string) => { name: string; color?: string } | undefined;
 	/** Selector of the element around the editor whose empty area starts a marquee. */
 	marqueeContainer: string;
+	/** What the custom blocks' slash commands ask of the editor view (database creation, read-only). */
+	custom: CustomKindsHost;
 }
 
 /** The plugin names as wired, in list order (the Editor's tests and the report read this). */
@@ -103,7 +105,7 @@ export const WIRED_PLUGINS = [
 
 export function createEditorPlugins(input: EditorPluginInput): Plugin[] {
 	return [
-		customKindsPlugin,
+		createCustomKindsPlugin(input.custom),
 		// Chrome that sits beside blocks.
 		createBlockHandlesPlugin({ handle: chrome.blockHandle }),
 		createArrowMovePlugin(),

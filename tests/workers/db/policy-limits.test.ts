@@ -165,7 +165,7 @@ async function workload(
 	{ base, state, seeded, measure }: { base: Base; state: DurableObjectState; seeded: ReturnType<typeof seed>; measure: Parameters<Parameters<typeof workspace>[0]>[0]['measure'] },
 	p: Policy
 ) {
-	const db = p(base as never) as Governed;
+	const db = (p as unknown as (b: never) => Governed)(base as never);
 	const as = (name: keyof typeof actorInputs) => db.$as(actorFor(state.storage, actorInputs[name]));
 	const result: Record<string, unknown> = {};
 	for (const name of Object.keys(actorInputs) as (keyof typeof actorInputs)[]) {
@@ -177,6 +177,15 @@ async function workload(
 	await measure('page.can(read) on a depth-50 page', () => member.page.can('read', { id: seeded.deep }));
 	await measure('page.can([read, comment, update, full]) on a depth-50 page', () => member.page.can(['read', 'comment', 'update', 'full'], { id: seeded.deep }));
 	await measure('page.can([...]) member with a share token', () => as('member with a share token').page.can(['read', 'comment', 'update', 'full'], { id: seeded.deep }));
+	// The statements the Workspace DO's access service sends (objects/workspace/access.ts).
+	await measure('visibility entry: page.findMany(num, $access) of every live page', () => member.page.findMany({ where: { deletedAt: null }, select: { num: true, $access: true } }));
+	const sixty = Array.from({ length: 60 }, (_, i) => seeded.ids[i * 7]!);
+	await measure('can(ids): id in 60 ids with $access', () => member.page.findMany({ where: { id: { in: sixty }, deletedAt: null }, select: { id: true, $access: true } }));
+	await measure('dirty subtree: num in 60 nums with $access', () => member.page.findMany({ where: { num: { in: Array.from({ length: 60 }, (_, i) => i * 11 + 1) }, deletedAt: null }, select: { num: true, $access: true } }));
+	const withToken = as('member with a share token');
+	await measure('pageAccess: member with a share token', () => withToken.page.findFirst({ where: { id: seeded.deep, deletedAt: null }, select: { $access: true } }));
+	await measure('visibility entry: member with a share token', () => withToken.page.findMany({ where: { deletedAt: null }, select: { num: true, $access: true } }));
+	await measure('pageAccess: findFirst id with $access', () => member.page.findFirst({ where: { id: seeded.deep, deletedAt: null }, select: { $access: true } }));
 	await measure('page.findMany $access, 50 rows', () => member.page.findMany({ select: { id: true, $access: true }, take: 50 }));
 	await measure('page.findMany tree window, take 200', () => member.page.findMany({ select: { id: true, title: true, icon: true, parentId: true }, orderBy: { rank: 'asc' }, take: 200 }));
 	await measure('teamspace.findMany', () => member.teamspace.findMany({}));
@@ -209,7 +218,8 @@ async function fitsLimits(p: Policy, peakParams: number) {
 	});
 }
 
-test('policy (actor facts): the largest reads and the write checks fit the platform limits', () => fitsLimits(policy, 60));
+// P2 final: peak 58 (`$access` reads), 62 with a share token; the pin leaves the headroom to the platform's 100.
+test('policy (actor facts): the largest reads and the write checks fit the platform limits', () => fitsLimits(policy, 64));
 
 test('joinedPolicy (teamspace rows): fits too, with less headroom', () => fitsLimits(joinedPolicy, 90));
 
@@ -231,7 +241,7 @@ test("the plan's sketch breaches SQLite's expression depth on a move (the reason
 
 test('all three policies grant exactly the same pages to every kind of actor', async () => {
 	await workspace(async ({ base, state }) => {
-		const policies = [sketchPolicy, joinedPolicy, policy].map((p) => p(base as never) as Governed);
+		const policies = [sketchPolicy, joinedPolicy, policy].map((p) => (p as unknown as (b: never) => Governed)(base as never));
 		for (const input of Object.values(actorInputs)) {
 			const actor = actorFor(state.storage, input);
 			const sets = await Promise.all(

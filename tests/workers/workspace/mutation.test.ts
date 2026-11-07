@@ -217,7 +217,8 @@ describe('page ops', () => {
 describe('change log', () => {
 	test('edits by one actor to one property within 5 seconds coalesce into one row', async () => {
 		const ws = await createWorkspace('coalesce');
-		await ws.stub.apply(ws.owner, batch([createOp('a', null, r1, { values: { title: 'T' } })]));
+		await ws.stub.syncMember({ userId: 'u2', role: 'member', name: 'U2' });
+		await ws.stub.apply(ws.owner, batch([createOp('a', null, r1, { teamspaceId: ws.generalId, values: { title: 'T' } })]));
 		const titleRows = () => rows<{ seq: number; old_json: string | null; new_json: string | null; actor: string }>(
 			ws.stub,
 			"SELECT seq, actor, old_json, new_json FROM change WHERE page = 'a' AND prop = 'title' AND kind = 'setProp' ORDER BY seq"

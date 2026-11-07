@@ -1,5 +1,5 @@
 /**
- * Transactional mail templates: verification, invite, recovery and mention (mention is used from P2).
+ * Transactional mail templates: verification, invite, guest invite, page shared, recovery and mention.
  * Each returns `{ subject, html, text }`; the text part always carries the full link so it can be read
  * back in tests.
  */
@@ -14,6 +14,9 @@ const ENTITIES: Record<string, string> = { '&': '&amp;', '<': '&lt;', '>': '&gt;
 export function escapeHtml(value: string): string {
 	return value.replace(/[&<>"']/g, (char) => ENTITIES[char]!);
 }
+
+/** Every plain-text part ends the same way, with the product name. */
+const signoff = (text: string) => `${text}\n\n— Flarion`;
 
 function layout(heading: string, body: string, button: { label: string; url: string }, footer: string): string {
 	const url = escapeHtml(button.url);
@@ -41,7 +44,7 @@ export function verificationMail(input: { name: string; url: string }): Template
 			{ label: 'Verify email', url: input.url },
 			'If you did not create a Flarion account, you can ignore this message.'
 		),
-		text: `Hi ${input.name},\n\nConfirm your email for Flarion:\n${input.url}\n\nIf you did not create a Flarion account, ignore this message.`
+		text: signoff(`Hi ${input.name},\n\nConfirm your email for Flarion:\n${input.url}\n\nIf you did not create a Flarion account, ignore this message.`)
 	};
 }
 
@@ -56,7 +59,7 @@ export function inviteMail(input: { inviterName: string; workspaceName: string; 
 			{ label: 'Accept invitation', url: input.url },
 			`This invitation expires in ${input.expiresInDays} days. If you were not expecting it, you can ignore this message.`
 		),
-		text: `${input.inviterName} invited you to the ${input.workspaceName} workspace on Flarion.\n\nAccept the invitation:\n${input.url}\n\nThis invitation expires in ${input.expiresInDays} days.`
+		text: signoff(`${input.inviterName} invited you to the ${input.workspaceName} workspace on Flarion.\n\nAccept the invitation:\n${input.url}\n\nThis invitation expires in ${input.expiresInDays} days.`)
 	};
 }
 
@@ -70,7 +73,7 @@ export function recoveryMail(input: { name: string; url: string; expiresInMinute
 			{ label: 'Add a new passkey', url: input.url },
 			'If you did not ask for this, ignore this message: your account is unchanged.'
 		),
-		text: `Hi ${input.name},\n\nAdd a new passkey to your Flarion account (valid once, ${input.expiresInMinutes} minutes):\n${input.url}\n\nAdding a passkey signs you out everywhere else. If you did not ask for this, ignore this message.`
+		text: signoff(`Hi ${input.name},\n\nAdd a new passkey to your Flarion account (valid once, ${input.expiresInMinutes} minutes):\n${input.url}\n\nAdding a passkey signs you out everywhere else. If you did not ask for this, ignore this message.`)
 	};
 }
 
@@ -86,6 +89,66 @@ export function mentionMail(input: { actorName: string; pageTitle: string; excer
 			{ label: 'Open page', url: input.url },
 			'You receive this because you were mentioned in a Flarion workspace.'
 		),
-		text: `${input.actorName} mentioned you in ${input.pageTitle || 'Untitled'}${input.excerpt ? `: "${input.excerpt}"` : ''}\n\nOpen the page:\n${input.url}`
+		text: signoff(`${input.actorName} mentioned you in ${input.pageTitle || 'Untitled'}${input.excerpt ? `: "${input.excerpt}"` : ''}\n\nOpen the page:\n${input.url}`)
+	};
+}
+
+export type ShareLevel = 'read' | 'comment' | 'update' | 'full';
+
+const LEVEL_PHRASE: Record<ShareLevel, string> = {
+	read: 'view',
+	comment: 'view and comment on',
+	update: 'edit',
+	full: 'edit and share'
+};
+
+/** "view and comment on" etc.: what the invitee is allowed to do with the page. */
+export const levelPhrase = (level: ShareLevel) => LEVEL_PHRASE[level] ?? LEVEL_PHRASE.read;
+
+/** A person without an account (or not in the workspace) is invited as a guest to one page. */
+export function guestInviteMail(input: {
+	inviterName: string;
+	workspaceName: string;
+	pageTitle: string;
+	level: ShareLevel;
+	url: string;
+	expiresInDays: number;
+}): Template {
+	const title = input.pageTitle || 'Untitled';
+	const inviter = escapeHtml(input.inviterName);
+	const workspace = escapeHtml(input.workspaceName);
+	const phrase = levelPhrase(input.level);
+	return {
+		subject: `${input.inviterName} shared "${title}" with you on Flarion`,
+		html: layout(
+			`${input.inviterName} shared a page with you`,
+			`${inviter} invited you as a guest to <strong>${escapeHtml(title)}</strong> in the <strong>${workspace}</strong> workspace on Flarion. You can ${phrase} this page. You will sign in with a passkey: no password needed.`,
+			{ label: 'Open the page', url: input.url },
+			`This invitation expires in ${input.expiresInDays} days. If you were not expecting it, you can ignore this message.`
+		),
+		text: signoff(`${input.inviterName} invited you as a guest to "${title}" in the ${input.workspaceName} workspace on Flarion. You can ${phrase} this page.\n\nAccept the invitation:\n${input.url}\n\nThis invitation expires in ${input.expiresInDays} days.`)
+	};
+}
+
+/** Someone who already has a Flarion account was given access to a page (as a guest or as a member). */
+export function pageSharedMail(input: {
+	inviterName: string;
+	workspaceName: string;
+	pageTitle: string;
+	level: ShareLevel;
+	url: string;
+}): Template {
+	const title = input.pageTitle || 'Untitled';
+	const inviter = escapeHtml(input.inviterName);
+	const phrase = levelPhrase(input.level);
+	return {
+		subject: `${input.inviterName} shared "${title}" with you on Flarion`,
+		html: layout(
+			`${input.inviterName} shared a page with you`,
+			`${inviter} gave you access to <strong>${escapeHtml(title)}</strong> in the <strong>${escapeHtml(input.workspaceName)}</strong> workspace. You can ${phrase} this page.`,
+			{ label: 'Open the page', url: input.url },
+			'You receive this because someone shared a page with this address on Flarion.'
+		),
+		text: signoff(`${input.inviterName} gave you access to "${title}" in the ${input.workspaceName} workspace on Flarion. You can ${phrase} this page.\n\nOpen the page:\n${input.url}`)
 	};
 }

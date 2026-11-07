@@ -13,9 +13,12 @@
 		type EdytorInstance,
 		type Uploader
 	} from 'edytor';
-	import { KINDS_VERSION } from '#lib/shared/blocks/kinds.ts';
+	import { createRpc, type Rpc } from '#lib/client/rpc.ts';
+	import { BLOCK_KIND, KINDS_VERSION } from '#lib/shared/blocks/kinds.ts';
+	import { TITLE_PROP_ID } from '#lib/shared/property-types.ts';
+	import { setEditorContext, type AncestorRef, type DatabaseRef } from './context.ts';
 	import { createEditorPlugins } from './plugins.ts';
-	import { stubUpload } from './uploads.ts';
+	import { createUploader } from './uploads.ts';
 	import { rpcUnfurl, type Unfurl } from './unfurl.ts';
 	import type { PagesSearch, PeopleSearch } from './mentions.ts';
 
@@ -32,9 +35,13 @@
 		resolvePage,
 		searchPages,
 		searchPeople,
+		resolvePerson,
 		onNavigate,
-		upload = stubUpload,
+		upload,
 		unfurl,
+		resolveAncestors,
+		searchDatabases,
+		client,
 		onRefused,
 		edytor = $bindable()
 	}: {
@@ -48,9 +55,14 @@
 		resolvePage?: (id: string) => { title: string; icon: string | null } | undefined;
 		searchPages?: PagesSearch;
 		searchPeople?: PeopleSearch;
+		resolvePerson?: (id: string) => { name: string } | undefined;
 		onNavigate?: (pageId: string) => void;
 		upload?: Uploader;
 		unfurl?: Unfurl;
+		resolveAncestors?: (pageId: string) => AncestorRef[];
+		searchDatabases?: (query: string) => DatabaseRef[] | Promise<DatabaseRef[]>;
+		/** The `/rpc` client the editor's own calls go through (default: the app's, scoped to the workspace). */
+		client?: Rpc;
 		onRefused: (refusal: SyncRefusedError) => void;
 		edytor?: EdytorInstance;
 	} = $props();
@@ -81,10 +93,11 @@
 	 * waits for the real id. A failed creation removes the block.
 	 */
 	const provisional = new Map<string, Promise<string>>();
-	const findPageBlock = (id: string) => {
+	/** The first block (depth first) of `type` whose data satisfies `match`. */
+	const findBlock = (type: string, match: (data: Record<string, unknown>) => boolean) => {
 		const search = (blocks: readonly Block[]): Block | undefined => {
 			for (const block of blocks) {
-				if (block.type === 'page' && (block.data as { pageId?: string } | undefined)?.pageId === id) return block;
+				if (block.type === type && match((block.data ?? {}) as Record<string, unknown>)) return block;
 				const inner = search(block.children);
 				if (inner) return inner;
 			}
@@ -92,6 +105,7 @@
 		};
 		return edytor?.root ? search(edytor.root.children) : undefined;
 	};
+	const findPageBlock = (id: string) => findBlock('page', (data) => data.pageId === id);
 	const subpage = untrack(() => onSubpage);
 	const createSubpage = subpage
 		? () => {
@@ -120,9 +134,46 @@
 	const people = new Map<string, { name: string; color?: string }>();
 	untrack(() => people.set(user.id, { name: user.name, color: user.color }));
 
+	// Files, bookmark unfurls and inline databases go through the app's `/rpc`, scoped to this workspace.
+	const api = untrack(() => client ?? createRpc({ getWorkspaceId: () => workspaceId }));
+	const isReadonly = () => readonlyNow;
+	let readonlyNow = $state(untrack(() => readonly));
+	$effect(() => {
+		readonlyNow = readonly;
+	});
+
+	/**
+	 * An inline database is a new page (`isDatabase`) under this one, a collection whose members are the pages
+	 * under it (`$parent = that page`), and a default table view. The client chooses one id for all three (a
+	 * database page's collection has the page's id), so the block that names it is valid before the calls return.
+	 */
+	const createInlineDatabase = async (id: string) => {
+		try {
+			await api.page.create({ id, parentId: pageId, isDatabase: true, values: { [TITLE_PROP_ID]: 'Untitled database' } });
+			await api.collection.create({ id, pageId: id, sourceAst: { and: [{ prop: '$parent', op: 'is', value: id }] } });
+			await api.view.create({ collectionId: id, type: 'table', name: 'Table' });
+		} catch (error) {
+			console.error('inline database creation failed', error);
+			const block = findBlock(BLOCK_KIND.databaseView, (data) => data.collectionId === id);
+			if (block) edytor?.deleteBlock(block.id);
+		}
+	};
+
+	setEditorContext({
+		workspaceId: untrack(() => workspaceId),
+		pageId: untrack(() => pageId),
+		resolveAncestors: untrack(() => resolveAncestors),
+		resolvePage: untrack(() => resolvePage),
+		searchDatabases: untrack(() => searchDatabases),
+		open: (target, how) => open(target, how),
+		href,
+		readonly: isReadonly
+	});
+
 	const plugins = untrack(() => createEditorPlugins({
-		upload,
-		unfurl: unfurl ?? rpcUnfurl(workspaceId),
+		upload: upload ?? createUploader({ workspaceId, pageId, rpc: api }),
+		unfurl: unfurl ?? rpcUnfurl(api),
+		custom: { createInlineDatabase, readonly: isReadonly },
 		open,
 		href,
 		title: (id) => resolvePage?.(id)?.title,
@@ -141,7 +192,7 @@
 			params: () => ({ token: params.token, workspace: params.workspace })
 		}),
 		user,
-		people: (id) => people.get(id),
+		people: (id) => people.get(id) ?? untrack(() => resolvePerson?.(id)),
 		marqueeContainer: '[data-flarion-editor]'
 	}));
 

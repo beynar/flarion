@@ -21,8 +21,44 @@ export const claimsFor = (
 	access: RoomAccess = 'write'
 ): RoomClaims => ({ userId, workspaceId, pageId, access });
 
-export const mint = async (claims: RoomClaims, options?: Parameters<typeof mintRoomToken>[2]) =>
-	(await mintRoomToken(testEnv, claims, options)).token;
+// Since P2 a dial asks the Workspace DO what the user may do on the page (`pageAccess`), so a room needs a real
+// workspace, a member and a page. Tests keep inventing ids: `mint` creates what a token names, once.
+const known = new Set<string>();
+const workspaceTeamspace = new Map<string, Promise<string>>();
+
+/** Makes `claims.userId` a member of workspace `claims.workspaceId` with `update` on page `claims.pageId` (idempotent). */
+export async function ensureRoomAccess(claims: RoomClaims): Promise<void> {
+	const { workspaceId, pageId, userId } = claims;
+	const stub = testEnv.WORKSPACE.getByName(workspaceId);
+	const generalId = await workspaceTeamspaceFor(workspaceId, stub);
+	if (!known.has(`${workspaceId}:u:${userId}`)) {
+		known.add(`${workspaceId}:u:${userId}`);
+		await stub.syncMember({ userId, role: 'member', name: userId });
+	}
+	if (!known.has(`${workspaceId}:p:${pageId}`)) {
+		known.add(`${workspaceId}:p:${pageId}`);
+		await stub.createPage(
+			{ userId: 'room-owner', sessionId: 's', workspaceId, role: 'owner', name: 'Owner' },
+			{ id: pageId, parentId: null, teamspaceId: generalId, appVersion: '0.0.1' }
+		);
+	}
+}
+
+function workspaceTeamspaceFor(workspaceId: string, stub: ReturnType<typeof testEnv.WORKSPACE.getByName>): Promise<string> {
+	let pending = workspaceTeamspace.get(workspaceId);
+	if (!pending) {
+		pending = stub
+			.init({ workspaceId, name: workspaceId, ownerId: 'room-owner', ownerName: 'Owner' })
+			.then((result) => result.teamspaceId as string);
+		workspaceTeamspace.set(workspaceId, pending);
+	}
+	return pending;
+}
+
+export const mint = async (claims: RoomClaims, options?: Parameters<typeof mintRoomToken>[2]) => {
+	await ensureRoomAccess(claims);
+	return (await mintRoomToken(testEnv, claims, options)).token;
+};
 
 /** The Page DO's RPC surface, typed by hand: the generated RPC types of edytor's JSON are too deep for tsc. */
 export interface PageStub {
@@ -34,6 +70,10 @@ export interface PageStub {
 	closeAll(code?: number, reason?: string): Promise<{ sockets: number }>;
 	seedFrom(json: JSONDoc): Promise<{ seeded: boolean }>;
 	readForIndex(): Promise<{ doc: JSONDoc; editedAt: number | null; editedBy: string | null }>;
+	lockState(userId?: string): Promise<{ locked: boolean; lockedBy: string | null; lockedAt: number | null; bypass: boolean }>;
+	setLocked(userId: string, locked: boolean, full: boolean): Promise<{ locked: boolean; lockedBy: string | null; lockedAt: number | null; bypass: boolean; refused?: true }>;
+	noteBypass(userId: string, bypass: boolean): Promise<void>;
+	roomUsers(): Promise<string[]>;
 }
 
 export const pageStub = (workspaceId: string, pageId: string) =>

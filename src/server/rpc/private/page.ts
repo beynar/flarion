@@ -1,6 +1,9 @@
 /** `page` procedures of the private contract. Owner: Sync core (roomToken: Editor and files; grants: Sync core P2; history: Editor P3). */
 import { notImplemented, os, requireWorkspace } from './base';
+import { listPageGrants, revokePageGrant, setPageGrant } from '../../share/grants';
+import { ORPCError } from '@orpc/server';
 import { issueRoomToken } from '../../rooms/issue-token';
+import { roomAccessForLevel } from '../../rooms/access';
 import { appVersionOf, applyOps } from './mutations';
 
 export const pageHandlers = {
@@ -31,7 +34,13 @@ export const pageHandlers = {
 	purge: os.page.purge.handler(() => notImplemented('page.purge')),
 	roomToken: os.page.roomToken
 		.use(requireWorkspace)
-		.handler(({ input, context }) => issueRoomToken(context.env, context.actor, input.id)),
+		.handler(async ({ input, context }) => {
+			// The room access is what the page's permissions give this caller right now (not the role): the
+			// Workspace DO's `pageAccess`; `full`/`update` write, `comment` comment, `read` read.
+			const level = await context.workspace.pageAccess(context.actor, input.id);
+			if (!level) throw new ORPCError('NOT_FOUND', { message: 'Page not found' });
+			return issueRoomToken(context.env, context.actor, input.id, roomAccessForLevel(level));
+		}),
 	trashList: os.page.trashList
 		.use(requireWorkspace)
 		.handler(({ input, context }) => context.workspace.listTrash(context.actor, input)),
@@ -40,8 +49,12 @@ export const pageHandlers = {
 		restore: os.page.history.restore.handler(() => notImplemented('page.history.restore')),
 	},
 	grants: {
-		list: os.page.grants.list.handler(() => notImplemented('page.grants.list')),
-		set: os.page.grants.set.handler(() => notImplemented('page.grants.set')),
-		revoke: os.page.grants.revoke.handler(() => notImplemented('page.grants.revoke')),
+		list: os.page.grants.list.use(requireWorkspace).handler(({ input, context }) => listPageGrants(context, context.actor, input.id)),
+		set: os.page.grants.set
+			.use(requireWorkspace)
+			.handler(({ input, context }) => setPageGrant(context, context.actor, context.session, input)),
+		revoke: os.page.grants.revoke
+			.use(requireWorkspace)
+			.handler(({ input, context }) => revokePageGrant(context, context.actor, input.grantId)),
 	},
 };

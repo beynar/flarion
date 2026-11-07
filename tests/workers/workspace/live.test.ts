@@ -45,7 +45,7 @@ describe('the mutation path reaches sockets as diffs', () => {
 		expect(welcome).toMatchObject({ protocol: 1, userId: 'alice', appVersion: '0.0.1' });
 		const snap = snapshotOf(bob.log, 'tree');
 		expect(snap).toMatchObject({ kind: 'tree', total: 1, rows: [{ title: 'Getting started', hasChildren: false, teamspaceId: ws.generalId }] });
-		expect(snap.seq).toBe(welcome.seq);
+		expect(snap.seq).toBe(bob.log.of('welcome')[0].seq);
 
 		const from = bob.log.messages.length;
 		const carolFrom = carol.log.messages.length;
@@ -347,15 +347,15 @@ describe('reconnect', () => {
 
 	test('a lastSeq older than the log (or from the future) gets fresh snapshots', async () => {
 		const ws = await createWorkspace('snapshot-mode');
-		await ws.stub.apply(ws.owner, batch([createOp('a', null, r2)]));
+		await ws.stub.apply(ws.owner, batch([createOp('a', null, r2, { teamspaceId: ws.generalId })]));
 		const specs: Record<string, Subscription> = { roots: tree(null), page: { kind: 'page', pageIds: ['a'] } };
 		const first = await open(ws, 'alice', specs);
 		const lastSeq = headSeq(first.log);
 		first.conn.ws.close();
-		await ws.stub.apply(ws.owner, batch([createOp('b', null, r3)]));
+		await ws.stub.apply(ws.owner, batch([createOp('b', null, r3, { teamspaceId: ws.generalId })]));
 		// Prune everything: the log no longer reaches back to lastSeq.
 		await ws.stub.pruneLog(Date.now() + 8 * 24 * 3600 * 1000);
-		const { seq: head } = await ws.stub.apply(ws.owner, batch([createOp('c', null, r4)]));
+		const { seq: head } = await ws.stub.apply(ws.owner, batch([createOp('c', null, r4, { teamspaceId: ws.generalId })]));
 
 		const stale = await connect(ws.id, dev('alice'));
 		const log = await stale.hello({ lastSeq, subs: Object.entries(specs).map(([id, sub]) => ({ id, sub })) });
@@ -395,7 +395,7 @@ describe('reconnect', () => {
 describe('backlinks', () => {
 	test('index ingestion updates the backlinks subscription', async () => {
 		const ws = await createWorkspace('backlinks');
-		await ws.stub.apply(ws.owner, batch([createOp('target', null, r2), createOp('src', null, r3, { values: { title: 'Source' }, icon: '📄' })]));
+		await ws.stub.apply(ws.owner, batch([createOp('target', null, r2, { teamspaceId: ws.generalId }), createOp('src', null, r3, { teamspaceId: ws.generalId, values: { title: 'Source' }, icon: '📄' })]));
 		const v = await open(ws, 'alice', { bl: { kind: 'backlinks', pageId: 'target' } });
 		expect(snapshotOf(v.log, 'bl')).toMatchObject({ total: 0, rows: [] });
 		const item = (links: { to: string; kind: 'mention' | 'link' | 'subpage' }[], version: number) => ({

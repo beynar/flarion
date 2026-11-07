@@ -27,7 +27,7 @@ import {
 import type { Op } from '#lib/shared/ops.ts';
 import { TITLE_PROP_ID, type PropertyDef } from '#lib/shared/property-types.ts';
 import { evenRanks, rankAfter } from '#lib/shared/sort-keys.ts';
-import type { Invite, Member, Me, Teamspace, Workspace } from '#lib/shared/schemas.ts';
+import type { Grant, Invite, Member, Me, Teamspace, TeamspaceMember, Workspace } from '#lib/shared/schemas.ts';
 import { installMockRpc, type Rpc } from '#lib/client/rpc.ts';
 import * as mock from '#lib/client/mock.ts';
 import { WS_CLOSED, WS_CONNECTING, WS_OPEN, type Transport, type TransportFactory } from '#lib/client/socket.ts';
@@ -55,6 +55,26 @@ const PEOPLE: Member[] = [
 const TEAMSPACES: Teamspace[] = [
 	{ id: 'ts_engineering', name: 'Engineering', icon: '⚙️', description: '', privacy: 'open', defaultLevel: 'update', createdBy: 'u_grace', myRole: 'member' },
 	{ id: 'ts_design', name: 'Design', icon: '🎨', description: '', privacy: 'open', defaultLevel: 'update', createdBy: 'u_margaret', myRole: 'member' }
+];
+
+/** Teamspaces as stored (no `myRole`: it depends on who asks) and their members. Marketing is open, Leadership closed, Finance private (hidden from Ada). */
+type StoredTeamspace = Omit<Teamspace, 'myRole'>;
+const STORED_TEAMSPACES: StoredTeamspace[] = [
+	...TEAMSPACES.map(({ myRole: _r, ...t }) => (void _r, t)),
+	{ id: 'ts_marketing', name: 'Marketing', icon: '📣', description: 'Campaigns, launches and the brand calendar.', privacy: 'open', defaultLevel: 'update', createdBy: 'u_alan' },
+	{ id: 'ts_leadership', name: 'Leadership', icon: '🧭', description: 'Planning and hiring. Joined by invitation.', privacy: 'closed', defaultLevel: 'read', createdBy: 'u_grace' },
+	{ id: 'ts_finance', name: 'Finance', icon: '💶', description: 'Budgets.', privacy: 'private', defaultLevel: 'read', createdBy: 'u_grace' }
+];
+const tm = (teamspaceId: string, userId: string, role: 'owner' | 'member', rank: string): TeamspaceMember => ({ teamspaceId, userId, role, rank });
+const STORED_TEAMSPACE_MEMBERS: TeamspaceMember[] = [
+	tm('ts_engineering', 'u_grace', 'owner', '10'),
+	tm('ts_engineering', 'u_ada', 'member', '10'),
+	tm('ts_engineering', 'u_alan', 'member', '10'),
+	tm('ts_design', 'u_margaret', 'owner', '10'),
+	tm('ts_design', 'u_ada', 'member', '20'),
+	tm('ts_marketing', 'u_alan', 'owner', '10'),
+	tm('ts_leadership', 'u_grace', 'owner', '10'),
+	tm('ts_finance', 'u_grace', 'owner', '10')
 ];
 
 const PROPERTIES: PropertyDef[] = [
@@ -165,6 +185,9 @@ export class MockServer {
 	readonly clientMessages: ClientMessage[] = [];
 	readonly presence = new Map<string, PresenceUser[]>();
 	readonly invites: Invite[] = [];
+	teamspaces: StoredTeamspace[] = structuredClone(STORED_TEAMSPACES);
+	teamspaceMembers: TeamspaceMember[] = structuredClone(STORED_TEAMSPACE_MEMBERS);
+	grants: Grant[] = [];
 	properties: PropertyDef[] = structuredClone(PROPERTIES);
 	seq = 100;
 	connections = 0;
@@ -369,6 +392,24 @@ export class MockServer {
 				}
 				break;
 			}
+			case 'createProperty':
+				if (!this.properties.some((d) => d.id === op.property.id)) this.properties = [...this.properties, structuredClone(op.property) as PropertyDef];
+				break;
+			case 'updateProperty':
+				this.properties = this.properties.map((d) =>
+					d.id === op.id ? ({ ...d, ...(op.name ? { name: op.name } : {}), ...(op.config ? { config: op.config } : {}) } as PropertyDef) : d
+				);
+				break;
+			case 'deleteProperty':
+				this.properties = this.properties.filter((d) => d.id !== op.id);
+				for (const p of this.pages.values()) {
+					if (op.id in p.values) {
+						const { [op.id]: _gone, ...rest } = p.values;
+						void _gone;
+						p.values = rest;
+					}
+				}
+				break;
 			default:
 		}
 	}
@@ -577,6 +618,145 @@ function fallbackProxy(path: string[] = []): unknown {
 	return new Proxy(() => undefined, { get: (_t, p) => (typeof p === 'string' ? fallbackProxy([...path, p]) : undefined), apply: () => notAvailable(path)() });
 }
 
+type Delay = <T>(fn: () => T) => Promise<T>;
+const mockError = (code: string, message: string) => Object.assign(new Error(message), { code });
+
+/** `workspace.teamspaces.*` over the server's in-memory teamspaces and members (privacy and roles as the real server). */
+function teamspacesRpc(server: MockServer, delay: Delay) {
+	const me = server.userId;
+	const roleOf = (id: string) => server.teamspaceMembers.find((m) => m.teamspaceId === id && m.userId === me)?.role ?? null;
+	const view = (t: StoredTeamspace): Teamspace => ({ ...t, myRole: roleOf(t.id) });
+	const live = (id: string) => {
+		const t = server.teamspaces.find((x) => x.id === id);
+		if (!t || (t.privacy === 'private' && !roleOf(id))) throw mockError('NOT_FOUND', `Teamspace "${id}" not found`);
+		return t;
+	};
+	const owners = (id: string) => server.teamspaceMembers.filter((m) => m.teamspaceId === id && m.role === 'owner').length;
+	const nextRank = () => String(Math.max(0, ...server.teamspaceMembers.filter((m) => m.userId === me).map((m) => Number(m.rank) || 0)) + 10);
+	return {
+		list: () => delay(() => server.teamspaces.filter((t) => t.privacy !== 'private' || roleOf(t.id)).map(view)),
+		create: (input: { name: string; icon?: string | null; description?: string; privacy: Teamspace['privacy']; defaultLevel: Teamspace['defaultLevel'] }) =>
+			delay(() => {
+				const t: StoredTeamspace = {
+					id: `ts_${Date.now().toString(36)}${server.teamspaces.length}`,
+					name: input.name,
+					icon: input.icon ?? null,
+					description: input.description ?? '',
+					privacy: input.privacy,
+					defaultLevel: input.defaultLevel,
+					createdBy: me
+				};
+				server.teamspaces.push(t);
+				server.teamspaceMembers.push(tm(t.id, me, 'owner', nextRank()));
+				return view(t);
+			}),
+		update: (input: { id: string } & Partial<Omit<StoredTeamspace, 'id' | 'createdBy'>>) =>
+			delay(() => {
+				const t = live(input.id);
+				const { id: _id, ...patch } = input;
+				void _id;
+				Object.assign(t, patch);
+				return view(t);
+			}),
+		archive: (input: { id: string }) =>
+			delay(() => {
+				live(input.id);
+				server.teamspaces = server.teamspaces.filter((t) => t.id !== input.id);
+				server.teamspaceMembers = server.teamspaceMembers.filter((m) => m.teamspaceId !== input.id);
+				return { seq: server.commit([]) };
+			}),
+		members: {
+			list: (input: { teamspaceId: string }) =>
+				delay(() => {
+					live(input.teamspaceId);
+					return server.teamspaceMembers.filter((m) => m.teamspaceId === input.teamspaceId);
+				}),
+			add: (input: { teamspaceId: string; userId: string; role?: 'owner' | 'member' }) =>
+				delay(() => {
+					live(input.teamspaceId);
+					const existing = server.teamspaceMembers.find((m) => m.teamspaceId === input.teamspaceId && m.userId === input.userId);
+					if (existing) {
+						if (input.role) existing.role = input.role;
+						return existing;
+					}
+					const row = tm(input.teamspaceId, input.userId, input.role ?? 'member', input.userId === me ? nextRank() : '10');
+					server.teamspaceMembers.push(row);
+					return row;
+				}),
+			setRole: (input: { teamspaceId: string; userId: string; role: 'owner' | 'member' }) =>
+				delay(() => {
+					const row = server.teamspaceMembers.find((m) => m.teamspaceId === input.teamspaceId && m.userId === input.userId);
+					if (!row) throw mockError('NOT_FOUND', `Member "${input.userId}" not found`);
+					if (row.role === 'owner' && input.role !== 'owner' && owners(input.teamspaceId) <= 1) throw mockError('CONFLICT', 'A teamspace needs at least one owner');
+					row.role = input.role;
+					return row;
+				}),
+			remove: (input: { teamspaceId: string; userId: string }) =>
+				delay(() => {
+					const row = server.teamspaceMembers.find((m) => m.teamspaceId === input.teamspaceId && m.userId === input.userId);
+					if (!row) return {};
+					if (row.role === 'owner' && owners(input.teamspaceId) <= 1) throw mockError('CONFLICT', 'A teamspace needs at least one owner');
+					server.teamspaceMembers = server.teamspaceMembers.filter((m) => m !== row);
+					return {};
+				})
+		}
+	};
+}
+
+/** `page.grants.*` over the server's in-memory grants; ancestors' grants come back marked inherited. */
+function grantsRpc(server: MockServer, delay: Delay) {
+	return {
+		list: (input: { id: string }) =>
+			delay(() => {
+				const out: Grant[] = [];
+				let cur = server.pages.get(input.id);
+				let guard = 0;
+				while (cur && guard++ < 50) {
+					for (const g of server.grants.filter((x) => x.pageId === cur!.id)) {
+						out.push(cur.id === input.id ? g : { ...g, inherited: true, fromPageId: cur.id });
+					}
+					cur = cur.parentId ? server.pages.get(cur.parentId) : undefined;
+				}
+				return out;
+			}),
+		set: (input: { pageId: string; subjectKind: Grant['subjectKind']; subjectId: string | null; level: Grant['level']; email?: string }) =>
+			delay(() => {
+				if (server.pages.get(input.pageId)?.access !== 'full') throw mockError('FORBIDDEN', 'You need full access to share this page');
+				let subjectId = input.subjectId;
+				let pending = false;
+				if (input.subjectKind === 'user' && !subjectId && input.email) {
+					const member = PEOPLE.find((m) => m.email.toLowerCase() === input.email!.toLowerCase());
+					if (member) subjectId = member.userId;
+					else pending = true;
+				}
+				const same = (g: Grant) =>
+					g.pageId === input.pageId && g.subjectKind === input.subjectKind && g.subjectId === subjectId && (!pending || g.email === input.email);
+				const existing = server.grants.find(same);
+				if (existing) {
+					existing.level = input.level;
+					return structuredClone(existing);
+				}
+				const grant: Grant = {
+					id: `gr_${server.grants.length + 1}_${Date.now().toString(36)}`,
+					pageId: input.pageId,
+					subjectKind: input.subjectKind,
+					subjectId,
+					level: input.level,
+					token: input.subjectKind === 'public' ? `tok_${Math.random().toString(36).slice(2, 12)}` : null,
+					createdBy: server.userId,
+					...(pending ? { pending: true, email: input.email } : {})
+				};
+				server.grants.push(grant);
+				return structuredClone(grant);
+			}),
+		revoke: (input: { grantId: string }) =>
+			delay(() => {
+				server.grants = server.grants.filter((g) => g.id !== input.grantId);
+				return { seq: server.commit([]) };
+			})
+	};
+}
+
 export function createMockRpc(server: MockServer): Rpc {
 	const delay = <T>(fn: () => T) => later(server.rpcLatencyMs, fn);
 	const me = (): Me => ({ ...MOCK_USER, emailVerified: true, workspaces: [MOCK_WORKSPACE] });
@@ -612,9 +792,15 @@ export function createMockRpc(server: MockServer): Rpc {
 						return {};
 					})
 			},
-			teamspaces: { list: () => delay(() => TEAMSPACES) }
+			teamspaces: teamspacesRpc(server, delay)
 		},
-		property: { list: () => delay(() => server.properties) },
+		property: {
+			list: () => delay(() => server.properties),
+			create: (input: { property: PropertyDef }) => delay(() => ({ seq: server.commit([{ op: 'createProperty', property: input.property }]) })),
+			update: (input: { id: string; name?: string; config?: Record<string, unknown> }) =>
+				delay(() => ({ seq: server.commit([{ op: 'updateProperty', ...input }]) })),
+			delete: (input: { id: string }) => delay(() => ({ seq: server.commit([{ op: 'deleteProperty', id: input.id }]) }))
+		},
 		page: {
 			create: (input: { id?: string; parentId: string | null; rank?: string; teamspaceId?: string | null; icon?: string | null; values?: Values; isDatabase?: boolean }) =>
 				delay(() => {
@@ -630,7 +816,8 @@ export function createMockRpc(server: MockServer): Rpc {
 			roomToken: () => delay(() => ({ token: 'rt1.mock', expiresAt: Date.now() + 600_000, access: 'write' as const })),
 			trash: (input: { id: string }) => delay(() => ({ seq: server.commit([{ op: 'trash', page: input.id }]) })),
 			restore: (input: { id: string }) => delay(() => ({ seq: server.commit([{ op: 'restore', page: input.id }]) })),
-			trashList: () => delay(() => ({ items: [], nextCursor: null }))
+			trashList: () => delay(() => ({ items: [], nextCursor: null })),
+			grants: grantsRpc(server, delay)
 		},
 		mutate: (input: { mid: string; ops: Op[] }) =>
 			delay(() => {

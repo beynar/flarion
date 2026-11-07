@@ -65,9 +65,9 @@ import type {
 	Values,
 	ViewRow
 } from '#lib/shared/protocol.ts';
-import type { Member, Teamspace, Workspace } from '#lib/shared/schemas.ts';
+import type { Member, Teamspace, TeamspaceMember, Workspace } from '#lib/shared/schemas.ts';
 import type { ViewDef } from '#lib/shared/definitions.ts';
-import { compareRank, rankAfter } from '#lib/shared/sort-keys.ts';
+import { compareRank, placeAt, rankAfter } from '#lib/shared/sort-keys.ts';
 
 // ───────────────────────────── types ─────────────────────────────
 
@@ -303,6 +303,8 @@ export class WorkspaceStore {
 	properties = $state.raw<PropertyDef[]>([]);
 	members = $state.raw<Member[]>([]);
 	teamspaces = $state.raw<Teamspace[]>([]);
+	/** My sidebar order of the teamspaces I belong to (`teamspace_member.rank`), by teamspace id. */
+	teamspaceRanks = $state.raw<Record<string, string>>({});
 	notifications = $state.raw<Notification[]>([]);
 	/** Mutations sent and not yet delivered back by the socket. */
 	pending = $state(0);
@@ -341,6 +343,10 @@ export class WorkspaceStore {
 	#socket: WorkspaceSocket | null = null;
 	#midCounter = 0;
 	#cacheTimer: unknown = null;
+	#registryTimer: unknown = null;
+	#directoryTimer: unknown = null;
+	/** Bumped by every definition write: an older registry fetch must not overwrite it. */
+	#defVersion = 0;
 	#recentOpened: string[] = [];
 	#openPages = new Map<string, { release: () => void; ancestors: Map<string, () => void> }>();
 	#myPage: string | null = null;
@@ -402,6 +408,8 @@ export class WorkspaceStore {
 		for (const l of this.#layers) if (l.timer) this.#clock.clearTimeout(l.timer);
 		if (this.#treeTimer) this.#clock.clearTimeout(this.#treeTimer);
 		if (this.#cacheTimer) this.#clock.clearTimeout(this.#cacheTimer);
+		if (this.#registryTimer) this.#clock.clearTimeout(this.#registryTimer);
+		if (this.#directoryTimer) this.#clock.clearTimeout(this.#directoryTimer);
 	}
 
 	get #clock(): Clock {
@@ -438,9 +446,12 @@ export class WorkspaceStore {
 	// ───────────────────────────── registry and directory ─────────────────────────────
 
 	async refreshProperties(): Promise<void> {
+		const version = this.#defVersion;
 		try {
-			this.properties = await this.#rpc.property.list();
-			this.#registry = createRegistry(this.properties);
+			const list = await this.#rpc.property.list();
+			// A definition write started meanwhile: its own refresh follows, and this answer is older.
+			if (version !== this.#defVersion) return;
+			this.#setRegistry(list);
 		} catch {
 			// the registry only gates optimistic validation; the server validates for real
 		}
@@ -452,7 +463,65 @@ export class WorkspaceStore {
 			this.#rpc.workspace.teamspaces.list()
 		]);
 		if (members.status === 'fulfilled') this.members = members.value;
-		if (teamspaces.status === 'fulfilled') this.teamspaces = teamspaces.value;
+		if (teamspaces.status === 'fulfilled') {
+			this.teamspaces = teamspaces.value;
+			await this.#loadTeamspaceRanks(teamspaces.value);
+		}
+	}
+
+	/** My sidebar order: each of my teamspaces carries my own `rank` in its member list. */
+	async #loadTeamspaceRanks(list: readonly Teamspace[]): Promise<void> {
+		const mine = list.filter((t) => t.myRole !== null);
+		const results = await Promise.allSettled(mine.map((t) => this.#rpc.workspace.teamspaces.members.list({ teamspaceId: t.id })));
+		const ranks: Record<string, string> = {};
+		results.forEach((r, i) => {
+			if (r.status !== 'fulfilled') return;
+			const me = r.value.find((m) => m.userId === this.user.id);
+			if (me) ranks[mine[i].id] = me.rank;
+		});
+		this.teamspaceRanks = ranks;
+	}
+
+	/** The teamspaces I belong to, in my sidebar order. */
+	get myTeamspaces(): Teamspace[] {
+		const ranks = this.teamspaceRanks;
+		return this.teamspaces
+			.filter((t) => t.myRole !== null)
+			.sort((a, b) => compareRank(ranks[a.id] ?? '', ranks[b.id] ?? '') || a.name.localeCompare(b.name));
+	}
+
+	/** True when the workspace role (owner, admin) holds `full` on everything. */
+	get isAdmin(): boolean {
+		return this.workspace.role === 'owner' || this.workspace.role === 'admin';
+	}
+
+	/**
+	 * A page in a teamspace the directory does not list (I was just added to it, or it was just created):
+	 * the directory is not pushed, so it is fetched again.
+	 */
+	#checkTeamspaces(ids: Iterable<string>): void {
+		if (!this.ready && this.teamspaces.length === 0 && this.members.length === 0) return;
+		for (const id of ids) {
+			const ts = this.#base.get(id)?.teamspaceId;
+			if (ts && !this.teamspaces.some((t) => t.id === ts)) return this.#scheduleDirectoryRefresh();
+		}
+	}
+
+	#scheduleDirectoryRefresh(): void {
+		if (this.#directoryTimer || this.#disposed) return;
+		this.#directoryTimer = this.#clock.setTimeout(() => {
+			this.#directoryTimer = null;
+			void this.refreshDirectory();
+		}, 150);
+	}
+
+	/** Debounced registry refresh: another client created a property or an option. */
+	#scheduleRegistryRefresh(): void {
+		if (this.#registryTimer || this.#disposed) return;
+		this.#registryTimer = this.#clock.setTimeout(() => {
+			this.#registryTimer = null;
+			void this.refreshProperties();
+		}, 150);
 	}
 
 	// ───────────────────────────── subscriptions ─────────────────────────────
@@ -643,6 +712,7 @@ export class WorkspaceStore {
 				return;
 			case 'notification':
 				this.notifications = [msg.notification, ...this.notifications.filter((n) => n.id !== msg.notification.id)].slice(0, 100);
+				if (msg.notification.kind === 'access_changed' || msg.notification.kind === 'page_shared') this.#scheduleDirectoryRefresh();
 				return;
 			case 'error': {
 				if (msg.id) {
@@ -702,6 +772,7 @@ export class WorkspaceStore {
 			const keep = new Set(ids);
 			this.#gc(new Set([...touched].filter((id) => !keep.has(id))));
 			this.#touch(touched);
+			this.#checkTeamspaces(ids);
 		}
 		this.#advance(msg.seq);
 		if (msg.id === TREE_ID) {
@@ -757,6 +828,7 @@ export class WorkspaceStore {
 		if (shared) {
 			this.#gc(dropped);
 			this.#touch(touched);
+			this.#checkTeamspaces(touched);
 		}
 	}
 
@@ -814,6 +886,7 @@ export class WorkspaceStore {
 				if (shared) {
 					const e = this.#base.get(op.id);
 					if (e) {
+						if (!op.prop.startsWith('$') && op.prop !== SYSTEM_TITLE && !this.#registry.get(op.prop)) this.#scheduleRegistryRefresh();
 						this.#base.set(op.id, updateEntity(e, op.prop, op.value));
 						touched.add(op.id);
 						// A page changing parent leaves the old parent's window.
@@ -1103,6 +1176,260 @@ export class WorkspaceStore {
 			return { seq: ref.seq };
 		});
 		return id;
+	}
+
+	// ───────────────────────────── moving, trashing, duplicating ─────────────────────────────
+
+	/** Re-sends the tree subscription: a fresh snapshot (after my access changed). */
+	refreshTree(): void {
+		this.#syncTreeNow(true);
+	}
+
+	/**
+	 * Waits until the children of `parentId` are loaded (opens the branch if needed). Gives up after
+	 * `timeoutMs` and resolves false.
+	 */
+	async ensureLoaded(parentId: string | null, timeoutMs = 2000): Promise<boolean> {
+		if (parentId === null) return true;
+		this.expand(parentId);
+		const deadline = Date.now() + timeoutMs;
+		while (Date.now() < deadline) {
+			if (this.branchState(parentId) === 'ready') return true;
+			await new Promise((r) => setTimeout(r, 20));
+		}
+		return this.branchState(parentId) === 'ready';
+	}
+
+	/** The section a root page sits in. */
+	sectionOf(p: PageEntity): { kind: 'teamspace'; id: string } | { kind: 'private' } | { kind: 'shared' } {
+		if (p.teamspaceId) return { kind: 'teamspace', id: p.teamspaceId };
+		return this.#isMine(p) ? { kind: 'private' } : { kind: 'shared' };
+	}
+
+	/** True when `id` is `ancestorId` or lies inside its subtree (as far as the tree is loaded). */
+	isInside(id: string, ancestorId: string): boolean {
+		let cur: PageEntity | undefined = this.pages.get(id);
+		let guard = 0;
+		while (cur && guard++ < 200) {
+			if (cur.id === ancestorId) return true;
+			cur = cur.parentId ? this.pages.get(cur.parentId) : undefined;
+		}
+		return false;
+	}
+
+	/**
+	 * Whether `id` may be dropped at `target`: a new parent (null: the top level of a section) and, at
+	 * the top level, the section (`teamspaceId`; null is Private, or Shared with `shared`). Refuses a
+	 * move into its own subtree, a change of parent or section without `full` access, a parent the user
+	 * cannot edit, a teamspace the user is not in, and putting somebody else's page in Private.
+	 */
+	canMove(
+		id: string,
+		target: { parentId: string | null; teamspaceId?: string | null; shared?: boolean }
+	): { ok: true } | { ok: false; reason: string } {
+		const page = this.pages.get(id);
+		if (!page) return { ok: false, reason: 'Page not loaded' };
+		if (target.parentId !== null && this.isInside(target.parentId, id)) return { ok: false, reason: 'A page cannot move inside itself' };
+		const parent = target.parentId ? this.pages.get(target.parentId) : undefined;
+		const destSection = target.parentId ? null : target.teamspaceId ? `ts:${target.teamspaceId}` : target.shared ? 'shared' : 'private';
+		const pageSection = page.parentId ? null : page.teamspaceId ? `ts:${page.teamspaceId}` : this.#isMine(page) ? 'private' : 'shared';
+		const sameParent = page.parentId === target.parentId;
+		const sameSection = sameParent && (target.parentId !== null || pageSection === destSection);
+		if (page.access === 'read' || page.access === 'comment') return { ok: false, reason: 'You cannot edit this page' };
+		if (!sameSection && page.access !== 'full') return { ok: false, reason: 'You need full access to move this page' };
+		if (target.parentId) {
+			if (!parent) return { ok: false, reason: 'Destination not loaded' };
+			if (!sameParent && parent.access !== 'full' && parent.access !== 'update') return { ok: false, reason: 'You cannot add pages inside that page' };
+		} else if (!sameSection) {
+			if (destSection === 'shared') return { ok: false, reason: 'Pages become shared from the Share menu' };
+			if (target.teamspaceId) {
+				const ts = this.teamspaces.find((t) => t.id === target.teamspaceId);
+				if (!ts || (ts.myRole === null && !this.isAdmin)) return { ok: false, reason: 'Join that teamspace first' };
+			} else if (!this.#isMine(page)) return { ok: false, reason: 'Only the creator can put a page in Private' };
+		}
+		return { ok: true };
+	}
+
+	/**
+	 * Moves a page. `target.index` is the position among the new siblings (those of the same section at
+	 * the top level), or `beforeId` / `afterId` name a sibling. The rank comes from `placeAt`; when no
+	 * rank fits, the neighbours are rebalanced in the same batch. Optimistic, through `mutate`.
+	 */
+	async movePage(
+		id: string,
+		target: { parentId: string | null; teamspaceId?: string | null; shared?: boolean; index?: number; beforeId?: string | null; afterId?: string | null }
+	): Promise<boolean> {
+		const verdict = this.canMove(id, target);
+		if (!verdict.ok) {
+			this.#notify({ kind: 'info', title: 'Cannot move the page there', description: verdict.reason });
+			return false;
+		}
+		const page = this.pages.get(id)!;
+		if (target.parentId) await this.ensureLoaded(target.parentId);
+		const destTeamspace = target.parentId ? (this.pages.get(target.parentId)?.teamspaceId ?? null) : (target.teamspaceId ?? null);
+		const siblings = this.#siblingsIn(target.parentId, destTeamspace, !!target.shared).filter((s) => s.id !== id);
+		let index = target.index ?? siblings.length;
+		if (target.beforeId) index = siblings.findIndex((s) => s.id === target.beforeId);
+		else if (target.afterId) {
+			const at = siblings.findIndex((s) => s.id === target.afterId);
+			index = at === -1 ? -1 : at + 1;
+		}
+		if (index < 0) index = siblings.length;
+		const placed = placeAt(siblings.map((s) => ({ id: s.id, rank: s.rank })), id, index);
+		const teamspaceChanged = (page.teamspaceId ?? null) !== destTeamspace;
+		const ops: Op[] = [
+			{
+				op: 'move',
+				page: id,
+				parentId: target.parentId,
+				rank: placed.rank,
+				...(teamspaceChanged || target.parentId === null ? { teamspaceId: destTeamspace } : {})
+			}
+		];
+		for (const r of placed.rebalanced ?? []) {
+			const sib = this.pages.get(r.id);
+			if (sib) ops.push({ op: 'move', page: r.id, parentId: sib.parentId, rank: r.rank });
+		}
+		if (target.parentId) this.expand(target.parentId);
+		try {
+			await this.mutate(ops);
+			return true;
+		} catch {
+			return false;
+		}
+	}
+
+	/** The pages `id` sits among in the sidebar: its parent's children, or its section's top level. */
+	siblingsOf(id: string): PageEntity[] {
+		const p = this.pages.get(id);
+		if (!p) return [];
+		if (p.parentId !== null) return this.children(p.parentId);
+		return this.#siblingsIn(null, p.teamspaceId ?? null, !p.teamspaceId && !this.#isMine(p));
+	}
+
+	/** The pages a moved page would sit among: the children of `parentId`, or the roots of a section. */
+	#siblingsIn(parentId: string | null, teamspaceId: string | null, shared: boolean): PageEntity[] {
+		const kids = this.children(parentId);
+		if (parentId !== null) return kids;
+		return kids.filter((k) => (k.teamspaceId ?? null) === teamspaceId && (teamspaceId !== null || this.#isMine(k) === !shared));
+	}
+
+	/** Moves a page and its subpages to the trash (restore from Trash). */
+	async trashPage(id: string): Promise<boolean> {
+		try {
+			await this.mutate([{ op: 'trash', page: id }]);
+			return true;
+		} catch {
+			return false;
+		}
+	}
+
+	/** Duplicates a page (and its subpages); resolves with the copy's id. */
+	async duplicatePage(id: string, includeSubpages = true): Promise<string | null> {
+		if (!this.canEdit) {
+			this.#notify({ kind: 'error', title: 'You are offline', description: 'Duplicating needs a connection.' });
+			return null;
+		}
+		try {
+			const ref = await this.#rpc.page.duplicate({ id, includeSubpages });
+			return ref.id;
+		} catch (error) {
+			this.#notify(failure(error));
+			return null;
+		}
+	}
+
+	// ───────────────────────────── property values and definitions ─────────────────────────────
+
+	/** Sets one property of a page (null clears it). Optimistic. */
+	setValue(page: string, prop: string, value: PropValue | null): Promise<{ seq: number }> {
+		return this.mutate([{ op: 'setProp', page, prop, value }]);
+	}
+
+	addOption(page: string, prop: string, option: string): Promise<{ seq: number }> {
+		return this.mutate([{ op: 'addOption', page, prop, option }]);
+	}
+
+	removeOption(page: string, prop: string, option: string): Promise<{ seq: number }> {
+		return this.mutate([{ op: 'removeOption', page, prop, option }]);
+	}
+
+	#setRegistry(defs: PropertyDef[]): void {
+		this.properties = defs;
+		this.#registry = createRegistry(defs);
+	}
+
+	/** Runs definition ops with the registry updated at once; a failure restores it. */
+	async #defineOps(ops: Op[], next: PropertyDef[]): Promise<{ seq: number }> {
+		const before = this.properties;
+		this.#defVersion++;
+		this.#setRegistry(next);
+		try {
+			const result = await this.mutate(ops);
+			void this.refreshProperties();
+			return result;
+		} catch (error) {
+			this.#setRegistry(before);
+			throw error;
+		}
+	}
+
+	/** Adds a property to the workspace registry. Optimistic. */
+	createProperty(def: PropertyDef): Promise<{ seq: number }> {
+		return this.#defineOps([{ op: 'createProperty', property: def }], [...this.properties, def]);
+	}
+
+	/** Renames a property and/or replaces its config (select options live in the config). Optimistic. */
+	updateProperty(id: string, patch: { name?: string; config?: Record<string, unknown> }): Promise<{ seq: number }> {
+		const next = this.properties.map((p) => (p.id === id ? ({ ...p, ...(patch.name ? { name: patch.name } : {}), ...(patch.config ? { config: patch.config } : {}) } as PropertyDef) : p));
+		return this.#defineOps([{ op: 'updateProperty', id, ...patch }], next);
+	}
+
+	deleteProperty(id: string): Promise<{ seq: number }> {
+		return this.#defineOps([{ op: 'deleteProperty', id }], this.properties.filter((p) => p.id !== id));
+	}
+
+	// ───────────────────────────── teamspaces ─────────────────────────────
+
+	async #teamspaceCall<T>(call: () => Promise<T>, refreshTree = false): Promise<T> {
+		try {
+			const out = await call();
+			await this.refreshDirectory();
+			if (refreshTree) this.refreshTree();
+			return out;
+		} catch (error) {
+			this.#notify(failure(error));
+			throw error;
+		}
+	}
+
+	createTeamspace(input: { name: string; icon?: string | null; description?: string; privacy: Teamspace['privacy']; defaultLevel: AccessLevel }): Promise<Teamspace> {
+		return this.#teamspaceCall(() => this.#rpc.workspace.teamspaces.create(input));
+	}
+
+	updateTeamspace(input: { id: string; name?: string; icon?: string | null; description?: string; privacy?: Teamspace['privacy']; defaultLevel?: AccessLevel }): Promise<Teamspace> {
+		return this.#teamspaceCall(() => this.#rpc.workspace.teamspaces.update(input), true);
+	}
+
+	archiveTeamspace(id: string): Promise<{ seq: number }> {
+		return this.#teamspaceCall(() => this.#rpc.workspace.teamspaces.archive({ id }), true);
+	}
+
+	/** Joins an open teamspace (or adds a member when `userId` is given); the tree refreshes for the pages it brings. */
+	addTeamspaceMember(teamspaceId: string, userId: string = this.user.id, role?: 'owner' | 'member'): Promise<TeamspaceMember> {
+		return this.#teamspaceCall(() => this.#rpc.workspace.teamspaces.members.add({ teamspaceId, userId, ...(role ? { role } : {}) }), userId === this.user.id);
+	}
+
+	setTeamspaceMemberRole(teamspaceId: string, userId: string, role: 'owner' | 'member'): Promise<TeamspaceMember> {
+		return this.#teamspaceCall(() => this.#rpc.workspace.teamspaces.members.setRole({ teamspaceId, userId, role }));
+	}
+
+	removeTeamspaceMember(teamspaceId: string, userId: string): Promise<unknown> {
+		return this.#teamspaceCall(() => this.#rpc.workspace.teamspaces.members.remove({ teamspaceId, userId }), userId === this.user.id);
+	}
+
+	teamspaceMembers(teamspaceId: string): Promise<TeamspaceMember[]> {
+		return this.#rpc.workspace.teamspaces.members.list({ teamspaceId });
 	}
 
 	// ───────────────────────────── opening pages ─────────────────────────────
