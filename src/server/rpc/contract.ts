@@ -168,6 +168,16 @@ const pageRouter = {
 	restore: priv.input(pageIdSchema).output(seqSchema),
 	/** Deletes a trashed page forever, ahead of the 30-day purge. */
 	purge: priv.input(pageIdSchema).output(emptySchema),
+	/** A signed ~10-minute edytor room token for this page at the caller's access level. */
+	roomToken: priv
+		.input(pageIdSchema)
+		.output(
+			v.object({
+				token: v.string(),
+				expiresAt: v.number(),
+				access: v.picklist(['read', 'comment', 'write'])
+			})
+		),
 	trashList: priv.input(trashListInputSchema).output(trashListResultSchema),
 	history: {
 		list: priv.input(historyListInputSchema).output(historyListResultSchema),

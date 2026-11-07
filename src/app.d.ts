@@ -26,15 +26,11 @@ declare namespace Cloudflare {
 		CACHE: KVNamespace;
 		FILES: R2Bucket;
 		DB: D1Database;
-		VECTORS: VectorizeIndex;
 		METRICS: AnalyticsEngineDataset;
 		JOBS: Queue;
 		RL_AUTH: RateLimit;
 		RL_API: RateLimit;
-		EMAIL: SendEmail;
 		ASSETS: Fetcher;
-		AI: Ai;
-		IMAGES: ImagesBinding;
 		APP_NAME: 'Flarion';
 		APP_VERSION: '0.0.1';
 		ENVIRONMENT: 'development';
