@@ -1,8 +1,8 @@
 <script lang="ts">
-	import type { HTMLAttributes } from 'svelte/elements';
-	import { cn } from './cn.ts';
+	import { Separator, type SeparatorProps } from 'entasis/separator';
 
-	let { class: className, ...rest }: HTMLAttributes<HTMLElement> = $props();
+	/** A divider: entasis `Separator`. */
+	let props: SeparatorProps = $props();
 </script>
 
-<div role="separator" class={cn('h-px w-full shrink-0 bg-[color:var(--app-hairline)]', className)} {...rest}></div>
+<Separator {...props} />

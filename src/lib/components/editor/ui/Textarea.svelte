@@ -1,15 +1,26 @@
 <script lang="ts">
+	import { TextArea } from 'entasis/text-area';
 	import type { HTMLTextareaAttributes } from 'svelte/elements';
-	import { cn } from './cn.ts';
 
-	let { class: className, value = $bindable(), ...rest }: HTMLTextareaAttributes = $props();
+	/** The chrome's multi-line field: entasis `TextArea`; the controllers' attachments and ARIA go to the `<textarea>`. */
+	let {
+		class: className,
+		value = $bindable(''),
+		placeholder,
+		disabled,
+		readonly,
+		rows,
+		...rest
+	}: HTMLTextareaAttributes = $props();
 </script>
 
-<textarea
-	class={cn(
-		'min-h-16 w-full rounded-[6px] border border-[color:var(--app-hairline-strong)] bg-[color:var(--app-input-fill)] px-2 py-1.5 text-sm text-[color:var(--app-text)] outline-none placeholder:text-[color:var(--app-text-tertiary)] focus:border-[color:var(--app-accent)] focus:ring-2 focus:ring-[color:var(--app-accent)]/25',
-		className
-	)}
-	bind:value
-	{...rest}
-></textarea>
+<TextArea
+	size="small"
+	class={className as string | undefined}
+	bind:value={value as string}
+	placeholder={placeholder ?? undefined}
+	disabled={disabled ?? undefined}
+	readOnly={readonly ?? undefined}
+	rows={rows ?? undefined}
+	textareaAttrs={rest as never}
+/>

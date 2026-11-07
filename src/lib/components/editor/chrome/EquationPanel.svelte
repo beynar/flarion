@@ -1,5 +1,6 @@
 <script lang="ts">
-	import { float } from './float.js';
+	import Floating from './Floating.svelte';
+	import { Alert } from 'entasis/alert';
 	import { Button } from '../ui/index.ts';
 	import { Textarea } from '../ui/index.ts';
 	import { words } from './words.svelte.js';
@@ -15,17 +16,19 @@
 	const labels = $derived(words.equation);
 </script>
 
-<div
-	data-edytor-equation-editor
+<Floating
+	anchor={() => editor.anchor}
+	placement={editor.display ? 'bottom' : 'bottom-start'}
+	gap={6}
+	haspopup="grid"
+	class="box-border flex w-[400px] max-w-[calc(100vw-32px)] flex-col gap-1.5 p-2"
 	role="dialog"
 	aria-label={labels.editor}
-	{@attach float(() => editor.anchor, {
-		placement: editor.display ? 'bottom' : 'bottom-start',
-		gap: 6
-	})}
+	data-edytor-equation-editor
 >
-	<div data-edytor-equation-editor-row>
+	<div class="flex items-start gap-2">
 		<Textarea
+			class="flex-1 font-mono"
 			aria-label={labels.editor}
 			placeholder={labels.placeholder}
 			rows={editor.display ? 3 : 1}
@@ -37,72 +40,15 @@
 			{@attach editor.field}
 		></Textarea>
 		<Button
-			variant="ghost"
+			variant="default"
 			data-edytor-equation-done
 			onmousedown={(event) => event.preventDefault()}
 			onclick={() => editor.close()}>{labels.done} <span aria-hidden="true">↵</span></Button
 		>
 	</div>
 	{#if editor.error}
-		<div data-edytor-equation-editor-error role="status">{editor.error}</div>
+		<div data-edytor-equation-editor-error role="status">
+			<Alert color="danger" variant="soft" size="small">{editor.error}</Alert>
+		</div>
 	{/if}
-</div>
-
-<style>
-	[data-edytor-equation-editor] {
-		box-sizing: border-box;
-		width: 400px;
-		max-width: calc(100vw - 32px);
-		padding: 8px;
-		border-radius: 8px;
-		background: var(--edytor-equation-editor-background, var(--app-page));
-		box-shadow:
-			0 0 0 1px var(--app-hover),
-			0 3px 6px var(--app-hairline),
-			0 9px 24px var(--app-hairline);
-		font-size: 14px;
-	}
-
-	[data-edytor-equation-editor-row] {
-		display: flex;
-		gap: 8px;
-		align-items: flex-start;
-	}
-
-	[data-edytor-equation-editor] :global(textarea) {
-		flex: 1;
-		box-sizing: border-box;
-		min-height: 32px;
-		padding: 6px 8px;
-		border: 0;
-		border-radius: 4px;
-		background: var(--app-hover);
-		box-shadow: inset 0 0 0 1px var(--app-hairline);
-		font:
-			13px/1.5 ui-monospace,
-			SFMono-Regular,
-			Menlo,
-			monospace;
-		outline: 0;
-		resize: vertical;
-	}
-
-	[data-edytor-equation-editor] :global([data-edytor-equation-done]) {
-		flex: none;
-		height: 32px;
-		padding: 0 12px;
-		border: 0;
-		border-radius: 4px;
-		background: var(--app-accent);
-		color: #fff;
-		font: inherit;
-		font-weight: 500;
-		cursor: pointer;
-	}
-
-	[data-edytor-equation-editor-error] {
-		margin-top: 6px;
-		color: var(--app-danger);
-		font-size: 12px;
-	}
-</style>
+</Floating>

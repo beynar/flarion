@@ -40,8 +40,10 @@ test('manage passkeys from settings; "/" routes a signed-in user to their worksp
 	await expect(tab.getByTestId('passkey-name')).toHaveCount(2);
 	expect(await second.credentials()).toHaveLength(1);
 	await tab.getByRole('button', { name: 'Rename' }).last().click();
-	await tab.getByLabel('Passkey name').fill('Work laptop');
-	await tab.getByRole('button', { name: 'Save' }).click();
+	// The table's own text editor (entasis DataTable): type the name, Enter commits.
+	const editor = tab.getByRole('textbox', { name: 'Name' });
+	await editor.fill('Work laptop');
+	await editor.press('Enter');
 	await expect(tab.getByTestId('passkey-name').filter({ hasText: 'Work laptop' })).toBeVisible();
 	await page.waitForTimeout(450); // let the button's loading transition settle
 	await page.screenshot({ path: `${SCREENS}/settings-passkeys.png` });

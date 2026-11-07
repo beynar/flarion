@@ -5,8 +5,10 @@
 -->
 <script lang="ts">
 	import { CalendarPrimitive } from 'entasis/calendar';
+	import { Button } from 'entasis/button';
 	import { DateInput } from 'entasis/date-input';
 	import { Switch } from 'entasis/switch';
+	import { TimeInput } from 'entasis/time-input';
 	import type { DateValue } from '#lib/shared/dates.ts';
 	import { composeIso, dayOf, timeOf } from '#lib/shared/blocks/date-label.ts';
 
@@ -78,8 +80,12 @@
 
 	const today = () => setStart(new Date());
 
-	const field =
-		'rounded-[var(--app-radius-control)] border border-[color:var(--app-hairline-strong)] bg-[color:var(--app-page)] px-2 text-sm text-[color:var(--app-text)]';
+	/** `TimeInput` holds minutes since midnight; the value holds "HH:MM". */
+	const minutesOf = (time: string | null) => {
+		const [h, m] = (time ?? '').split(':').map(Number);
+		return Number.isFinite(h) && Number.isFinite(m) ? h! * 60 + m! : null;
+	};
+	const hhmm = (minutes: number) => `${String(Math.floor(minutes / 60)).padStart(2, '0')}:${String(minutes % 60).padStart(2, '0')}`;
 	const toggle = 'flex items-center justify-between px-3 text-sm';
 </script>
 
@@ -97,14 +103,12 @@
 				/>
 			</div>
 			{#if timed}
-				<input
-					type="time"
-					class={field}
-					style="height: var(--app-input-height)"
-					aria-label="Start time"
-					value={startTime ?? ''}
+				<TimeInput
+					as="minuteSinceMidnight"
+					label="Start time"
+					value={minutesOf(startTime)}
 					disabled={!canEdit}
-					onchange={(event) => setTime('start', event.currentTarget.value)}
+					onValueChange={(minutes: number | null) => minutes !== null && setTime('start', hhmm(minutes))}
 				/>
 			{/if}
 		</div>
@@ -121,14 +125,12 @@
 					/>
 				</div>
 				{#if timed}
-					<input
-						type="time"
-						class={field}
-						style="height: var(--app-input-height)"
-						aria-label="End time"
-						value={endTime ?? ''}
+					<TimeInput
+						as="minuteSinceMidnight"
+						label="End time"
+						value={minutesOf(endTime)}
 						disabled={!canEdit}
-						onchange={(event) => setTime('end', event.currentTarget.value)}
+						onValueChange={(minutes: number | null) => minutes !== null && setTime('end', hhmm(minutes))}
 					/>
 				{/if}
 			</div>
@@ -154,13 +156,6 @@
 			<span>Include time</span>
 			<Switch size="small" value={timed} disabled={!canEdit} onValueChange={(on) => toggleTime(!!on)} inputAttrs={{ 'aria-label': 'Include time' }} />
 		</div>
-		<button
-			type="button"
-			class="px-3 text-left text-sm text-[color:var(--app-text-secondary)] hover:bg-[color:var(--app-hover)]"
-			style="height: var(--app-row-height)"
-			disabled={!canEdit}
-			data-testid="date-picker-today"
-			onclick={today}>Today</button
-		>
+		<Button variant="ghost" size="small" class="justify-start rounded-none px-3" disabled={!canEdit} data-testid="date-picker-today" onclick={today}>Today</Button>
 	</div>
 </div>

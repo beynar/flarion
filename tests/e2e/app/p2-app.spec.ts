@@ -83,8 +83,8 @@ test('a teamspace is created, and a member added in its settings sees it live', 
 	await page.getByRole('menuitem', { name: 'Teamspace settings' }).click();
 	const settings = page.getByTestId('teamspace-settings-dialog');
 	await expect(settings).toBeVisible();
-	await settings.getByTestId('teamspace-add-member').fill('Bob');
-	await settings.getByTestId('teamspace-candidate').filter({ hasText: 'Bob Babbage' }).click();
+	await settings.getByTestId('teamspace-add-member').getByRole('combobox').fill('Bob');
+	await settings.page().getByTestId('teamspace-candidate').filter({ hasText: 'Bob Babbage' }).click();
 	await expect(settings.getByTestId('teamspace-member-row').filter({ hasText: 'Bob Babbage' })).toBeVisible();
 	await shots(page, 'teamspace-settings');
 	await page.keyboard.press('Escape');
@@ -282,14 +282,15 @@ test('a page is shared with a guest by email; the guest signs up and sees only t
 	await page.getByTestId('share-button').click();
 	const dialog = page.getByTestId('share-dialog');
 	await expect(dialog).toBeVisible();
-	await dialog.getByTestId('share-invite-input').fill(carla.email);
-	await dialog.getByTestId('share-invite-level').selectOption('read');
+	await dialog.getByTestId('share-invite-input').getByRole('combobox').fill(carla.email);
+	await dialog.getByTestId('share-invite-level').click();
+	await dialog.page().getByRole('menuitemradio', { name: 'Can view' }).click();
 	await shots(page, 'share-dialog');
 	await dialog.getByTestId('share-invite-submit').click();
 	await expect(dialog.getByTestId('share-grant-row').filter({ hasText: carla.email })).toBeVisible();
 
 	// Publish tab: create a public link, then revoke it.
-	await dialog.getByTestId('publish-tab').click();
+	await dialog.getByRole('tab', { name: 'Publish' }).click();
 	await dialog.getByTestId('publish-toggle').click();
 	await expect(dialog.getByTestId('publish-link')).toHaveValue(new RegExp('/share/'));
 	await shots(page, 'share-publish');
@@ -316,7 +317,9 @@ test('a page is shared with a guest by email; the guest signs up and sees only t
 	await row(page, 'Secret plan').getByRole('treeitem').click();
 	await page.getByTestId('share-button').click();
 	await expect(dialog.getByTestId('share-grant-row').filter({ hasText: /Carla|carla/ }).first()).toBeVisible();
-	await dialog.getByTestId('share-grant-row').filter({ hasText: /Carla|carla/ }).first().getByTestId('share-level').selectOption('update');
+	const level = dialog.getByTestId('share-grant-row').filter({ hasText: /Carla|carla/ }).first().getByTestId('share-level');
+	await level.click();
+	await level.page().getByRole('menuitemradio', { name: 'Can edit' }).click();
 	await expect(carla.page.locator('textarea[data-testid="page-title"]')).toBeEditable({ timeout: 20_000 });
 	await page.keyboard.press('Escape');
 	await shot(page, 'final');

@@ -1,5 +1,7 @@
 <script lang="ts">
 	import { Dialog } from 'entasis/dialog';
+	import { Menu } from 'entasis/menu';
+	import type { MenuItem } from 'entasis/menu';
 	import { lockIcon } from 'entasis/icons/lock';
 	import type { WorkspaceStore } from '#lib/client/workspace.svelte.ts';
 	import PagePicker from '#lib/components/pickers/PagePicker.svelte';
@@ -25,6 +27,20 @@
 		return list.filter((s) => store.canMove(page.id, s.target).ok);
 	});
 
+	const sectionItems = $derived<MenuItem[]>([
+		{
+			type: 'group',
+			label: 'Top level of',
+			items: sections.map((s) => ({
+				type: 'option' as const,
+				title: s.label,
+				prefix: s.key === 'private' ? lockIcon : s.icon ?? '👥',
+				onclick: () => void moveTo(s.target),
+				'data-testid': 'move-section'
+			} as MenuItem))
+		}
+	]);
+
 	async function moveTo(target: { parentId: string | null; teamspaceId?: string | null }) {
 		if (!pageId) return;
 		open = false;
@@ -37,22 +53,8 @@
 	{#snippet children()}
 		<div class="flex flex-col gap-3 pb-2" data-testid="move-dialog">
 			{#if sections.length}
-				<div class="flex flex-col">
-					<div class="px-1 pb-1 text-xs font-medium text-[color:var(--app-text-tertiary)]">Top level of</div>
-					{#each sections as s (s.key)}
-						<button
-							type="button"
-							class="flex items-center gap-2 rounded-[var(--app-radius-control)] px-2 text-left text-sm hover:bg-[color:var(--app-hover)]"
-							style="height: var(--app-row-height)"
-							data-testid="move-section"
-							onclick={() => moveTo(s.target)}
-						>
-							<span class="grid size-5 place-items-center text-[15px]">
-								{#if s.key === 'private'}{@render lockIcon({ size: 16 })}{:else}{s.icon ?? '👥'}{/if}
-							</span>
-							{s.label}
-						</button>
-					{/each}
+				<div class="flex flex-col" data-testid="move-sections">
+					<Menu items={sectionItems} />
 				</div>
 			{/if}
 			<div class="overflow-hidden rounded-[var(--app-radius-panel)] border border-[color:var(--app-hairline)]" data-testid="move-pages">

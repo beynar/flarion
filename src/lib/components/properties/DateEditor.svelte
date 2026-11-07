@@ -2,6 +2,10 @@
 	import { untrack } from 'svelte';
 	import { CalendarPrimitive } from 'entasis/calendar';
 	import { Switch } from 'entasis/switch';
+	import { Button } from 'entasis/button';
+	import { DateInput } from 'entasis/date-input';
+	import { TimeInput } from 'entasis/time-input';
+	import { Separator } from 'entasis/separator';
 	import type { DateValue } from '#lib/shared/dates.ts';
 	import {
 		calendarDate,
@@ -45,6 +49,13 @@
 	const startTime = $derived(value ? timeOf(value.start) : '');
 	const endTime = $derived(value?.end ? timeOf(value.end) : '');
 
+	/** `HH:mm` text <-> the minutes since midnight entasis' TimeInput carries. */
+	const toMinutes = (time: string): number | null => {
+		const m = /^(\d{1,2}):(\d{2})$/.exec(time);
+		return m ? Number(m[1]) * 60 + Number(m[2]) : null;
+	};
+	const toText = (minutes: number) => `${String(Math.floor(minutes / 60)).padStart(2, '0')}:${String(minutes % 60).padStart(2, '0')}`;
+
 	const compose = (day: Date, time: string, on: boolean) => composeDate(day, on ? time || '09:00' : null);
 
 	function pickSingle(d: Date | null) {
@@ -59,6 +70,20 @@
 		onSet(makeDateValue(compose(a, startTime, timed), b ? compose(b, endTime, timed) : null));
 	}
 
+	/** A day typed or chosen in the start field: the time of day stays. */
+	function setStartDay(d: Date | null) {
+		// An incomplete date reads as null while typing: clearing the value is the Clear button's job.
+		if (!canEdit || !d) return;
+		if (d.getTime() === startDay?.getTime()) return;
+		const end = endDay && endDay >= d ? compose(endDay, endTime, timed) : null;
+		onSet(makeDateValue(compose(d, startTime, timed), end));
+	}
+	function setEndDay(d: Date | null) {
+		if (!canEdit || !value || !startDay || !d) return;
+		if (d.getTime() === endDay?.getTime()) return;
+		onSet(makeDateValue(compose(startDay, startTime, timed), compose(d, endTime, timed)));
+	}
+
 	function toggleEnd(on: boolean) {
 		rangeMode = on;
 		if (!on && value?.end) onSet({ start: value.start });
@@ -71,8 +96,10 @@
 		if (!a) return;
 		onSet(makeDateValue(compose(a, startTime, on), b ? compose(b, endTime, on) : null));
 	}
-	function setTime(which: 'start' | 'end', time: string) {
-		if (!canEdit || !value) return;
+	function setTime(which: 'start' | 'end', minutes: number | null) {
+		if (!canEdit || !value || minutes === null) return;
+		const time = toText(minutes);
+		if (time === (which === 'start' ? startTime : endTime)) return;
 		const a = startDay;
 		const b = endDay;
 		if (!a) return;
@@ -81,28 +108,30 @@
 		onSet(makeDateValue(s, e));
 	}
 
-	const field =
-		'rounded-[var(--app-radius-control)] border border-[color:var(--app-hairline-strong)] bg-[color:var(--app-page)] px-2 text-sm text-[color:var(--app-text)]';
 	const toggle = 'flex items-center justify-between px-3 text-sm';
 </script>
 
 <div class="flex w-[288px] flex-col" data-testid="date-editor">
-	<div class="flex gap-2 px-3 pt-3">
-		<div class="flex min-w-0 flex-1 flex-col gap-1">
-			<div class="{field} flex items-center truncate" style="height: var(--app-input-height)" data-testid="date-start">
-				{value ? formatDateText(value.start).replace(/ \d+:\d\d [AP]M$/, '') : 'Pick a date'}
+	<div class="flex flex-col gap-2 px-3 pt-3">
+		<div class="flex items-start gap-2">
+			<div class="min-w-0 flex-1" data-testid="date-start">
+				<DateInput size="small" label="Start" format="yyyy/mm/dd" placeholder="Pick a date" disabled={!canEdit} closeOnSelect value={startDay} onValueChange={setStartDay} />
 			</div>
 			{#if timed && value}
-				<input type="time" class={field} style="height: var(--app-input-height)" aria-label="Start time" value={startTime} disabled={!canEdit} onchange={(e) => setTime('start', e.currentTarget.value)} />
+				<div class="w-[96px] shrink-0">
+					<TimeInput size="small" label="Time" as="minuteSinceMidnight" disabled={!canEdit} value={toMinutes(startTime)} onValueChange={(m) => setTime('start', m)} fieldAttrs={{ 'aria-label': 'Start time' }} />
+				</div>
 			{/if}
 		</div>
 		{#if hasEnd}
-			<div class="flex min-w-0 flex-1 flex-col gap-1">
-				<div class="{field} flex items-center truncate" style="height: var(--app-input-height)" data-testid="date-end">
-					{value?.end ? formatDateText(value.end).replace(/ \d+:\d\d [AP]M$/, '') : 'Pick an end date'}
+			<div class="flex items-start gap-2">
+				<div class="min-w-0 flex-1" data-testid="date-end">
+					<DateInput size="small" label="End" format="yyyy/mm/dd" placeholder="Pick an end date" disabled={!canEdit || !value} closeOnSelect value={endDay} onValueChange={setEndDay} />
 				</div>
 				{#if timed && value?.end}
-					<input type="time" class={field} style="height: var(--app-input-height)" aria-label="End time" value={endTime} disabled={!canEdit} onchange={(e) => setTime('end', e.currentTarget.value)} />
+					<div class="w-[96px] shrink-0">
+						<TimeInput size="small" label="Time" as="minuteSinceMidnight" disabled={!canEdit} value={toMinutes(endTime)} onValueChange={(m) => setTime('end', m)} fieldAttrs={{ 'aria-label': 'End time' }} />
+					</div>
 				{/if}
 			</div>
 		{/if}
@@ -118,7 +147,8 @@
 		{/key}
 	</div>
 
-	<div class="flex flex-col border-t border-[color:var(--app-hairline)] py-1">
+	<Separator class="mt-1" />
+	<div class="flex flex-col py-1">
 		<div class={toggle} style="height: var(--app-row-height)">
 			<span>End date</span>
 			<Switch size="small" value={hasEnd} disabled={!canEdit} onValueChange={(on) => toggleEnd(!!on)} inputAttrs={{ 'aria-label': 'End date' }} />
@@ -128,15 +158,7 @@
 			<Switch size="small" value={timed} disabled={!canEdit} onValueChange={(on) => toggleTime(!!on)} inputAttrs={{ 'aria-label': 'Include time' }} />
 		</div>
 		{#if value && canEdit}
-			<button
-				type="button"
-				class="px-3 text-left text-sm text-[color:var(--app-text-secondary)] hover:bg-[color:var(--app-hover)]"
-				style="height: var(--app-row-height)"
-				data-testid="date-clear"
-				onclick={() => onSet(null)}
-			>
-				Clear
-			</button>
+			<Button variant="ghost" color="neutral" size="small" fullWidth class="justify-start px-3 font-normal text-[color:var(--app-text-secondary)]" data-testid="date-clear" onclick={() => onSet(null)}>Clear</Button>
 		{/if}
 	</div>
 </div>

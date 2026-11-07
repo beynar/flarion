@@ -1,5 +1,6 @@
 <script lang="ts">
-	import { float } from './float.js';
+	import Floating from './Floating.svelte';
+	import MaskIcon from './MaskIcon.svelte';
 	import { Button } from '../ui/index.ts';
 	import { Input } from '../ui/index.ts';
 	import { words } from './words.svelte.js';
@@ -22,19 +23,22 @@
 		{ align: undefined, label: labels.alt, icon: altIcon }
 	] as const);
 	const keep = (event: MouseEvent) => event.preventDefault();
+	/** The bar's content element: the alt text panel hangs from it. */
+	let bar = $state<HTMLElement>();
 </script>
 
 {#if controls.box}
 	{@const box = controls.box}
 	<!-- Its role is the controller's `bar`. -->
-	<div
-		data-image-toolbar
+	<Floating
+		anchor={() => controls.anchor}
+		placement="top-end"
+		gap={({ rects }) => ({ mainAxis: -rects.floating.height - 6, crossAxis: 6 })}
+		class="image-toolbar flex gap-0.5 p-0.5"
 		aria-label={labels.toolbar}
+		data-image-toolbar
+		bind:element={bar}
 		{@attach controls.bar}
-		{@attach float(() => controls.anchor, {
-			placement: 'top-end',
-			gap: ({ rects }) => ({ mainAxis: -rects.floating.height - 6, crossAxis: 6 })
-		})}
 	>
 		{#each buttons as { align, label, icon } (icon)}
 			<Button
@@ -47,12 +51,12 @@
 				aria-expanded={align ? undefined : controls.editing === box.id}
 				onmousedown={keep}
 				onclick={() => (align ? controls.align(align) : controls.toggleAlt())}
-				><span aria-hidden="true" style:mask-image={icon}></span></Button
+				><MaskIcon {icon} size={18} /></Button
 			>
 		{/each}
-	</div>
-	{#if controls.editing === box.id}
-		<div data-edytor-image-alt-panel>
+	</Floating>
+	{#if controls.editing === box.id && bar}
+		<Floating anchor={() => bar} placement="bottom-end" gap={4} class="w-60 p-1" data-edytor-image-alt-panel>
 			<Input
 				data-edytor-image-alt
 				aria-label={labels.alt}
@@ -61,78 +65,6 @@
 				oninput={(event) => controls.setAlt(event.currentTarget.value)}
 				{@attach controls.altField}
 			/>
-		</div>
+		</Floating>
 	{/if}
 {/if}
-
-<style>
-	[data-image-toolbar] {
-		display: flex;
-		gap: 2px;
-		/* The layer has no width: size to the buttons, not to it. */
-		width: max-content;
-		margin-left: auto;
-		padding: 2px;
-		border-radius: 6px;
-		background: var(--edytor-image-toolbar-background, var(--app-page));
-		box-shadow:
-			0 0 0 1px var(--app-hover),
-			0 3px 6px var(--app-hairline);
-		font-size: 13px;
-	}
-
-	[data-image-toolbar] :global(button) {
-		display: inline-flex;
-		align-items: center;
-		justify-content: center;
-		width: 26px;
-		height: 26px;
-		padding: 0;
-		border: 0;
-		border-radius: 4px;
-		background: transparent;
-		color: var(--app-text-secondary);
-		cursor: pointer;
-	}
-
-	[data-image-toolbar] :global(button:hover),
-	[data-image-toolbar] :global(button[aria-pressed='true']),
-	[data-image-toolbar] :global(button[aria-expanded='true']) {
-		background: var(--app-hover);
-		color: var(--app-text);
-	}
-
-	[data-image-toolbar] :global(button span) {
-		width: 18px;
-		height: 18px;
-		background: currentColor;
-		mask-size: contain;
-		mask-repeat: no-repeat;
-	}
-
-	[data-edytor-image-alt-panel] {
-		position: absolute;
-		top: 34px;
-		right: 0;
-		width: 240px;
-		padding: 4px;
-		border-radius: 6px;
-		background: var(--edytor-image-toolbar-background, var(--app-page));
-		box-shadow:
-			0 0 0 1px var(--app-hover),
-			0 3px 6px var(--app-hairline);
-	}
-
-	[data-image-toolbar] :global([data-edytor-image-alt]) {
-		box-sizing: border-box;
-		width: 100%;
-		height: 28px;
-		padding: 0 8px;
-		border: 0;
-		border-radius: 4px;
-		background: var(--app-hover);
-		box-shadow: inset 0 0 0 1px var(--app-hairline);
-		font: inherit;
-		outline: 0;
-	}
-</style>

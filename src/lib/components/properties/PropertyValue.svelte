@@ -1,8 +1,9 @@
 <script lang="ts">
-	import { Avatar } from 'entasis/avatar';
+	import { Avatar, AvatarGroup } from 'entasis/avatar';
+	import { Checkbox } from 'entasis/checkbox';
+	import { Chip } from 'entasis/chip';
 	import { fileTextIcon } from 'entasis/icons/fileText';
 	import { paperclipIcon } from 'entasis/icons/paperclip';
-	import { checkIcon } from 'entasis/icons/check';
 	import OptionTag from '#lib/components/shell/OptionTag.svelte';
 	import { isDateValue, type PropValue, type PropertyDef } from '#lib/shared/property-types.ts';
 	import {
@@ -75,15 +76,8 @@
 
 <span class="flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-1 text-sm" data-type={def.type}>
 	{#if def.type === 'checkbox' || ((def.type === 'formula' || def.type === 'rollup') && typeof value === 'boolean')}
-		<span
-			role="img"
-			aria-label={checked ? 'Checked' : 'Unchecked'}
-			class="grid size-4 shrink-0 place-items-center rounded-[3px] border {checked
-				? 'border-[color:var(--app-accent)] bg-[color:var(--app-accent)] text-white'
-				: 'border-[color:var(--app-hairline-strong)]'}"
-		>
-			{#if checked}{@render checkIcon({ size: 12 })}{/if}
-		</span>
+		<!-- A display, not a control: read-only and out of the tab order. -->
+		<Checkbox size="small" value={checked} readOnly inputAttrs={{ 'aria-label': checked ? 'Checked' : 'Unchecked', tabindex: -1 }} />
 	{:else if empty}
 		{#if !compact}<span class="text-[color:var(--app-text-tertiary)]">Empty</span>{/if}
 	{:else if tags.length}
@@ -91,12 +85,16 @@
 			<OptionTag color={t.color} label={t.name} />
 		{/each}
 	{:else if def.type === 'person' || def.type === 'created_by' || def.type === 'last_edited_by'}
-		{#each ids as id (id)}
-			<span class="inline-flex min-w-0 items-center gap-1.5" title={person(id)}>
-				<Avatar size="small" name={person(id)} />
-				{#if !compact || ids.length === 1}<span class="truncate">{person(id)}</span>{/if}
-			</span>
-		{/each}
+		{#if compact && ids.length > 1}
+			<AvatarGroup items={ids.map((id) => ({ name: person(id) }))} max={4} size="small" />
+		{:else}
+			{#each ids as id (id)}
+				<span class="inline-flex min-w-0 items-center gap-1.5">
+					<Avatar size="small" name={person(id)} />
+					{#if !compact || ids.length === 1}<span class="truncate">{person(id)}</span>{/if}
+				</span>
+			{/each}
+		{/if}
 	{:else if def.type === 'relation'}
 		{#each ids as id (id)}
 			{@const p = resolvePage?.(id)}
@@ -114,18 +112,19 @@
 	{:else if def.type === 'files'}
 		{#each ids as id (id)}
 			{@const f = fileInfo?.(id)}
-			<svelte:element
-				this={f?.url ? 'a' : 'span'}
+			<Chip
+				variant="soft"
+				color="neutral"
+				size="small"
 				href={f?.url}
 				target={f?.url ? '_blank' : undefined}
 				rel={f?.url ? 'noopener noreferrer' : undefined}
-				class="inline-flex min-w-0 max-w-full items-center gap-1 rounded-[3px] bg-[color:var(--app-hover)] px-1.5 text-[color:var(--app-text)] no-underline"
-				style="height: var(--app-tag-height)"
+				theme={{ root: { base: 'h-[var(--app-tag-height)]! max-w-full! rounded-[3px]! px-1.5! text-sm! font-normal! text-[color:var(--app-text)]! no-underline' } }}
 				data-testid="file-chip"
 			>
-				{@render paperclipIcon({ size: 12 })}
+				{#snippet prefix()}{@render paperclipIcon({ size: 12 })}{/snippet}
 				<span class="truncate">{f?.name ?? 'File'}</span>
-			</svelte:element>
+			</Chip>
 		{/each}
 	{:else if href}
 		<a

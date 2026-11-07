@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { float } from './float.js';
+	import Floating from './Floating.svelte';
 	import { Button } from '../ui/index.ts';
 	import { Input } from '../ui/index.ts';
 	import { words } from './words.svelte.js';
@@ -77,17 +77,18 @@
 	{/each}
 {/snippet}
 
-<div
-	data-edytor-find
+<Floating
+	anchor={() => find.anchor}
+	placement="top-end"
+	gap={({ rects }) => -rects.floating.height - 8}
+	class="find-bar flex flex-col gap-1.5 px-2 py-1.5"
 	role="search"
 	aria-label={labels.bar}
-	{@attach float(() => find.anchor, {
-		placement: 'top-end',
-		gap: ({ rects }) => -rects.floating.height - 8
-	})}
+	data-edytor-find
 >
 	<div data-edytor-find-row>
 		<Input
+			class="field-find"
 			data-edytor-find-query
 			type="text"
 			placeholder={labels.queryPlaceholder}
@@ -104,6 +105,7 @@
 	{#if find.canReplace}
 		<div data-edytor-find-row>
 			<Input
+				class="field-find"
 				data-edytor-find-replacement
 				type="text"
 				placeholder={labels.replaceWith}
@@ -116,49 +118,16 @@
 			{@render buttons(replacing)}
 		</div>
 	{/if}
-</div>
+</Floating>
 
 <style>
-	[data-edytor-find] {
-		display: flex;
-		flex-direction: column;
-		gap: 6px;
-		padding: 6px 8px;
-		border-radius: 8px;
-		background: var(--edytor-find-background, var(--app-page));
-		color: var(--edytor-find-color, var(--app-text));
-		box-shadow:
-			var(--app-hover) 0 0 0 1px,
-			var(--app-hairline) 0 3px 6px,
-			var(--app-hairline) 0 9px 24px;
-		font:
-			14px/1.4 ui-sans-serif,
-			-apple-system,
-			BlinkMacSystemFont,
-			'Segoe UI',
-			sans-serif;
-	}
-	[data-edytor-find-row] {
+	:global([data-edytor-find-row]) {
 		display: flex;
 		align-items: center;
 		gap: 4px;
 	}
-	[data-edytor-find] :global(input) {
+	:global([data-edytor-find] .field-find) {
 		width: 200px;
-		min-width: 0;
-		padding: 3px 6px;
-		border: none;
-		border-radius: 4px;
-		background: var(--app-hover);
-		box-shadow: var(--app-hairline) 0 0 0 1px inset;
-		color: inherit;
-		font: inherit;
-		outline: none;
-	}
-	[data-edytor-find] :global(input:focus) {
-		box-shadow:
-			color-mix(in oklab, var(--app-accent) 57%, transparent) 0 0 0 1px inset,
-			color-mix(in oklab, var(--app-accent) 35%, transparent) 0 0 0 2px;
 	}
 	[data-edytor-find-count] {
 		min-width: 64px;
@@ -166,33 +135,5 @@
 		font-size: 12px;
 		text-align: center;
 		white-space: nowrap;
-	}
-	[data-edytor-find] :global(button) {
-		min-width: 24px;
-		height: 24px;
-		padding: 0 6px;
-		border: none;
-		border-radius: 4px;
-		background: transparent;
-		color: inherit;
-		font: inherit;
-		font-size: 13px;
-		cursor: pointer;
-		white-space: nowrap;
-	}
-	[data-edytor-find] :global(button:hover:not(:disabled)),
-	[data-edytor-find] :global(button[aria-pressed='true']) {
-		background: var(--app-hover);
-	}
-	[data-edytor-find] :global(button[aria-pressed='true']) {
-		color: var(--app-accent);
-	}
-	[data-edytor-find] :global(button:disabled) {
-		opacity: 0.4;
-		cursor: default;
-	}
-	[data-edytor-find] :global([data-edytor-find-replace]),
-	[data-edytor-find] :global([data-edytor-find-replace-all]) {
-		box-shadow: var(--app-hairline) 0 0 0 1px inset;
 	}
 </style>

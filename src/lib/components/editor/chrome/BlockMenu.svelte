@@ -1,9 +1,9 @@
 <script lang="ts">
-	import { float } from './float.js';
-	import { Input } from '../ui/index.ts';
-	import { Separator } from '../ui/index.ts';
-	import { cn } from '../ui/cn.ts';
-	import { surface } from './ui.js';
+	import Floating from './Floating.svelte';
+	import MaskIcon from './MaskIcon.svelte';
+	import { Input, Separator } from '../ui/index.ts';
+	import { MenuOption } from 'entasis/menu-option';
+	import { Switch } from 'entasis/switch';
 	import { words } from './words.svelte.js';
 	import { iconOf } from './icons.js';
 	import { PALETTE } from './palette.js';
@@ -17,7 +17,7 @@
 
 	/** Notion's block menu, drawn for `createBlockMenuPlugin({ menu })`. */
 	let { controller }: { controller: BlockMenuController } = $props();
-	/** The menu's element: its flyout stands beside it. */
+	/** The menu's element: its flyout stands beside it (the flyout's `anchor`). */
 	let menuNode = $state<HTMLElement>();
 	const rows = $derived(controller.rows);
 	const labels = $derived(words.blockMenu);
@@ -61,12 +61,10 @@
 	};
 
 	/**
-	 * A row's own attributes (its look, its pointer; its ARIA is the
-	 * controller's `option` attachment): hovering makes it the keyboard's row
-	 * (an action's also opens or closes its flyout), a click runs it as Enter
-	 * does.
+	 * A row's own attributes (its pointer, its test id; its ARIA is the controller's `option` attachment): hovering
+	 * makes it the keyboard's row (an action's also opens or closes its flyout), a click runs it as Enter does.
 	 */
-	const attributes = (row: Row, index: number, flyout: boolean) => {
+	const attributes = (row: Row, index: number, flyout: boolean): Record<string, any> => {
 		const select = () => (flyout ? (controller.flyoutIndex = index) : (controller.index = index));
 		const own = {
 			'data-selected': (flyout ? controller.flyoutIndex : controller.index) === index,
@@ -78,27 +76,23 @@
 		if ('field' in row)
 			return {
 				...own,
-				class: 'block-menu-row block-menu-color',
 				'data-field': row.field,
 				'data-current': controller.isCurrentColor(row),
 				'data-testid': `block-menu-${row.id}`,
-				onmousemove: select
+				onpointermove: select
 			};
 		if ('value' in row)
 			return {
 				...own,
-				class: 'block-menu-row',
 				'data-current': flyout ? row === controller.currentKind : undefined,
-				onmousemove: select
+				onpointermove: select
 			};
 		return {
 			...own,
-			class: row.danger ? 'block-menu-row danger' : 'block-menu-row',
 			'data-checked': row.checked,
-			'data-hint': row.submenu ? undefined : row.hint,
 			'data-submenu': row.submenu ? 'true' : undefined,
 			'data-testid': `block-menu-${row.id}`,
-			onmouseenter: () => {
+			onpointerenter: () => {
 				select();
 				if (row.submenu) controller.openFlyout(row.submenu);
 				else controller.flyout = false;
@@ -120,38 +114,68 @@
 {#snippet list(rows: Row[], flyout: boolean)}
 	{#each rows as row, index (`${shape(row)}:${row.id}`)}
 		{@const title = heading(rows, index, flyout)}
-		{#if title}<div class="block-menu-heading" role="presentation">{title}</div>{/if}
-		{#if row.id === 'delete' || row.id === 'duplicate'}<Separator
-				class="block-menu-divider -mx-1 my-1 w-auto"
-			/>{/if}
-		<button
-			type="button"
-			{...attributes(row, index, flyout)}
+		{@const { onclick, onpointermove, onpointerenter, ...attrs } = attributes(row, index, flyout)}
+		{@const current = 'value' in row && flyout && row === controller.currentKind}
+		{@const checked = 'checked' in row ? row.checked : undefined}
+		{#if title}<div class="text-neutral/70 px-2 pt-1.5 pb-1 text-xs font-medium select-none" role="presentation">{title}</div>{/if}
+		{#if row.id === 'delete' || row.id === 'duplicate'}<Separator class="my-1" />{/if}
+		<MenuOption
+			role="menuitem"
+			size="small"
+			density="compact"
+			color={'icon' in row && 'danger' in row && row.danger ? 'danger' : 'neutral'}
+			highlighted={(flyout ? controller.flyoutIndex : controller.index) === index}
 			{@attach controller.option(index, flyout)}
-			style:--block-menu-icon={'field' in row
-				? undefined
-				: iconOf('value' in row ? row.id : row.icon)}
-			style:--block-menu-swatch={swatch(row)}>{row.label}</button
+			attrs={{ ...attrs, onpointermove, onpointerenter }}
+			{onclick}
 		>
+			{#snippet prefix()}
+				{#if 'field' in row}
+					<span
+						aria-hidden="true"
+						class="inline-grid size-5 shrink-0 place-items-center rounded-[4px] text-[13px] font-medium shadow-[inset_0_0_0_1px_var(--app-hairline)]"
+						style="{row.field === 'background' ? `background: ${swatch(row) ?? 'var(--app-page)'}` : `color: ${swatch(row) ?? 'var(--app-text)'}`}"
+						>{row.field === 'background' ? '' : 'A'}</span
+					>
+				{:else}
+					<MaskIcon icon={iconOf('value' in row ? row.id : row.icon)} />
+				{/if}
+			{/snippet}
+			{row.label}
+			{#snippet suffix()}
+				{#if 'field' in row || 'value' in row}
+					{#if current || ('field' in row && controller.isCurrentColor(row))}<span class="text-sm">✓</span>{/if}
+				{:else if checked !== undefined}
+					<!-- A kind's switch (a table's Header row): entasis Switch, display only (the row is the control). -->
+					<Switch size="small" value={checked} readOnly class="pointer-events-none" inputAttrs={{ tabindex: -1, 'aria-hidden': 'true' }} />
+				{:else if row.submenu}
+					<span class="text-base leading-none">›</span>
+				{:else if row.hint}
+					<span class="text-neutral/70 text-xs">{row.hint}</span>
+				{/if}
+			{/snippet}
+		</MenuOption>
 	{/each}
 {/snippet}
 
 <!--
-	The keys, the ids, the roles and the publication to the view's root are
-	the controller's attachments (`keys`, `popup`, `flyoutMenu`, `option`).
+	The keys, the ids, the roles and the publication to the view's root are the controller's attachments (`keys`,
+	`popup`, `flyoutMenu`, `option`). The surfaces are entasis `Popover` (`Floating`), the rows `MenuOption`s, the
+	search a `TextInput`.
 -->
-<div class="block-menu-frame">
-	<div
-		class={cn('block-menu', surface)}
+<div class="block-menu-frame contents" data-edytor-block-menu-frame>
+	<Floating
+		anchor={() => controller.anchor}
+		placement="right-start"
+		fallback={['left-start']}
+		haspopup="menu"
+		class="flex w-[265px] max-h-[min(70vh,480px)] flex-col overflow-hidden"
 		data-testid="block-menu"
 		data-edytor-block-menu
-		tabindex="-1"
-		bind:this={menuNode}
-		{@attach float(() => controller.anchor, { placement: 'right-start', fallback: ['left-start'] })}
+		bind:element={menuNode}
 	>
-		<div class="block-menu-search">
+		<div class="px-2 pt-2 pb-1">
 			<Input
-				class="h-7 px-2"
 				placeholder={labels.search}
 				aria-label={labels.searchLabel}
 				value={controller.query}
@@ -159,192 +183,46 @@
 				oninput={(event) => controller.search(event.currentTarget.value)}
 			/>
 		</div>
-		<div class="block-menu-rows" role="menu" aria-label={labels.menu} {@attach controller.popup}>
+		<div class="overflow-y-auto p-1" aria-label={labels.menu} {@attach controller.popup}>
 			{#if !controller.query}
-				<div class="block-menu-heading" role="presentation">
+				<div class="text-neutral/70 px-2 pt-1.5 pb-1 text-xs font-medium select-none" role="presentation">
 					{controller.currentKind?.label ?? labels.block}
 				</div>
 			{/if}
 			{@render list(rows, false)}
 			{#each pageRows as row (row.id)}
-				<button
-					type="button"
-					class="block-menu-row"
-					data-testid={`block-menu-${row.id}`}
-					style:--block-menu-icon={iconOf(`action.${row.id}`)}
-					onclick={() => runPageRow(row.run)}>{row.label}</button
+				<MenuOption
+					role="menuitem"
+					size="small"
+					density="compact"
+					attrs={{ 'data-testid': `block-menu-${row.id}` }}
+					onclick={() => runPageRow(row.run)}
 				>
+					{#snippet prefix()}<MaskIcon icon={iconOf(`action.${row.id}`)} />{/snippet}
+					{row.label}
+				</MenuOption>
 			{/each}
 			{#if rows.length === 0 && pageRows.length === 0}
-				<div class="block-menu-empty" role="presentation">{labels.noResults}</div>
+				<div class="text-neutral/70 px-2 py-1.5" role="presentation">{labels.noResults}</div>
 			{/if}
 		</div>
-	</div>
+	</Floating>
 	<!-- The open flyout: a new element for each (its id, name and opening). -->
 	{#each controller.flyout ? [controller.flyout] : [] as flyout (flyout)}
-		<div
-			class={cn('block-menu block-menu-flyout', surface)}
+		<Floating
+			anchor={() => menuNode}
+			placement="right-start"
+			gap={4}
+			fallback={['left-start']}
+			haspopup="menu"
+			class="flex w-[220px] max-h-[min(480px,calc(100vh-16px))] flex-col overflow-hidden"
 			role="menu"
 			aria-label={flyout === 'color' ? labels.color : labels.turnInto}
 			{@attach controller.flyoutMenu}
-			{@attach float(() => menuNode, {
-				placement: 'right-start',
-				gap: 4,
-				fallback: ['left-start']
-			})}
 		>
-			<div class="block-menu-rows" role="presentation">
+			<div class="overflow-y-auto p-1" role="presentation">
 				{@render list(controller.flyoutRows, true)}
 			</div>
-		</div>
+		</Floating>
 	{/each}
 </div>
-
-<style>
-	.block-menu-frame {
-		display: flex;
-		align-items: flex-start;
-		gap: 4px;
-		font-family:
-			ui-sans-serif,
-			-apple-system,
-			BlinkMacSystemFont,
-			'Segoe UI Variable Display',
-			'Segoe UI',
-			Helvetica,
-			Arial,
-			sans-serif;
-		font-size: 14px;
-		line-height: 20px;
-		color: var(--app-text);
-	}
-	.block-menu {
-		width: 265px;
-		max-height: min(70vh, 480px);
-		display: flex;
-		flex-direction: column;
-		overflow: hidden;
-		transform-origin: top left;
-		animation: block-menu-in 140ms cubic-bezier(0.2, 0, 0, 1);
-	}
-	/* Never taller than the viewport: it scrolls inside, placed within it (`place`). */
-	.block-menu-flyout {
-		width: 220px;
-		max-height: min(480px, calc(100vh - 16px));
-	}
-	@keyframes block-menu-in {
-		from {
-			opacity: 0;
-			transform: scale(0.98);
-		}
-	}
-	.block-menu-search {
-		padding: 8px 8px 4px;
-	}
-	.block-menu-rows {
-		overflow-y: auto;
-		padding: 4px;
-	}
-	.block-menu-heading {
-		padding: 6px 8px 4px;
-		color: var(--app-text-secondary);
-		font-size: 12px;
-		font-weight: 500;
-		line-height: 16px;
-		user-select: none;
-	}
-	.block-menu-row {
-		display: flex;
-		align-items: center;
-		gap: 8px;
-		width: 100%;
-		height: 28px;
-		padding: 0 8px;
-		border-radius: 6px;
-		color: inherit;
-		font: inherit;
-		text-align: left;
-		white-space: nowrap;
-		cursor: pointer;
-	}
-	.block-menu-row::before {
-		content: '';
-		flex: none;
-		width: 20px;
-		height: 20px;
-		background: var(--app-text);
-		-webkit-mask: var(--block-menu-icon) center / 20px no-repeat;
-		mask: var(--block-menu-icon) center / 20px no-repeat;
-	}
-	.block-menu-row[data-hint]::after,
-	.block-menu-row[data-submenu]::after,
-	.block-menu-row[data-current='true']::after {
-		margin-left: auto;
-		color: var(--app-text-secondary);
-		font-size: 12px;
-	}
-	.block-menu-row[data-hint]::after {
-		content: attr(data-hint);
-	}
-	.block-menu-row[data-submenu]::after {
-		content: '›';
-		font-size: 16px;
-	}
-	/* A kind's switch (a table's Header row): Notion's small toggle. */
-	.block-menu-row[data-checked]::after {
-		content: '';
-		flex: none;
-		margin-left: auto;
-		width: 26px;
-		height: 14px;
-		border-radius: 7px;
-		background:
-			radial-gradient(circle at 7px 50%, var(--app-page) 5px, transparent 5.5px), var(--app-hairline);
-	}
-	.block-menu-row[data-checked='true']::after {
-		background:
-			radial-gradient(circle at 19px 50%, var(--app-page) 5px, transparent 5.5px), var(--app-accent);
-	}
-	.block-menu-row[data-current='true']::after {
-		content: '✓';
-		color: var(--app-text);
-	}
-	.block-menu-row[data-selected='true'],
-	.block-menu-row:hover {
-		background: var(--app-hover);
-	}
-	.block-menu-row.danger:hover,
-	.block-menu-row.danger[data-selected='true'] {
-		color: var(--app-danger);
-	}
-	.block-menu-row.danger:hover::before,
-	.block-menu-row.danger[data-selected='true']::before {
-		background: var(--app-danger);
-	}
-	/*
-	 * A colour row's swatch, as Notion draws it: an "A" in the text colour on
-	 * a bordered square, or a square filled with the background.
-	 */
-	.block-menu-color::before {
-		content: 'A';
-		display: grid;
-		place-items: center;
-		box-sizing: border-box;
-		border-radius: 4px;
-		box-shadow: inset 0 0 0 1px var(--app-hairline);
-		background: transparent;
-		-webkit-mask: none;
-		mask: none;
-		color: var(--block-menu-swatch, var(--app-text));
-		font-size: 13px;
-		font-weight: 500;
-	}
-	.block-menu-color[data-field='background']::before {
-		content: '';
-		background: var(--block-menu-swatch, var(--app-page));
-	}
-	.block-menu-empty {
-		padding: 6px 8px;
-		color: var(--app-text-secondary);
-	}
-</style>

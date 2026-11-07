@@ -1,8 +1,11 @@
 <script lang="ts">
 	import type { DateOperand, DateUnit } from '#lib/shared/dates.ts';
-	import { toDateOnly } from '#lib/components/properties/helpers.ts';
+	import { Select } from 'entasis/select';
+	import { DateInput } from 'entasis/date-input';
+	import { NumberInput } from 'entasis/number-input';
+	import { SegmentedControl } from 'entasis/segmented-control';
+	import { calendarDate, toDateOnly } from '#lib/components/properties/helpers.ts';
 	import { DATE_UNIT_CHOICES } from './logic.ts';
-	import { controlClass } from './styles.ts';
 
 	/**
 	 * One date operand of a filter: an exact day, or a point relative to today ("Today", "Yesterday",
@@ -55,45 +58,65 @@
 		const dir = (next.ahead ?? ahead) ? 1 : -1;
 		onChange({ kind: 'relative', unit: next.unit ?? value.unit, offset: n * dir });
 	}
+	const modeItems = [
+		{ value: 'exact', label: 'Exact date' },
+		...PRESETS.map((p) => ({ value: p.id, label: p.label })),
+		{ value: 'custom', label: 'Custom…' }
+	];
+	const unitItems = $derived(DATE_UNIT_CHOICES.map((u) => ({ value: u.unit as string, label: `${u.label}${count === 1 ? '' : 's'}` })));
+	const DIRECTIONS = [
+		{ value: 'ago', label: 'ago' },
+		{ value: 'ahead', label: 'from now' }
+	];
 </script>
 
 <span class="inline-flex min-w-0 flex-wrap items-center gap-1" data-testid="date-operand">
-	<select class={controlClass} aria-label={label} data-testid="date-operand-mode" disabled={readonly} value={mode} onchange={(e) => pick(e.currentTarget.value)}>
-		<option value="exact">Exact date</option>
-		{#each PRESETS as p (p.id)}
-			<option value={p.id}>{p.label}</option>
-		{/each}
-		<option value="custom">Custom…</option>
-	</select>
+	<Select
+		size="small"
+		class="w-36"
+		items={modeItems}
+		value={mode}
+		disabled={readonly}
+		alignItemWithTrigger={false}
+		triggerAttrs={{ 'aria-label': label, 'data-testid': 'date-operand-mode' }}
+		onValueChange={(v) => v && pick(v)}
+	/>
 	{#if value.kind === 'exact'}
-		<input
-			type="date"
-			class={controlClass}
-			aria-label="{label} (day)"
-			data-testid="date-operand-day"
-			disabled={readonly}
-			value={value.date.slice(0, 10)}
-			onchange={(e) => e.currentTarget.value && onChange({ kind: 'exact', date: e.currentTarget.value })}
-		/>
+		<span data-testid="date-operand-day">
+			<DateInput
+				size="small"
+				class="w-32"
+				label="{label} (day)"
+				theme={{ label: { base: 'sr-only' } }}
+				format="yyyy/mm/dd"
+				closeOnSelect
+				disabled={readonly}
+				value={calendarDate(value.date)}
+				onValueChange={(date) => date && onChange({ kind: 'exact', date: toDateOnly(date) })}
+			/>
+		</span>
 	{:else if mode === 'custom'}
-		<input
-			type="number"
-			min="1"
-			max="1000"
-			class="{controlClass} w-16"
-			aria-label="{label} (count)"
+		<NumberInput
+			size="small"
+			class="w-20"
+			min={1}
+			max={1000}
+			showControls={false}
+			format={{ useGrouping: false, maximumFractionDigits: 0 }}
 			disabled={readonly}
 			value={count}
-			onchange={(e) => custom({ count: Number(e.currentTarget.value) || 1 })}
+			inputAttrs={{ 'aria-label': `${label} (count)` }}
+			onValueCommit={({ value: n }) => custom({ count: n || 1 })}
 		/>
-		<select class={controlClass} aria-label="{label} (unit)" disabled={readonly} value={value.kind === 'relative' ? value.unit : 'day'} onchange={(e) => custom({ unit: e.currentTarget.value as DateUnit })}>
-			{#each DATE_UNIT_CHOICES as u (u.unit)}
-				<option value={u.unit}>{u.label}{count === 1 ? '' : 's'}</option>
-			{/each}
-		</select>
-		<select class={controlClass} aria-label="{label} (direction)" disabled={readonly} value={ahead ? 'ahead' : 'ago'} onchange={(e) => custom({ ahead: e.currentTarget.value === 'ahead' })}>
-			<option value="ago">ago</option>
-			<option value="ahead">from now</option>
-		</select>
+		<Select
+			size="small"
+			items={unitItems}
+			value={value.kind === 'relative' ? value.unit : 'day'}
+			disabled={readonly}
+			alignItemWithTrigger={false}
+			triggerAttrs={{ 'aria-label': `${label} (unit)` }}
+			onValueChange={(v) => v && custom({ unit: v as DateUnit })}
+		/>
+		<SegmentedControl size="small" label="{label} (direction)" items={DIRECTIONS} value={ahead ? 'ahead' : 'ago'} disabled={readonly} onValueChange={(v) => custom({ ahead: v === 'ahead' })} />
 	{/if}
 </span>

@@ -1,5 +1,7 @@
 <script lang="ts">
 	import { Command } from 'entasis/command';
+	import { Empty } from 'entasis/empty';
+	import { Kbd } from 'entasis/kbd';
 	import { fileTextIcon } from 'entasis/icons/fileText';
 	import { plusIcon } from 'entasis/icons/plus';
 	import { sidebarSimpleIcon } from 'entasis/icons/sidebarSimple';
@@ -77,15 +79,15 @@
 	onSelect={(value) => onAction?.(value)}
 >
 	{#snippet empty()}
-		<div class="px-3 py-6 text-center text-sm text-[color:var(--app-text-tertiary)]">No pages match “{search}”.</div>
+		<Empty size="small" title={`No pages match “${search}”`} />
 	{/snippet}
 	{#snippet footer()}
 		<div
 			class="flex items-center gap-4 border-t border-[color:var(--app-hairline)] px-3 py-2 text-xs text-[color:var(--app-text-tertiary)]"
 		>
-			<span>↑↓ Navigate</span>
-			<span>↵ Open</span>
-			<span>Esc Close</span>
+			<span class="inline-flex items-center gap-1.5"><Kbd size="small" keys={['↑', '↓']} /> Navigate</span>
+			<span class="inline-flex items-center gap-1.5"><Kbd size="small" keys={['↵']} /> Open</span>
+			<span class="inline-flex items-center gap-1.5"><Kbd size="small" keys={['Esc']} /> Close</span>
 		</div>
 	{/snippet}
 </Command>

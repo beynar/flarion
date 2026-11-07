@@ -13,6 +13,10 @@
 	import type { SyncRefusedError, Uploader, EdytorInstance } from 'edytor';
 	import type { Rpc } from '#lib/client/rpc.ts';
 	import { CLOSE } from '#lib/shared/protocol.ts';
+	import { Alert } from 'entasis/alert';
+	import { Button } from 'entasis/button';
+	import { lockIcon } from 'entasis/icons/lock';
+	import { sparkleIcon } from 'entasis/icons/sparkle';
 	import EditorView from './EditorView.svelte';
 	import type { AncestorRef, DatabaseRef } from './context.ts';
 	import { aiState } from './ai/state.svelte.ts';
@@ -135,29 +139,43 @@
 
 <div class="flarion-editor edytor-notion" data-flarion-editor data-testid="editor">
 	{#if lock?.locked}
-		<div class="flarion-editor-banner flarion-editor-lock" role="status" data-testid="editor-locked">
-			<span aria-hidden="true">🔒</span>
-			{lockedOut ? 'This page is locked. Only people with full access can edit it.' : 'This page is locked. You can still edit it because you have full access.'}
+		<div class="flarion-editor-banner" role="status" data-testid="editor-locked">
+			<Alert color="warning" variant="soft" size="small">
+				{#snippet prefix()}{@render lockIcon({ size: 16 })}{/snippet}
+				{lockedOut ? 'This page is locked. Only people with full access can edit it.' : 'This page is locked. You can still edit it because you have full access.'}
+			</Alert>
 		</div>
 	{/if}
 	{#if aiState.unavailable}
 		<div class="flarion-editor-banner" role="status" data-testid="ai-unavailable">
-			<span aria-hidden="true">✨</span>
-			AI writing is unavailable right now, so it is turned off. Everything else works.
-			<button type="button" data-testid="ai-retry" onclick={() => aiState.reset()}>Try again</button>
+			<Alert color="info" variant="soft" size="small">
+				{#snippet prefix()}{@render sparkleIcon({ size: 16 })}{/snippet}
+				AI writing is unavailable right now, so it is turned off. Everything else works.
+				<Button size="small" variant="ghost" data-testid="ai-retry" onclick={() => aiState.reset()}>Try again</Button>
+			</Alert>
 		</div>
 	{/if}
 	{#if failure === 'reload'}
 		<div class="flarion-editor-banner" role="alert" data-testid="editor-reload">
-			Flarion was updated. <button type="button" onclick={() => location.reload()}>Reload to continue</button>
+			<Alert color="primary" variant="soft" size="small">
+				Flarion was updated.
+				<Button size="small" variant="ghost" onclick={() => location.reload()}>Reload to continue</Button>
+			</Alert>
 		</div>
 	{:else if failure === 'denied'}
-		<div class="flarion-editor-banner" role="alert">You no longer have access to this page.</div>
+		<div class="flarion-editor-banner" role="alert">
+			<Alert color="danger" variant="soft" size="small">You no longer have access to this page.</Alert>
+		</div>
 	{:else if failure === 'invalid'}
-		<div class="flarion-editor-banner" role="alert">This page could not be opened.</div>
+		<div class="flarion-editor-banner" role="alert">
+			<Alert color="danger" variant="soft" size="small">This page could not be opened.</Alert>
+		</div>
 	{:else if failure === 'token'}
 		<div class="flarion-editor-banner" role="alert">
-			Could not connect to this page. <button type="button" onclick={() => attempt++}>Try again</button>
+			<Alert color="danger" variant="soft" size="small">
+				Could not connect to this page.
+				<Button size="small" variant="ghost" onclick={() => attempt++}>Try again</Button>
+			</Alert>
 		</div>
 	{/if}
 	{#if mounted && initial && !failure}
@@ -211,17 +229,6 @@
 	}
 	.flarion-editor-banner {
 		margin: 0 0 8px;
-		padding: 8px 12px;
-		border-radius: var(--app-radius-control);
-		background: var(--app-hover);
-		color: var(--app-text);
-		font-size: var(--app-font-size-chrome);
-	}
-	.flarion-editor-banner button {
-		margin-left: 8px;
-		color: var(--app-accent);
-		text-decoration: underline;
-		cursor: pointer;
 	}
 	.flarion-editor-loading {
 		min-height: 120px;

@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { goto } from '$app/navigation';
+	import { Skeleton } from 'entasis/skeleton';
 	import { page as route } from '$app/state';
 	import Editor from '#lib/components/editor/Editor.svelte';
 	import HistoryPanel from '#lib/components/history/HistoryPanel.svelte';
@@ -134,8 +135,8 @@
 	<PageUnavailable {store} {pageId} {ws} />
 {:else}
 	<div class="mx-auto w-full max-w-[var(--app-page-width)] px-[var(--app-page-padding-x-narrow)] pt-24 md:px-[var(--app-page-padding-x)]" aria-busy="true">
-		<div class="mb-4 h-12 w-2/3 animate-pulse rounded bg-[color:var(--app-hover)]"></div>
-		<div class="mb-2 h-4 w-full animate-pulse rounded bg-[color:var(--app-hover)]"></div>
-		<div class="h-4 w-4/5 animate-pulse rounded bg-[color:var(--app-hover)]"></div>
+		<Skeleton class="mb-4 h-12 w-2/3" />
+		<Skeleton class="mb-2 h-4 w-full" />
+		<Skeleton class="h-4 w-4/5" />
 	</div>
 {/if}

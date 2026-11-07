@@ -178,8 +178,9 @@ test('1-3. a guest at "Can comment" comments but cannot edit; "Can edit" opens h
 
 	await ada.page.getByTestId('share-button').click();
 	const dialog = ada.page.getByTestId('share-dialog');
-	await dialog.getByTestId('share-invite-input').fill(carla.email);
-	await dialog.getByTestId('share-invite-level').selectOption('comment');
+	await dialog.getByTestId('share-invite-input').getByRole('combobox').fill(carla.email);
+	await dialog.getByTestId('share-invite-level').click();
+	await dialog.page().getByRole('menuitemradio', { name: 'Can comment' }).click();
 	await dialog.getByTestId('share-invite-submit').click();
 	await expect(dialog.getByTestId('share-grant-row').filter({ hasText: carla.email })).toBeVisible();
 	await shot(ada.page, '01-share-comment');
@@ -219,7 +220,9 @@ test('1-3. a guest at "Can comment" comments but cannot edit; "Can edit" opens h
 
 	// Ada raises Carla to "Can edit": her editor is editable without a reload.
 	await ada.page.getByTestId('share-button').click();
-	await dialog.getByTestId('share-grant-row').filter({ hasText: carla.email }).getByTestId('share-level').selectOption('update');
+	const level = dialog.getByTestId('share-grant-row').filter({ hasText: carla.email }).getByTestId('share-level');
+	await level.click();
+	await level.page().getByRole('menuitemradio', { name: 'Can edit' }).click();
 	await expect(carlaEditor).not.toHaveAttribute('aria-readonly', 'true', { timeout: 10_000 });
 	await carlaEditor.click();
 	await carla.page.keyboard.press('Control+End');
@@ -228,7 +231,9 @@ test('1-3. a guest at "Can comment" comments but cannot edit; "Can edit" opens h
 	await shot(carla.page, '04-guest-can-edit');
 
 	// Ada revokes the grant: Carla's page closes with an access message, and the sidebar empties.
-	await dialog.getByTestId('share-grant-row').filter({ hasText: carla.email }).getByTestId('share-remove').click();
+	const grantRow = dialog.getByTestId('share-grant-row').filter({ hasText: carla.email });
+	await grantRow.getByTestId('share-level').click();
+	await grantRow.page().getByTestId('share-remove').click();
 	await expect(dialog.getByTestId('share-grant-row').filter({ hasText: carla.email })).toHaveCount(0);
 	await ada.page.keyboard.press('Escape');
 	await expect(carla.page.getByTestId('page-unavailable')).toContainText('you may not have access', { timeout: 15_000 });
@@ -287,7 +292,7 @@ test('5. a public link opens for an anonymous browser with the title and noindex
 	await expect(ada.page.getByTestId('page-title')).toHaveValue('Launch plan');
 	await ada.page.getByTestId('share-button').click();
 	const dialog = ada.page.getByTestId('share-dialog');
-	await dialog.getByTestId('publish-tab').click();
+	await dialog.getByRole('tab', { name: 'Publish' }).click();
 	await dialog.getByTestId('publish-toggle').click();
 	const url = await dialog.getByTestId('publish-link').inputValue();
 	expect(url).toMatch(/\/share\/[A-Za-z0-9_-]{16,}$/);

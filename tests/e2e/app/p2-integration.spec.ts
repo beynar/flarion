@@ -120,7 +120,7 @@ test('the files property uploads through the real files route and the other tab 
 	await expect(mine).toBeVisible();
 	await mine.getByTestId('property-value').click();
 	const content = 'Q4 roadmap draft\n'.repeat(40);
-	await page.getByTestId('file-input').setInputFiles({ name: 'roadmap.txt', mimeType: 'text/plain', buffer: Buffer.from(content) });
+	await page.getByTestId('file-input').locator('input[type="file"]').setInputFiles({ name: 'roadmap.txt', mimeType: 'text/plain', buffer: Buffer.from(content) });
 	await expect(mine.getByTestId('file-chip')).toContainText('roadmap.txt', { timeout: 20_000 });
 	await page.keyboard.press('Escape');
 	await shot(page, 'files-property');
@@ -163,7 +163,7 @@ test('a cover uploaded on one tab renders on the other when files come from anot
 	await expect(page.getByTestId('page-cover')).toBeVisible();
 	await page.getByTestId('page-cover').hover();
 	await page.getByTestId('cover-change').click();
-	await page.getByTestId('cover-file').setInputFiles({ name: 'banner.png', mimeType: 'image/png', buffer: png(600, 200, [35, 131, 226]) });
+	await page.getByTestId('cover-file').locator('input[type="file"]').setInputFiles({ name: 'banner.png', mimeType: 'image/png', buffer: png(600, 200, [35, 131, 226]) });
 	await expect.poll(() => page.getByTestId('page-cover').getAttribute('style'), { timeout: 20_000 }).toContain('/files/');
 	await expect(bob.page.getByTestId('page-cover')).toBeVisible({ timeout: 20_000 });
 	await expect.poll(() => bob.page.getByTestId('page-cover').getAttribute('style'), { timeout: 20_000 }).toContain('/files/');

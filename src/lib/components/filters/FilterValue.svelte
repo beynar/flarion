@@ -1,5 +1,10 @@
 <script lang="ts">
 	import { Popover } from 'entasis/popover';
+	import { Button } from 'entasis/button';
+	import { Select } from 'entasis/select';
+	import { TextInput } from 'entasis/text-input';
+	import { NumberInput } from 'entasis/number-input';
+	import { Menu } from 'entasis/menu';
 	import PagePicker from '#lib/components/pickers/PagePicker.svelte';
 	import PersonPicker from '#lib/components/properties/PersonPicker.svelte';
 	import SelectPicker from '#lib/components/properties/SelectPicker.svelte';
@@ -12,7 +17,6 @@
 	import type { Member } from '#lib/shared/schemas.ts';
 	import DateOperandEditor from './DateOperandEditor.svelte';
 	import { DEFAULT_RELATIVE, NAMED_RANGE_CHOICES } from './logic.ts';
-	import { controlClass } from './styles.ts';
 
 	/**
 	 * The value editor of one condition, by the kind its operator takes: text, number, checked or not, an
@@ -60,41 +64,52 @@
 		else onValue({ kind: 'named', range: mode as NamedRange }, true);
 	}
 
-	const triggerClass = `${controlClass} inline-flex max-w-[220px] cursor-pointer items-center gap-1 text-left hover:bg-[color:var(--app-hover)]`;
+	const BOOLEANS = [
+		{ value: 'true', label: 'Checked' },
+		{ value: 'false', label: 'Unchecked' }
+	];
+	const rangeItems = [...NAMED_RANGE_CHOICES.map((r) => ({ value: r.range as string, label: r.label })), { value: 'between', label: 'Between…' }];
 </script>
 
 <span class="inline-flex min-w-0 flex-wrap items-center gap-1" data-testid="filter-value" data-kind={kind}>
 	{#if kind === 'none'}
 		<!-- no value -->
 	{:else if kind === 'text'}
-		<input
-			type="text"
-			class="{controlClass} w-44"
-			aria-label="Value"
+		<TextInput
+			size="small"
+			class="w-44"
 			placeholder="Type a value…"
 			disabled={readonly}
 			value={typeof value === 'string' ? value : ''}
-			oninput={(e) => onValue(e.currentTarget.value, false)}
+			inputAttrs={{ 'aria-label': 'Value' }}
+			onValueChange={(v) => onValue(v ?? '', false)}
 		/>
 	{:else if kind === 'number'}
-		<input
-			type="number"
-			class="{controlClass} w-32"
-			aria-label="Value"
+		<NumberInput
+			size="small"
+			class="w-32"
 			placeholder="Number"
+			showControls={false}
+			format={{ useGrouping: false, maximumFractionDigits: 10 }}
 			disabled={readonly}
-			value={typeof value === 'number' ? value : ''}
-			oninput={(e) => onValue(e.currentTarget.value === '' ? undefined : Number(e.currentTarget.value), false)}
+			value={typeof value === 'number' ? value : null}
+			inputAttrs={{ 'aria-label': 'Value' }}
+			onValueChange={(v) => onValue(v ?? undefined, false)}
 		/>
 	{:else if kind === 'boolean'}
-		<select class={controlClass} aria-label="Value" disabled={readonly} value={value === false ? 'false' : 'true'} onchange={(e) => onValue(e.currentTarget.value === 'true', true)}>
-			<option value="true">Checked</option>
-			<option value="false">Unchecked</option>
-		</select>
+		<Select
+			size="small"
+			items={BOOLEANS}
+			value={value === false ? 'false' : 'true'}
+			disabled={readonly}
+			alignItemWithTrigger={false}
+			triggerAttrs={{ 'aria-label': 'Value' }}
+			onValueChange={(v) => v && onValue(v === 'true', true)}
+		/>
 	{:else if kind === 'ref'}
 		<Popover position="bottom-start" focusOnOpen="first" modal={false} bind:open offset={4}>
 			{#snippet trigger(popover)}
-				<button type="button" class={triggerClass} disabled={readonly} aria-label="Value" aria-haspopup="dialog" data-testid="filter-ref" {@attach popover.trigger}>
+				<Button variant="outline" size="small" class="max-w-[220px] justify-start font-normal" disabled={readonly} label="Value" haspopup="dialog" data-testid="filter-ref" {@attach popover.trigger}>
 					{#if option}
 						<OptionTag color={optionColorName(option.color)} label={option.name} />
 					{:else if personLike && refText}
@@ -106,7 +121,7 @@
 					{:else}
 						<span class="text-[color:var(--app-text-tertiary)]">{personLike ? 'Select a person…' : optionLike ? 'Select an option…' : 'Select a page…'}</span>
 					{/if}
-				</button>
+				</Button>
 			{/snippet}
 			{#snippet children(popover)}
 				{#if def && optionLike}
@@ -123,16 +138,19 @@
 					/>
 				{:else if personLike}
 					{#if (op === 'contains' || op === 'not_contains') && onOp}
-						<button
-							type="button"
-							class="flex w-full items-center px-3 text-left text-sm hover:bg-[color:var(--app-hover)]"
-							style="height: var(--app-row-height)"
-							data-testid="filter-me"
-							onclick={() => {
-								onOp(op === 'contains' ? 'is_me' : 'is_not_me');
-								popover.close();
-							}}>Me</button
-						>
+						<Menu
+							items={[
+								{
+									type: 'option',
+									title: 'Me',
+									attrs: { 'data-testid': 'filter-me' },
+									onclick: () => {
+										onOp(op === 'contains' ? 'is_me' : 'is_not_me');
+										popover.close();
+									}
+								}
+							]}
+						/>
 					{/if}
 					<PersonPicker
 						{members}
@@ -160,12 +178,15 @@
 		<DateOperandEditor value={isOperand(value) ? value : { ...DEFAULT_RELATIVE }} {readonly} onChange={(v) => onValue(v, true)} />
 	{:else if kind === 'date_range'}
 		<span class="inline-flex min-w-0 flex-wrap items-center gap-1">
-			<select class={controlClass} aria-label="Range" data-testid="date-range-mode" disabled={readonly} value={rangeMode} onchange={(e) => pickRange(e.currentTarget.value)}>
-				{#each NAMED_RANGE_CHOICES as r (r.range)}
-					<option value={r.range}>{r.label}</option>
-				{/each}
-				<option value="between">Between…</option>
-			</select>
+			<Select
+				size="small"
+				items={rangeItems}
+				value={rangeMode}
+				disabled={readonly}
+				alignItemWithTrigger={false}
+				triggerAttrs={{ 'aria-label': 'Range', 'data-testid': 'date-range-mode' }}
+				onValueChange={(v) => v && pickRange(v)}
+			/>
 			{#if range.kind === 'between'}
 				<DateOperandEditor label="From" value={range.from} {readonly} onChange={(from) => onValue({ ...range, from }, true)} />
 				<span class="text-sm text-[color:var(--app-text-tertiary)]">and</span>

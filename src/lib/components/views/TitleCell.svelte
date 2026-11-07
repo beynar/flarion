@@ -4,6 +4,8 @@
 -->
 <script lang="ts">
 	import { tick } from 'svelte';
+	import { Button } from 'entasis/button';
+	import { TextInput } from 'entasis/text-input';
 	import { arrowsOutSimpleIcon } from 'entasis/icons/arrowsOutSimple';
 	import type { ViewRow } from '#lib/shared/protocol.ts';
 	import type { ViewEnv } from './env.ts';
@@ -19,13 +21,14 @@
 	const canEdit = $derived(env.editable && row.access !== 'read' && row.access !== 'comment');
 	let editing = $state(false);
 	let draft = $state('');
-	let input = $state<HTMLInputElement>();
+	let editor = $state<HTMLElement>();
 
 	async function start() {
 		if (!canEdit) return;
 		draft = row.title;
 		editing = true;
 		await tick();
+		const input = editor?.querySelector('input');
 		input?.focus();
 		input?.select();
 	}
@@ -44,27 +47,32 @@
 	});
 </script>
 
-<div class="title" data-testid="title-cell">
+<div class="title group/title" data-testid="title-cell">
 	{#if row.icon}<span class="icon" aria-hidden="true">{row.icon}</span>{/if}
 	{#if editing}
-		<input
-			bind:this={input}
-			class="edit"
-			aria-label="Title"
-			data-testid="title-input"
-			bind:value={draft}
-			onblur={commit}
-			onkeydown={(e) => {
-				e.stopPropagation();
-				if (e.key === 'Enter') {
-					e.preventDefault();
-					commit();
-				} else if (e.key === 'Escape') {
-					editing = false;
-				}
-			}}
-		/>
+		<div class="edit" bind:this={editor} data-testid="title-editor">
+			<TextInput
+				size="small"
+				value={draft}
+				onValueChange={(v) => (draft = v ?? '')}
+				inputAttrs={{
+					'aria-label': 'Title',
+					'data-testid': 'title-input',
+					onblur: commit,
+					onkeydown: (e) => {
+						e.stopPropagation();
+						if (e.key === 'Enter') {
+							e.preventDefault();
+							commit();
+						} else if (e.key === 'Escape') {
+							editing = false;
+						}
+					}
+				}}
+			/>
+		</div>
 	{:else}
+		<!-- Click-to-edit title: entasis has no inline-edit display component (the edit field itself is a TextInput). -->
 		<span
 			class="text"
 			class:placeholder={!row.title}
@@ -80,19 +88,22 @@
 				}
 			}}>{row.title || 'Untitled'}</span
 		>
-		<a
-			class="open"
+		<Button
+			variant="outline"
+			size="small"
 			href={env.href(row.id)}
+			label="Open {row.title || 'Untitled'}"
+			prefix={arrowsOutSimpleIcon}
 			data-testid="view-row-open"
-			aria-label="Open {row.title || 'Untitled'}"
-			onclick={(e) => {
+			class="absolute! right-0 h-[22px]! opacity-0 group-hover/title:opacity-100 focus-visible:opacity-100"
+			onclick={(e: MouseEvent) => {
 				if (e.metaKey || e.ctrlKey || e.shiftKey || e.button !== 0) return;
 				e.preventDefault();
 				env.open(row.id, e);
 			}}
 		>
-			{@render arrowsOutSimpleIcon({ size: 12 })} Open
-		</a>
+			Open
+		</Button>
 	{/if}
 </div>
 
@@ -130,37 +141,5 @@
 	.edit {
 		flex: 1;
 		min-width: 0;
-		height: 26px;
-		padding: 0 4px;
-		border: 1px solid var(--app-accent);
-		border-radius: var(--app-radius-control);
-		background: var(--app-page);
-		color: var(--app-text);
-		font: inherit;
-		font-weight: 500;
-		outline: none;
-	}
-	.open {
-		display: none;
-		flex-shrink: 0;
-		align-items: center;
-		gap: 3px;
-		height: 22px;
-		padding: 0 6px;
-		border: 1px solid var(--app-hairline-strong);
-		border-radius: var(--app-radius-control);
-		background: var(--app-page);
-		color: var(--app-text-secondary);
-		font-size: 12px;
-		text-decoration: none;
-		box-shadow: 0 1px 2px rgba(15, 15, 15, 0.08);
-	}
-	.open:hover {
-		background: var(--app-hover);
-		color: var(--app-text);
-	}
-	.title:hover .open,
-	.open:focus-visible {
-		display: inline-flex;
 	}
 </style>

@@ -1,6 +1,8 @@
 <script lang="ts">
 	import { Breadcrumbs, type BreadcrumbItem } from 'entasis/breadcrumbs';
 	import { Button } from 'entasis/button';
+	import { Chip } from 'entasis/chip';
+	import { tooltip } from 'entasis/tooltip';
 	import { sidebarSimpleIcon } from 'entasis/icons/sidebarSimple';
 	import { starIcon, starIconFill } from 'entasis/icons/star';
 	import { dotsThreeIcon } from 'entasis/icons/dotsThree';
@@ -19,6 +21,7 @@
 	import type { SidebarApi } from 'entasis/sidebar';
 	import type { PresenceUser } from '#lib/shared/protocol.ts';
 	import PresenceAvatars from './PresenceAvatars.svelte';
+	import TipButton from './TipButton.svelte';
 
 	let {
 		sidebar,
@@ -105,10 +108,12 @@
 	style="height: var(--app-topbar-height)"
 >
 	{#if showToggle}
-		<Button
+		<TipButton
 			variant="ghost"
 			size="small"
-			label="Open sidebar"
+			tip="Open sidebar"
+			keys={['⌘', '\\']}
+			position="bottom-start"
 			prefix={sidebarSimpleIcon}
 			onclick={() => sidebar.toggle()}
 		/>
@@ -121,23 +126,28 @@
 	<div class="flex shrink-0 items-center gap-0.5">
 		{#if offline || reconnecting}
 			<span
-				class="mr-1 inline-flex items-center gap-1 rounded-full bg-[color:var(--app-hover)] px-2 text-xs text-[color:var(--app-text-secondary)]"
-				style="height: var(--app-button-height-small)"
+				class="mr-1 inline-flex"
 				role="status"
 				data-testid="network-status"
-				title={offline
-					? 'No connection. You can keep writing in pages; properties and the page tree need a connection.'
-					: 'Reconnecting…'}
+				{@attach tooltip({
+					content: offline
+						? 'No connection. You can keep writing in pages; properties and the page tree need a connection.'
+						: 'Reconnecting…',
+					position: 'bottom'
+				})}
 			>
-				{@render wifiSlashIcon({ size: 14 })}
-				{offline ? 'Offline' : 'Reconnecting…'}
+				<Chip variant="soft" color="neutral" size="small">
+					{#snippet prefix()}{@render wifiSlashIcon({ size: 14 })}{/snippet}
+					{offline ? 'Offline' : 'Reconnecting…'}
+				</Chip>
 			</span>
 		{/if}
-		<PresenceAvatars users={presence} max={3} size={22} />
-		<Button
+		<PresenceAvatars users={presence} max={3} />
+		<TipButton
 			variant="ghost"
 			size="small"
-			label="Search (⌘K)"
+			tip="Search"
+			keys={['⌘', 'K']}
 			prefix={magnifyingGlassIcon}
 			class="md:hidden"
 			onclick={onSearch}
@@ -147,34 +157,44 @@
 				{pending > 0 ? 'Saving…' : 'Saved'}
 			</span>
 			{#if lock?.locked}
-				<span class="mr-1 inline-flex items-center text-[color:var(--app-text-secondary)]" title="This page is locked" data-testid="lock-indicator">
-					{@render lockIcon({ size: 14 })}
+				<span
+					class="mr-1 inline-flex"
+					role="img"
+					aria-label="This page is locked"
+					data-testid="lock-indicator"
+					{@attach tooltip({ content: 'This page is locked', position: 'bottom' })}
+				>
+					<Chip variant="soft" color="neutral" size="small">
+						{#snippet prefix()}{@render lockIcon({ size: 14 })}{/snippet}
+					</Chip>
 				</span>
 			{/if}
 			<Button variant="ghost" size="small" class="hidden md:inline-flex" onclick={onShare} data-testid="share-button">Share</Button>
-			<Button
+			<TipButton
 				variant="ghost"
 				size="small"
-				label={favorite ? 'Remove from favorites' : 'Add to favorites'}
+				tip={favorite ? 'Remove from favorites' : 'Add to favorites'}
 				prefix={favorite ? starIconFill : starIcon}
 				onclick={onToggleFavorite}
 			/>
 		{/if}
-		<Button
+		<TipButton
 			variant="ghost"
 			size="small"
-			label={dark ? 'Switch to light mode (⌘⇧L)' : 'Switch to dark mode (⌘⇧L)'}
+			tip={dark ? 'Switch to light mode' : 'Switch to dark mode'}
+			keys={['⌘', '⇧', 'L']}
+			position="bottom-end"
 			prefix={dark ? sunIcon : moonIcon}
 			onclick={onToggleDark}
 		/>
 		{#if pageMenu.length > 0}
 			<PopupMenu position="bottom-end" menu={{ items: pageMenu }}>
 				{#snippet trigger(popover)}
-					<Button variant="ghost" size="small" label="More actions" prefix={dotsThreeIcon} data-testid="page-menu" {@attach popover.trigger} />
+					<TipButton variant="ghost" size="small" tip="More actions" position="bottom-end" prefix={dotsThreeIcon} data-testid="page-menu" attach={popover.trigger} />
 				{/snippet}
 			</PopupMenu>
 		{:else}
-			<Button variant="ghost" size="small" label="More actions" prefix={dotsThreeIcon} />
+			<TipButton variant="ghost" size="small" tip="More actions" position="bottom-end" prefix={dotsThreeIcon} />
 		{/if}
 	</div>
 </header>

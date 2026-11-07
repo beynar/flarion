@@ -4,6 +4,8 @@
 -->
 <script lang="ts">
 	import { SortableList } from 'entasis/sortable-list';
+	import { Button } from 'entasis/button';
+	import { Empty } from 'entasis/empty';
 	import { plusIcon } from 'entasis/icons/plus';
 	import type { ViewData } from '#lib/client/workspace.svelte.ts';
 	import type { ViewRow } from '#lib/shared/protocol.ts';
@@ -59,7 +61,7 @@
 			</a>
 		{/snippet}
 		{#snippet empty()}
-			<div class="none" data-testid="view-empty">No pages yet</div>
+			<Empty size="small" title="No pages yet" data-testid="view-empty" />
 		{/snippet}
 	</SortableList>
 	{#if data.rows.length < data.total}
@@ -67,7 +69,7 @@
 	{/if}
 	<div class="foot">
 		{#if env.editable}
-			<button type="button" class="add" data-testid="view-add-row" onclick={() => void env.newRow()}>{@render plusIcon({ size: 14 })} New page</button>
+			<Button variant="ghost" size="small" prefix={plusIcon} data-testid="view-add-row" onclick={() => void env.newRow()}>New page</Button>
 		{/if}
 		<span class="count" data-testid="view-count">{data.total} {data.total === 1 ? 'page' : 'pages'}</span>
 	</div>
@@ -104,10 +106,6 @@
 		color: var(--app-text-tertiary);
 		font-weight: 400;
 	}
-	.none {
-		padding: 12px 6px;
-		color: var(--app-text-secondary);
-	}
 	.sentinel {
 		height: 1px;
 	}
@@ -118,19 +116,6 @@
 		padding: 0 4px;
 		font-size: 13px;
 		color: var(--app-text-secondary);
-	}
-	.add {
-		display: inline-flex;
-		align-items: center;
-		gap: 4px;
-		height: 26px;
-		padding: 0 8px;
-		border-radius: var(--app-radius-control);
-		cursor: pointer;
-	}
-	.add:hover {
-		background: var(--app-hover);
-		color: var(--app-text);
 	}
 	.count {
 		margin-left: auto;

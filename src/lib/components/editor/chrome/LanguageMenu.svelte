@@ -1,18 +1,24 @@
 <script lang="ts">
-	import { float } from './float.js';
+	import Floating from './Floating.svelte';
 	import { Input } from '../ui/index.ts';
+	import { MenuOption } from 'entasis/menu-option';
 	import { words } from './words.svelte.js';
 	import type { LanguageMenu } from 'edytor';
 
 	/**
-	 * The code language list, drawn for `createCodePlugin({ menu })`: a
-	 * search field holding the keys (a `combobox` naming the highlighted
-	 * row) over the listbox of languages.
+	 * The code language list, drawn for `createCodePlugin({ menu })`: a search field holding the keys (a `combobox`
+	 * naming the highlighted row) over the listbox of languages. Entasis `Popover`, `TextInput` and `MenuOption` rows.
 	 */
 	let { menu }: { menu: LanguageMenu } = $props();
 </script>
 
-<div data-edytor-code-language-menu {@attach float(() => menu.anchor, { gap: 4 })}>
+<Floating
+	anchor={() => menu.anchor}
+	gap={4}
+	haspopup="listbox"
+	class="box-border flex w-[220px] flex-col p-1"
+	data-edytor-code-language-menu
+>
 	<Input
 		type="text"
 		placeholder={words.code.search}
@@ -24,95 +30,30 @@
 		oninput={(event) => menu.search(event.currentTarget.value)}
 		{@attach menu.keys}
 	/>
-	<div data-edytor-code-language-list aria-label={words.code.language} {@attach menu.popup}>
+	<div class="mt-1 max-h-[280px] overflow-y-auto" data-edytor-code-language-list aria-label={words.code.language} {@attach menu.popup}>
 		{#each menu.items as item, index (item.item.id)}
-			<!-- The field keeps the focus (its keys): a row is pressed, never focused. Its
-			role and ARIA are the `option` attachment's. -->
-			<!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-			<div
-				data-edytor-code-language-option={item.item.id}
-				data-current={item.current ? '' : undefined}
-				data-selected={item.selected}
-				onmousemove={item.select}
-				onclick={item.run}
+			<!-- The field keeps the focus (its keys): a row is pressed, never focused. Its role and ARIA are the
+			`option` attachment's. -->
+			<MenuOption
+				role="option"
+				size="small"
+				density="compact"
+				highlighted={item.selected}
 				{@attach menu.option(index)}
+				attrs={{
+					'data-edytor-code-language-option': item.item.id,
+					'data-current': item.current ? '' : undefined,
+					'data-selected': item.selected,
+					onpointermove: item.select
+				}}
+				onclick={item.run}
 			>
 				{item.item.label}
-			</div>
+				{#snippet suffix()}{#if item.current}<span class="text-sm">✓</span>{/if}{/snippet}
+			</MenuOption>
 		{/each}
 	</div>
 	{#if menu.rows.length === 0}
-		<div data-edytor-code-language-empty role="status">{words.code.noResults}</div>
+		<div class="text-neutral/70 px-2 py-1" data-edytor-code-language-empty role="status">{words.code.noResults}</div>
 	{/if}
-</div>
-
-<style>
-	[data-edytor-code-language-menu] {
-		box-sizing: border-box;
-		display: flex;
-		flex-direction: column;
-		width: 220px;
-		padding: 4px;
-		border-radius: 10px;
-		background: var(--edytor-menu-background, var(--app-page));
-		color: var(--edytor-menu-color, var(--app-text));
-		box-shadow:
-			0 14px 28px -6px rgba(0, 0, 0, 0.1),
-			0 2px 4px -1px rgba(0, 0, 0, 0.06),
-			0 0 0 1px var(--app-hairline);
-		font-size: 14px;
-		line-height: 20px;
-		font-family:
-			ui-sans-serif,
-			-apple-system,
-			BlinkMacSystemFont,
-			'Segoe UI Variable Display',
-			'Segoe UI',
-			Helvetica,
-			Arial,
-			sans-serif;
-	}
-	[data-edytor-code-language-menu] :global(input) {
-		box-sizing: border-box;
-		width: 100%;
-		margin: 0 0 4px;
-		padding: 4px 8px;
-		border: 1px solid var(--app-hairline);
-		border-radius: 6px;
-		background: var(--app-hover);
-		color: inherit;
-		font: inherit;
-		outline: none;
-	}
-	[data-edytor-code-language-menu] :global(input:focus) {
-		border-color: var(--edytor-code-accent, var(--app-accent));
-		box-shadow: 0 0 0 2px color-mix(in oklab, var(--app-accent) 20%, transparent);
-	}
-	[data-edytor-code-language-list] {
-		max-height: 280px;
-		overflow-y: auto;
-	}
-	[data-edytor-code-language-option] {
-		display: flex;
-		align-items: center;
-		justify-content: space-between;
-		gap: 8px;
-		height: 28px;
-		padding: 0 8px;
-		border-radius: 6px;
-		white-space: nowrap;
-		cursor: pointer;
-		user-select: none;
-	}
-	/* The block's own language. */
-	[data-edytor-code-language-option][data-current]::after {
-		content: '✓';
-	}
-	[data-edytor-code-language-option][data-selected='true'] {
-		background: var(--app-hairline);
-	}
-	[data-edytor-code-language-empty] {
-		padding: 4px 8px;
-		color: var(--app-text-secondary);
-	}
-</style>
+</Floating>

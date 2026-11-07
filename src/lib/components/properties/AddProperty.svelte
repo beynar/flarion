@@ -2,6 +2,8 @@
 	import { Popover } from 'entasis/popover';
 	import { Command } from 'entasis/command';
 	import { Button } from 'entasis/button';
+	import { TextInput } from 'entasis/text-input';
+	import { focusInput } from '#lib/components/pickers/focus.ts';
 	import { plusIcon } from 'entasis/icons/plus';
 	import { caretLeftIcon } from 'entasis/icons/caretLeft';
 	import type { PropertyDef, PropertyType } from '#lib/shared/property-types.ts';
@@ -68,16 +70,18 @@
 
 <Popover position="bottom-start" focusOnOpen="first" modal={false} bind:open offset={4}>
 	{#snippet trigger(popover)}
-		<button
-			type="button"
-			class="inline-flex w-fit items-center gap-1.5 rounded-[var(--app-radius-control)] px-1.5 text-sm text-[color:var(--app-text-tertiary)] hover:bg-[color:var(--app-hover)] hover:text-[color:var(--app-text-secondary)]"
-			style="height: var(--app-button-height)"
+		<Button
+			variant="ghost"
+			color="neutral"
+			size="small"
+			class="font-normal text-[color:var(--app-text-tertiary)]"
+			prefix={plusIcon}
 			data-testid="add-property"
-			aria-label="Add a property"
+			label="Add a property"
 			{@attach popover.trigger}
 		>
-			{@render plusIcon({ size: 14 })} Add a property
-		</button>
+			Add a property
+		</Button>
 	{/snippet}
 	{#snippet children(popover)}
 		{#if step}
@@ -90,20 +94,10 @@
 					create(() => popover.close());
 				}}
 			>
-				<button type="button" class="flex w-fit items-center gap-1 rounded px-1 text-sm text-[color:var(--app-text-secondary)] hover:bg-[color:var(--app-hover)]" onclick={() => (step = null)}>
-					{@render caretLeftIcon({ size: 14 })} New property
-				</button>
-				<input
-					class="rounded-[var(--app-radius-control)] border border-[color:var(--app-hairline-strong)] bg-[color:var(--app-page)] px-2 text-sm outline-none focus:border-[color:var(--app-accent)]"
-					style="height: var(--app-input-height)"
-					aria-label="Property name"
-					placeholder="Property name"
-					bind:value={name}
-					{@attach (el) => {
-						el.focus();
-						el.select();
-					}}
-				/>
+				<Button type="button" variant="ghost" color="neutral" size="small" class="w-fit" prefix={caretLeftIcon} onclick={() => (step = null)}>New property</Button>
+				<div {@attach focusInput}>
+					<TextInput size="small" placeholder="Property name" bind:value={name} inputAttrs={{ 'aria-label': 'Property name' }} />
+				</div>
 				<div class="flex items-center gap-1.5 px-1 text-xs text-[color:var(--app-text-tertiary)]">
 					{@render icon({ size: 14 })}
 					{typeLabel(step.type)}

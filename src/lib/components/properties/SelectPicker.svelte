@@ -1,6 +1,8 @@
 <script lang="ts">
 	import { tick } from 'svelte';
 	import { Command } from 'entasis/command';
+	import { Button } from 'entasis/button';
+	import { gearSixIcon } from 'entasis/icons/gearSix';
 	import { checkIcon } from 'entasis/icons/check';
 	import { plusIcon } from 'entasis/icons/plus';
 	import OptionTag from '#lib/components/shell/OptionTag.svelte';
@@ -91,16 +93,12 @@
 				{canEdit ? 'Type to create an option.' : 'No options.'}
 			</div>
 		{/snippet}
+		{#snippet footer()}
+			{#if canEdit}
+				<div class="border-t border-[color:var(--app-hairline)] p-1">
+					<Button variant="ghost" color="neutral" size="small" fullWidth prefix={gearSixIcon} class="justify-start font-normal text-[color:var(--app-text-secondary)]" data-testid="edit-options" onclick={onEditOptions}>Edit options</Button>
+				</div>
+			{/if}
+		{/snippet}
 	</Command>
-	{#if canEdit}
-		<button
-			type="button"
-			class="border-t border-[color:var(--app-hairline)] px-3 text-left text-sm text-[color:var(--app-text-secondary)] hover:bg-[color:var(--app-hover)]"
-			style="height: var(--app-row-height)"
-			data-testid="edit-options"
-			onclick={onEditOptions}
-		>
-			Edit options
-		</button>
-	{/if}
 </div>

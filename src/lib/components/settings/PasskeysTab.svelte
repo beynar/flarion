@@ -1,11 +1,14 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
 	import { Button } from 'entasis/button';
-	import { TextInput } from 'entasis/text-input';
+	import { DataTable, type DataTableColumn } from 'entasis/data-table';
+	import { Empty } from 'entasis/empty';
 	import { toast } from 'entasis/toast';
 	import { fingerprintIcon } from 'entasis/icons/fingerprint';
+	import { pencilIcon } from 'entasis/icons/pencil';
 	import { isMock } from '#lib/client/runtime.ts';
 	import { authClient } from '#lib/client/auth.ts';
+	import { listTheme } from '#lib/components/lists/list-theme.ts';
 
 	interface PasskeyInfo {
 		id: string;
@@ -60,33 +63,18 @@
 		}
 	}
 
-	// Renaming one passkey at a time: its id and the draft name.
-	let editing = $state<string | null>(null);
-	let draft = $state<string | null>('');
-	let saving = $state(false);
-
-	function startRename(key: PasskeyInfo) {
-		editing = key.id;
-		draft = key.name || '';
-	}
-
-	async function saveRename(event: SubmitEvent) {
-		event.preventDefault();
-		const id = editing;
-		const name = draft?.trim();
-		if (!id || !name) return;
-		saving = true;
+	/** The table's text editor commits here (Enter or blur); a rejection keeps the editor open on its error. */
+	async function rename({ rowId, value }: { rowId: string; value: unknown }) {
+		const name = String(value ?? '').trim();
+		if (!name) throw new Error('A passkey needs a name');
 		try {
 			if (!isMock()) {
-				const { error } = await authClient.passkey.updatePasskey({ id, name });
+				const { error } = await authClient.passkey.updatePasskey({ id: rowId, name });
 				if (error) throw new Error(error.message ?? 'Request failed');
 			}
-			passkeys = passkeys.map((p) => (p.id === id ? { ...p, name } : p));
-			editing = null;
+			passkeys = passkeys.map((p) => (p.id === rowId ? { ...p, name } : p));
 		} catch (e) {
-			toast.danger({ title: 'Could not rename the passkey', description: (e as Error).message });
-		} finally {
-			saving = false;
+			throw new Error(`Could not rename the passkey: ${(e as Error).message}`);
 		}
 	}
 
@@ -103,7 +91,53 @@
 	}
 
 	const when = (v?: string | Date | null) => (v ? new Date(v).toLocaleDateString(undefined, { dateStyle: 'medium' }) : '');
+
+	const columns: DataTableColumn<PasskeyInfo>[] = [
+		{ id: 'name', accessor: (k) => k.name || 'Passkey', header: 'Name', cell: nameCell, editor: { type: 'text', placeholder: 'Passkey name' } },
+		{ id: 'details', accessor: (k) => when(k.createdAt), header: 'Added', cell: detailsCell, class: 'max-md:hidden', headerClass: 'max-md:hidden' },
+		{ id: 'actions', accessor: 'id', header: '', cell: removeCell, align: 'end' }
+	];
+	const theme = listTheme({ columns: 'max-md:grid-cols-[minmax(0,1fr)_96px]! md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_96px]!' });
 </script>
+
+{#snippet nameCell(p: { row: PasskeyInfo; startEditing: () => void })}
+	<span class="flex min-w-0 items-center gap-2">
+		<span class="text-[color:var(--app-text-tertiary)]">{@render fingerprintIcon({ size: 16 })}</span>
+		<span class="truncate" data-testid="passkey-name">{p.row.name || 'Passkey'}</span>
+		<!-- stopPropagation: the editor commits on any document click, and this click is still travelling up when it opens (entasis DataTable). -->
+		<Button
+			variant="ghost"
+			size="small"
+			prefix={pencilIcon}
+			label="Rename"
+			onclick={(event) => {
+				event.stopPropagation();
+				p.startEditing();
+			}}
+		/>
+	</span>
+{/snippet}
+
+{#snippet detailsCell(p: { row: PasskeyInfo })}
+	<span class="truncate text-xs text-[color:var(--app-text-tertiary)]">
+		{p.row.backedUp ? 'Synced' : 'This device only'}{p.row.createdAt ? ` · added ${when(p.row.createdAt)}` : ''}
+	</span>
+{/snippet}
+
+{#snippet removeCell(p: { row: PasskeyInfo })}
+	<Button
+		variant="ghost"
+		size="small"
+		color="danger"
+		disabled={passkeys.length < 2}
+		label={passkeys.length < 2 ? 'Your last passkey cannot be removed' : `Remove ${p.row.name || 'passkey'}`}
+		onclick={() => remove(p.row.id)}>Remove</Button
+	>
+{/snippet}
+
+{#snippet none()}
+	<Empty size="small" title="No passkeys yet." />
+{/snippet}
 
 <section aria-labelledby="passkeys-h" data-testid="passkeys-tab">
 	<div class="mb-4 flex items-center gap-3">
@@ -116,40 +150,18 @@
 
 	{#if unavailable}
 		<p class="text-sm text-[color:var(--app-text-secondary)]">Passkey management is not available in this build.</p>
-	{:else if loading}
-		<div class="h-9 animate-pulse rounded bg-[color:var(--app-hover)]" aria-busy="true"></div>
 	{:else}
-		<ul class="m-0 flex list-none flex-col border-t border-[color:var(--app-hairline)] p-0">
-			{#each passkeys as key (key.id)}
-				<li class="flex items-center gap-3 border-b border-[color:var(--app-hairline)] text-sm" style="min-height: var(--app-table-row-height)">
-					<span class="text-[color:var(--app-text-tertiary)]">{@render fingerprintIcon({ size: 16 })}</span>
-					{#if editing === key.id}
-						<form class="flex min-w-0 flex-1 items-center gap-2 py-1" onsubmit={saveRename}>
-							<div class="min-w-0 flex-1">
-								<TextInput placeholder="Passkey name" bind:value={draft} inputAttrs={{ 'aria-label': 'Passkey name' }} />
-							</div>
-							<Button type="submit" size="small" loading={saving} disabled={!draft?.trim()}>Save</Button>
-							<Button type="button" variant="ghost" size="small" onclick={() => (editing = null)}>Cancel</Button>
-						</form>
-					{:else}
-						<span class="min-w-0 flex-1 truncate" data-testid="passkey-name">{key.name || 'Passkey'}</span>
-						<span class="hidden text-xs text-[color:var(--app-text-tertiary)] md:inline">
-							{key.backedUp ? 'Synced' : 'This device only'}{key.createdAt ? ` · added ${when(key.createdAt)}` : ''}
-						</span>
-						<Button variant="ghost" size="small" onclick={() => startRename(key)}>Rename</Button>
-						<Button
-							variant="ghost"
-							size="small"
-							color="danger"
-							disabled={passkeys.length < 2}
-							label={passkeys.length < 2 ? 'Your last passkey cannot be removed' : `Remove ${key.name || 'passkey'}`}
-							onclick={() => remove(key.id)}>Remove</Button
-						>
-					{/if}
-				</li>
-			{:else}
-				<li class="py-3 text-sm text-[color:var(--app-text-tertiary)]">No passkeys yet.</li>
-			{/each}
-		</ul>
+		<DataTable
+			items={passkeys}
+			{columns}
+			getRowId={(k) => k.id}
+			density="compact"
+			pagination={false}
+			{loading}
+			empty={none}
+			caption="Passkeys"
+			{theme}
+			onCellCommit={rename}
+		/>
 	{/if}
 </section>

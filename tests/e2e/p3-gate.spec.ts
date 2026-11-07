@@ -419,8 +419,9 @@ test('5. trashing a page with subpages, database rows, a body, a comment and a g
 	// A grant for Bob on the page, so there is a share to keep.
 	await page.getByTestId('share-button').click();
 	const dialog = page.getByTestId('share-dialog');
-	await dialog.getByTestId('share-invite-input').fill(bob.email);
-	await dialog.getByTestId('share-invite-level').selectOption('comment');
+	await dialog.getByTestId('share-invite-input').getByRole('combobox').fill(bob.email);
+	await dialog.getByTestId('share-invite-level').click();
+	await dialog.page().getByRole('menuitemradio', { name: 'Can comment' }).click();
 	await dialog.getByTestId('share-invite-submit').click();
 	await expect(dialog.getByTestId('share-grant-row').filter({ hasText: bob.email })).toBeVisible();
 	await page.keyboard.press('Escape');

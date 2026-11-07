@@ -3,7 +3,7 @@
  *
  *   E2E_PORT=5473 pnpm exec playwright test -c tests/e2e/app/playwright.config.ts p3-views.spec.ts
  */
-import { expect, test, type Browser, type Page } from '@playwright/test';
+import { expect, test, type Browser, type Locator, type Page } from '@playwright/test';
 import { acceptInvite, expectLive, expectRowEventually, inviteMember, newPerson, row, signUpAndCreateWorkspace, type Person } from './helpers';
 import { cellOf, dayFromNow, expectHostReady, host, rowTitles, setValueVia, shotsP3, tableRow } from './p3-helpers';
 
@@ -27,6 +27,12 @@ test.afterAll(async () => {
 		await person.context.close();
 	}
 });
+
+/** An entasis Select: press its trigger, then the option in the list. */
+async function choose(page: Page, trigger: Locator, name: string) {
+	await trigger.click();
+	await page.getByRole('option', { name, exact: true }).click();
+}
 
 async function addProperty(page: Page, type: string, name: string) {
 	await page.getByTestId('add-property').first().click();
@@ -75,8 +81,9 @@ test('Ada creates a full-page database and adds properties', async () => {
 	// Share it with Bob (can edit): the database is private to Ada until then.
 	await page.getByTestId('share-button').click();
 	const dialog = page.getByTestId('share-dialog');
-	await dialog.getByTestId('share-invite-input').fill(bob.email);
-	await dialog.getByTestId('share-invite-level').selectOption('update');
+	await dialog.getByTestId('share-invite-input').getByRole('combobox').fill(bob.email);
+	await dialog.getByTestId('share-invite-level').click();
+	await dialog.page().getByRole('menuitemradio', { name: 'Can edit' }).click();
 	await dialog.getByTestId('share-invite-submit').click();
 	await expect(dialog.getByTestId('share-grant-row').filter({ hasText: bob.email })).toBeVisible();
 	await page.keyboard.press('Escape');
@@ -169,8 +176,8 @@ test('a filter on the table removes a row live when Bob changes it', async () =>
 	await page.getByTestId('view-filter').click();
 	await page.getByTestId('filter-add-condition').first().click();
 	const condition = page.getByTestId('filter-condition').first();
-	await condition.getByTestId('filter-prop').selectOption({ label: 'Status' });
-	await condition.getByTestId('filter-op').selectOption({ label: 'is not' });
+	await choose(page, condition.getByTestId('filter-prop'), 'Status');
+	await choose(page, condition.getByTestId('filter-op'), 'is not');
 	await condition.getByTestId('filter-ref').click();
 	await page.locator('div[role="option"]').filter({ hasText: 'Done' }).click();
 	await expect(page.getByTestId('view-filter')).toContainText('1 filter');
@@ -280,8 +287,8 @@ test('views are renamed, duplicated and deleted; properties, sort and search wor
 	await page.getByTestId('view-sort').click();
 	await page.getByTestId('sort-add').click();
 	await expect(page.getByTestId('sort-row')).toHaveCount(1);
-	await page.getByTestId('sort-row').first().getByTestId('sort-prop').selectOption({ label: 'Title' });
-	await page.getByTestId('sort-row').first().getByTestId('sort-dir').selectOption({ index: 1 });
+	await choose(page, page.getByTestId('sort-row').first().getByTestId('sort-prop'), 'Title');
+	await choose(page, page.getByTestId('sort-row').first().getByTestId('sort-dir'), 'Descending');
 	await expect(page.getByTestId('view-sort')).toContainText('1 sort');
 	await expect(rowTitles(page).first()).toContainText('Write the spec', { timeout: 15_000 });
 	await shotsP3(page, 'sort');
@@ -306,6 +313,7 @@ test('views are renamed, duplicated and deleted; properties, sort and search wor
 	await expect(page.getByRole('tab', { name: 'All tasks copy' })).toBeVisible();
 	await page.getByTestId('view-menu').click();
 	await page.getByTestId('view-delete').click();
+	// entasis confirmation(): the dialog's confirm button.
 	await page.getByTestId('view-delete-confirm').click();
 	await expect(page.getByRole('tab', { name: 'All tasks copy' })).toHaveCount(0);
 	await expect(page.getByRole('tab', { name: 'All tasks', exact: true })).toBeVisible();

@@ -2,6 +2,11 @@
 	import { goto } from '$app/navigation';
 	import { onMount } from 'svelte';
 	import { PopupMenu } from 'entasis/popup-menu';
+	import { ContextMenu } from 'entasis/context-menu';
+	import { Button } from 'entasis/button';
+	import { Skeleton } from 'entasis/skeleton';
+	import { Spinner } from 'entasis/spinner';
+	import { TextInput } from 'entasis/text-input';
 	import type { MenuItem } from 'entasis/menu';
 	import { toast } from 'entasis/toast';
 	import { caretRightIcon } from 'entasis/icons/caretRight';
@@ -24,7 +29,9 @@
 	import TeamspaceSettingsDialog from '#lib/components/teamspaces/TeamspaceSettingsDialog.svelte';
 	import { trashWithUndo } from '#lib/components/trash/trash-actions.ts';
 	import MovePageDialog from './MovePageDialog.svelte';
+	import { focusInput } from '#lib/components/pickers/focus.ts';
 	import PresenceAvatars from './PresenceAvatars.svelte';
+	import TipButton from './TipButton.svelte';
 	import {
 		pageRow,
 		scrollParent,
@@ -179,10 +186,6 @@
 		renamingId = null;
 		if (id && renameValue !== (store.page(id)?.title ?? '')) store.setTitle(id, renameValue.trim());
 	}
-	const focusSelect = (node: HTMLInputElement) => {
-		node.focus();
-		node.select();
-	};
 
 	// ───────────── menus ─────────────
 	type MenuTarget = { kind: 'page'; id: string } | { kind: 'teamspace'; id: string } | { kind: 'teamspaces' };
@@ -195,9 +198,14 @@
 		menuRef = anchor;
 		menuOpen = true;
 	}
-	function contextMenu(event: MouseEvent, target: MenuTarget) {
-		event.preventDefault();
-		openMenu(target, { getBoundingClientRect: () => new DOMRect(event.clientX, event.clientY, 0, 0) });
+	/** What a right-click, the ContextMenu key or Shift+F10 landed on: a page row or a teamspace header. */
+	function targetOf(event?: Event): MenuTarget | null {
+		const el = event?.target instanceof HTMLElement ? event.target : null;
+		const row = el?.closest<HTMLElement>('[data-page-id]');
+		if (row?.dataset.pageId) return { kind: 'page', id: row.dataset.pageId };
+		const section = el?.closest<HTMLElement>('[data-section^="ts:"]');
+		if (section?.dataset.section) return { kind: 'teamspace', id: section.dataset.section.slice(3) };
+		return null;
 	}
 	function menuButton(event: Event, target: MenuTarget) {
 		event.preventDefault();
@@ -302,10 +310,8 @@
 		const row = el.closest<HTMLElement>('[data-page-id]');
 		const id = row?.dataset.pageId;
 		if (!id || !row) return;
-		if (event.key === 'ContextMenu' || (event.shiftKey && event.key === 'F10')) {
-			event.preventDefault();
-			openMenu({ kind: 'page', id }, row);
-		} else if (event.altKey && (event.key === 'ArrowUp' || event.key === 'ArrowDown')) {
+		// The ContextMenu key and Shift+F10 belong to entasis' ContextMenu around the tree.
+		if (event.altKey && (event.key === 'ArrowUp' || event.key === 'ArrowDown')) {
 			event.preventDefault();
 			void nudge(id, event.key === 'ArrowUp' ? -1 : 1);
 		} else if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
@@ -326,33 +332,40 @@
 </script>
 
 {#snippet add(label: string, target: { parentId: string | null; teamspaceId?: string | null })}
-	<button
-		type="button"
-		class="grid size-5 shrink-0 place-items-center rounded-[4px] text-[color:var(--app-text-tertiary)] hover:bg-[color:var(--app-active)] hover:text-[color:var(--app-text)] disabled:cursor-not-allowed disabled:opacity-40"
-		aria-label={label}
-		title={store.canEdit ? label : 'Offline: pages can be added when you reconnect'}
+	<TipButton
+		variant="ghost"
+		color="neutral"
+		size="small"
+		squared
+		class="size-5! min-h-0! shrink-0 rounded-[4px] p-0! text-[color:var(--app-text-tertiary)]"
+		tip={store.canEdit ? label : 'Offline: pages can be added when you reconnect'}
+		{label}
+		position="bottom"
+		prefix={plusIcon}
 		disabled={!store.canEdit}
 		onclick={(e) => {
 			e.preventDefault();
 			e.stopPropagation();
 			onCreate(target);
 		}}
-	>
-		{@render plusIcon({ size: 14 })}
-	</button>
+	/>
 {/snippet}
 
 {#snippet more(label: string, target: MenuTarget)}
-	<button
-		type="button"
-		class="grid size-5 shrink-0 place-items-center rounded-[4px] text-[color:var(--app-text-tertiary)] hover:bg-[color:var(--app-active)] hover:text-[color:var(--app-text)]"
-		aria-label={label}
-		aria-haspopup="menu"
+	<TipButton
+		variant="ghost"
+		color="neutral"
+		size="small"
+		squared
+		class="size-5! min-h-0! shrink-0 rounded-[4px] p-0! text-[color:var(--app-text-tertiary)]"
+		tip="Delete, duplicate and more"
+		{label}
+		position="bottom"
+		haspopup="menu"
+		prefix={dotsThreeIcon}
 		data-testid="row-menu"
 		onclick={(e) => menuButton(e, target)}
-	>
-		{@render dotsThreeIcon({ size: 14 })}
-	</button>
+	/>
 {/snippet}
 
 {#snippet pageIcon(page: PageEntity)}
@@ -392,39 +405,45 @@
 			data-testid="tree-row"
 			data-page-id={page.id}
 			use:pageRow={{ id: page.id, onDragStart: () => (dragId = page.id), onDragEnd: () => (dragId = null) }}
-			oncontextmenu={(e) => contextMenu(e, { kind: 'page', id: page.id })}
 		>
 			{#if mark}{@render indicator(mark, depth)}{/if}
 			{#if page.hasChildren}
-				<button
-					type="button"
-					class="grid size-5 shrink-0 place-items-center rounded-[4px] text-[color:var(--app-text-tertiary)] hover:bg-[color:var(--app-active)]"
-					aria-label={state === 'collapsed' ? `Expand ${page.title || 'Untitled'}` : `Collapse ${page.title || 'Untitled'}`}
-					aria-expanded={state !== 'collapsed'}
+				<Button
+					variant="ghost"
+					color="neutral"
+					size="small"
+					squared
+					class="size-5! min-h-0! shrink-0 rounded-[4px] p-0! text-[color:var(--app-text-tertiary)]"
+					label={state === 'collapsed' ? `Expand ${page.title || 'Untitled'}` : `Collapse ${page.title || 'Untitled'}`}
+					expanded={state !== 'collapsed'}
 					onclick={() => store.toggle(page.id)}
 				>
 					<span class="transition-transform duration-100 {state !== 'collapsed' ? 'rotate-90' : ''}">
 						{@render caretRightIcon({ size: 12 })}
 					</span>
-				</button>
+				</Button>
 			{:else}
 				<span class="size-5 shrink-0" aria-hidden="true"></span>
 			{/if}
 			{#if renamingId === page.id}
 				<span class="flex h-full min-w-0 flex-1 items-center gap-1.5">
 					{@render pageIcon(page)}
-					<input
-						class="h-5 min-w-0 flex-1 rounded-[3px] border border-[color:var(--app-accent)] bg-[color:var(--app-page)] px-1 text-sm text-[color:var(--app-text)] outline-none"
-						aria-label="Page name"
-						data-testid="tree-rename"
-						bind:value={renameValue}
-						use:focusSelect
-						onblur={commitRename}
-						onkeydown={(e) => {
-							if (e.key === 'Enter') commitRename();
-							else if (e.key === 'Escape') renamingId = null;
-						}}
-					/>
+					<div class="min-w-0 flex-1" {@attach focusInput}>
+						<TextInput
+							size="small"
+							bind:value={renameValue}
+							theme={{ inputContainer: { base: 'h-5! min-h-0! rounded-[3px]! border-[color:var(--app-accent)]! bg-[color:var(--app-page)]! px-1!' } }}
+							inputAttrs={{
+								'aria-label': 'Page name',
+								'data-testid': 'tree-rename',
+								onblur: commitRename,
+								onkeydown: (e) => {
+									if (e.key === 'Enter') commitRename();
+									else if (e.key === 'Escape') renamingId = null;
+								}
+							}}
+						/>
+					</div>
 				</span>
 			{:else}
 				<a
@@ -440,7 +459,7 @@
 					<span class="truncate {page.title ? '' : 'text-[color:var(--app-text-tertiary)]'}" data-testid="tree-title">{page.title || 'Untitled'}</span>
 				</a>
 			{/if}
-			<PresenceAvatars users={store.othersOn(page.id)} max={2} size={16} />
+			<PresenceAvatars users={store.othersOn(page.id)} max={2} size="tiny" />
 			<span class="hidden items-center group-hover/row:flex group-focus-within/row:flex">
 				{@render more(`More actions for ${page.title || 'Untitled'}`, { kind: 'page', id: page.id })}
 				{@render add(`Add a page inside ${page.title || 'Untitled'}`, { parentId: page.id })}
@@ -455,7 +474,11 @@
 						class="flex items-center text-xs text-[color:var(--app-text-tertiary)]"
 						style="height: var(--app-row-height); padding-left: {pad(depth + 1)}"
 					>
-						<span class="ml-6">{state === 'loading' ? 'Loading…' : 'No pages inside'}</span>
+						{#if state === 'loading'}
+							<span class="ml-6 inline-flex items-center gap-1.5"><Spinner size="small" label="Loading pages" /> Loading…</span>
+						{:else}
+							<span class="ml-6">No pages inside</span>
+						{/if}
 					</li>
 				{/each}
 			</ul>
@@ -471,40 +494,59 @@
 		data-section={key}
 		use:sectionHeader={section ?? { kind: 'private' }}
 	>
-		<button
-			type="button"
-			class="flex h-full flex-1 items-center gap-1 rounded text-left text-xs font-medium text-[color:var(--app-text-tertiary)] hover:text-[color:var(--app-text-secondary)]"
-			aria-expanded={open(key)}
+		<Button
+			variant="ghost"
+			color="neutral"
+			size="small"
+			class="h-full! min-h-0! flex-1 justify-start px-0! text-xs font-medium text-[color:var(--app-text-tertiary)] hover:bg-transparent!"
+			expanded={open(key)}
 			onclick={() => toggleSection(key)}
 		>
 			{label}
-		</button>
+		</Button>
 		{#if actions}
 			<span class="hidden group-hover/section:flex group-focus-within/section:flex">{@render actions()}</span>
 		{/if}
 	</div>
 {/snippet}
 
+<!--
+	One entasis ContextMenu around the tree: a right-click, the ContextMenu key or Shift+F10 on a page row or a teamspace
+	header opens the menu of that target (`menuItems`); anywhere else the menu is cancelled.
+-->
+<ContextMenu
+	items={menuItems}
+	onOpenChange={(next, details) => {
+		if (!next) return;
+		const target = targetOf(details.event);
+		if (target) menuTarget = target;
+		else details.cancel();
+	}}
+	onAfterClose={() => (menuTarget = null)}
+>
 <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
 <nav bind:this={nav} class="flex flex-col gap-3 px-2 pt-1 pb-4" aria-label="Pages" data-testid="sidebar-tree" onkeydown={onKeydown}>
 	{#if !store.ready}
 		<div class="flex flex-col gap-1 px-1.5 pt-2" aria-busy="true" aria-label="Loading pages">
-			{#each [60, 80, 50, 70, 40] as w, i (i)}
-				<div class="h-5 animate-pulse rounded bg-[color:var(--app-hover)]" style="width: {w}%"></div>
+			{#each ['w-[60%]', 'w-[80%]', 'w-[50%]', 'w-[70%]', 'w-[40%]'] as w, i (i)}
+				<Skeleton class="h-5 rounded {w}" />
 			{/each}
 		</div>
 	{:else}
 		<section aria-label="Teamspaces" data-testid="section-teamspaces">
 			{#snippet teamspacesActions()}
 				{@render more('Teamspace options', { kind: 'teamspaces' })}
-				<button
-					type="button"
-					class="grid size-5 shrink-0 place-items-center rounded-[4px] text-[color:var(--app-text-tertiary)] hover:bg-[color:var(--app-active)] hover:text-[color:var(--app-text)]"
-					aria-label="New teamspace"
+				<TipButton
+					variant="ghost"
+					color="neutral"
+					size="small"
+					squared
+					class="size-5! min-h-0! shrink-0 rounded-[4px] p-0! text-[color:var(--app-text-tertiary)]"
+					tip="New teamspace"
+					position="bottom"
+					prefix={plusIcon}
 					onclick={() => (createTsOpen = true)}
-				>
-					{@render plusIcon({ size: 14 })}
-				</button>
+				/>
 			{/snippet}
 			{@render header('teamspaces', 'Teamspaces', null, teamspacesActions)}
 			{#if open('teamspaces')}
@@ -520,12 +562,13 @@
 								data-testid="section-header"
 								data-section={key}
 								use:sectionHeader={{ kind: 'teamspace', id: ts.id }}
-								oncontextmenu={(e) => contextMenu(e, { kind: 'teamspace', id: ts.id })}
 							>
-								<button
-									type="button"
-									class="flex h-full min-w-0 flex-1 items-center gap-0.5 text-left text-sm"
-									aria-expanded={open(key)}
+								<Button
+									variant="ghost"
+									color="neutral"
+									size="small"
+									class="h-full! min-h-0! min-w-0 flex-1 justify-start gap-0.5 px-0! text-left text-sm font-normal text-[color:var(--app-text-sidebar)] hover:bg-transparent!"
+									expanded={open(key)}
 									onclick={() => toggleSection(key)}
 								>
 									<span class="grid size-5 shrink-0 place-items-center text-[color:var(--app-text-tertiary)]">
@@ -535,7 +578,7 @@
 									</span>
 									<span class="grid size-5 shrink-0 place-items-center text-[15px] leading-none">{ts.icon ?? '👥'}</span>
 									<span class="ml-1 truncate font-medium">{ts.name}</span>
-								</button>
+								</Button>
 								<span class="hidden items-center group-hover/ts:flex group-focus-within/ts:flex">
 									{@render more(`More actions for ${ts.name}`, { kind: 'teamspace', id: ts.id })}
 									{@render add(`Add a page to ${ts.name}`, { parentId: null, teamspaceId: ts.id })}
@@ -594,6 +637,7 @@
 		</section>
 	{/if}
 </nav>
+</ContextMenu>
 
 <PopupMenu
 	trigger={false}

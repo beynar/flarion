@@ -115,7 +115,7 @@ test('P1 gate: two people sign in with passkeys, share a workspace and co-edit a
 		const { page } = ada;
 		await page.getByRole('link', { name: 'Settings' }).first().click();
 		await expect(page.getByRole('heading', { name: 'Settings' })).toBeVisible();
-		await page.getByRole('link', { name: 'Members' }).first().click();
+		await page.getByRole('tab', { name: 'Members' }).click();
 		await expect(page.getByTestId('members-tab')).toBeVisible();
 		await expect(page.getByTestId('members-tab').getByText('Ada Lovelace (you)')).toBeVisible();
 		await page.getByLabel('Invite by email').fill(bob.email);

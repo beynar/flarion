@@ -5,6 +5,7 @@
 -->
 <script lang="ts">
 	import { Popover } from 'entasis/popover';
+	import { tooltip } from 'entasis/tooltip';
 	import type { InlineBlockView } from 'edytor';
 	import type { DateValue } from '#lib/shared/dates.ts';
 	import { formatDateMention } from '#lib/shared/blocks/date-label.ts';
@@ -33,8 +34,8 @@
 		data-flarion-kind="date_mention"
 		data-testid="date-mention"
 		data-selected={block.selected ? 'true' : undefined}
-		title={value.start}
 		{@attach (node) => attach?.(node)}
+		{@attach tooltip({ content: value.start, position: 'top', delay: 400 })}
 	>
 		<span aria-hidden="true">📅</span> {label}
 	</span>

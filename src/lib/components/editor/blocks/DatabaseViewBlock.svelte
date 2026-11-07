@@ -4,7 +4,9 @@
 	(`collectionId`, `viewId`, `localFilter`), so two people pointing it at different databases never mix.
 -->
 <script lang="ts">
-	import { untrack } from 'svelte';
+	import { Button } from 'entasis/button';
+	import { tooltip } from 'entasis/tooltip';
+	import { Combobox, type ComboboxOption } from 'entasis/combobox';
 	import type { BlockView } from 'edytor';
 	import ViewHost from '#lib/components/views/ViewHost.svelte';
 	import type { FilterGroup } from '#lib/shared/filter-ast.ts';
@@ -22,23 +24,12 @@
 	// A database page's collection has the page's id: its title and icon come from the page.
 	const page = $derived(collectionId ? ctx?.resolvePage?.(collectionId) : undefined);
 
-	// ───────────── the picker of a linked view ─────────────
-	let query = $state('');
-	let results = $state<DatabaseRef[]>([]);
-	let searching = $state(false);
-	const search = async (q: string) => {
-		searching = true;
-		try {
-			const found = (await ctx?.searchDatabases?.(q)) ?? [];
-			if (q === untrack(() => query)) results = found;
-		} finally {
-			searching = false;
-		}
+	// ───────────── the picker of a linked view (an entasis Combobox that asks the workspace as the person types) ─────────────
+	const databases = async (query: string | undefined, { signal }: { signal: AbortSignal }): Promise<ComboboxOption[]> => {
+		const found = (await ctx?.searchDatabases?.(query ?? '')) ?? [];
+		if (signal.aborted) return [];
+		return found.map((result: DatabaseRef) => ({ value: result.id, label: result.title || 'Untitled', data: { icon: result.icon ?? '▦' } }));
 	};
-	$effect(() => {
-		if (collectionId) return;
-		void search(query);
-	});
 
 	function choose(id: string) {
 		if (readonly) return;
@@ -79,7 +70,7 @@
 			</a>
 			<span class="spacer"></span>
 			{#if !readonly}
-				<button type="button" class="link" onclick={unlink} data-testid="database-unlink" title="Show a different database">Change</button>
+				<Button size="small" variant="ghost" onclick={unlink} data-testid="database-unlink" label="Show a different database" {@attach tooltip({ content: 'Show a different database', position: 'top', delay: 400 })}>Change</Button>
 			{/if}
 		</div>
 		<ViewHost
@@ -98,26 +89,29 @@
 		{#if readonly}
 			<p class="hint">No database is linked here yet.</p>
 		{:else}
-			<input
-				class="search"
-				placeholder="Link to a database…"
-				aria-label="Search databases"
-				data-testid="database-search"
-				bind:value={query}
-				onkeydown={(event) => event.stopPropagation()}
-			/>
-			<ul class="results" data-testid="database-results">
-				{#each results as result (result.id)}
-					<li>
-						<button type="button" data-testid="database-result" onclick={() => choose(result.id)}>
-							<span aria-hidden="true">{result.icon ?? '▦'}</span>
-							<span>{result.title || 'Untitled'}</span>
-						</button>
-					</li>
-				{:else}
-					<li class="hint">{searching ? 'Searching…' : 'No databases found'}</li>
-				{/each}
-			</ul>
+			<!-- The editor must not see the keys typed in the search. -->
+			<div role="presentation" onkeydown={(event) => event.stopPropagation()} data-testid="database-picker-field">
+				<Combobox
+					items={databases}
+					filter={() => true}
+					autoHighlight
+					openOnFocus
+					showAllOnFocus
+					size="small"
+					placeholder="Link to a database…"
+					noOptionsText="No databases found"
+					loadingText="Searching…"
+					fieldAttrs={{ 'data-testid': 'database-search' } as never}
+					onValueChange={({ value }) => value && choose(value)}
+				>
+					{#snippet item(option: ComboboxOption)}
+						<span class="flex items-center gap-2" data-testid="database-result">
+							<span aria-hidden="true">{option.data?.icon}</span>
+							<span>{option.label}</span>
+						</span>
+					{/snippet}
+				</Combobox>
+			</div>
 		{/if}
 	</div>
 {/if}
@@ -148,48 +142,10 @@
 	.spacer {
 		flex: 1;
 	}
-	.link {
-		font-size: 12px;
-		color: var(--app-text-secondary);
-		cursor: pointer;
-	}
-	.link:hover {
-		color: var(--app-text);
-	}
 	.picker {
 		padding: 10px 12px;
 		border-radius: 6px;
 		background: var(--app-hover);
-	}
-	.search {
-		width: 100%;
-		box-sizing: border-box;
-		padding: 6px 8px;
-		border: 1px solid var(--app-hairline-strong);
-		border-radius: var(--app-radius-control);
-		background: var(--app-page);
-		color: var(--app-text);
-		font-size: 14px;
-	}
-	.results {
-		margin: 6px 0 0;
-		padding: 0;
-		list-style: none;
-		max-height: 200px;
-		overflow: auto;
-	}
-	.results button {
-		display: flex;
-		align-items: center;
-		gap: 8px;
-		width: 100%;
-		padding: 5px 8px;
-		text-align: left;
-		border-radius: var(--app-radius-control);
-		cursor: pointer;
-	}
-	.results button:hover {
-		background: var(--app-page);
 	}
 	.hint {
 		color: var(--app-text-secondary);

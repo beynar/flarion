@@ -3,6 +3,8 @@
 	import { Popover } from 'entasis/popover';
 	import { Checkbox } from 'entasis/checkbox';
 	import { NumberInput } from 'entasis/number-input';
+	import { TextInput } from 'entasis/text-input';
+	import { Button } from 'entasis/button';
 	import PagePicker from '#lib/components/pickers/PagePicker.svelte';
 	import type { WorkspaceStore } from '#lib/client/workspace.svelte.ts';
 	import type { DateValue } from '#lib/shared/dates.ts';
@@ -66,7 +68,6 @@
 	let view = $state<'pick' | 'options'>('pick');
 	let editing = $state(false);
 	let draft = $state('');
-	let inputEl = $state<HTMLInputElement>();
 	let cell = $state<HTMLElement>();
 
 	$effect(() => {
@@ -89,7 +90,7 @@
 		draft = textOf(value);
 		editing = true;
 		await tick();
-		const el = inputEl ?? cell?.querySelector('input');
+		const el = cell?.querySelector('input');
 		el?.focus();
 		el?.select();
 	}
@@ -141,15 +142,13 @@
 		for (const id of added) onAdd?.(id);
 	}
 
-	const cellClass =
-		'flex min-h-[28px] w-full min-w-0 cursor-pointer items-center rounded-[var(--app-radius-control)] px-1.5 py-[3px] text-left text-sm hover:bg-[color:var(--app-hover)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-[color:var(--app-accent)]';
-	const inputClass =
-		'w-full min-w-0 rounded-[var(--app-radius-control)] border border-[color:var(--app-accent)] bg-[color:var(--app-page)] px-1.5 text-sm text-[color:var(--app-text)] outline-none';
+	// The cell is an entasis ghost Button that fills the value column (Notion's hover-highlighted value).
+	const cellClass = 'h-auto min-h-[28px] w-full min-w-0 justify-start px-1.5 py-[3px] text-left text-sm font-normal text-[color:var(--app-text)]';
 </script>
 
 <div class="min-w-0 flex-1" data-testid="property-value" data-type={type} bind:this={cell}>
 	{#if type === 'checkbox' && canEdit}
-		<div class="flex min-h-[28px] items-center px-1.5">
+		<div class="flex min-h-[28px] items-center pl-0.5">
 			<Checkbox
 				size="small"
 				value={value === true}
@@ -167,49 +166,36 @@
 				inputAttrs={{ 'aria-label': def.name }}
 			/>
 		{:else if editing}
-			<input
-				bind:this={inputEl}
-				class={inputClass}
-				style="height: 28px"
-				type={type === 'email' ? 'email' : type === 'url' ? 'url' : type === 'phone' ? 'tel' : 'text'}
-				aria-label={def.name}
+			<TextInput
+				size="small"
+				type={type === 'email' ? 'email' : type === 'url' ? 'url' : 'text'}
 				bind:value={draft}
-				onblur={commitText}
-				onkeydown={(e) => {
-					if (e.key === 'Enter') {
-						e.preventDefault();
-						commitText();
-					} else if (e.key === 'Escape') {
-						e.preventDefault();
-						cancelText();
+				inputAttrs={{
+					'aria-label': def.name,
+					...(type === 'phone' ? { inputmode: 'tel', autocomplete: 'tel' } : {}),
+					onblur: commitText,
+					onkeydown: (e) => {
+						if (e.key === 'Enter') {
+							e.preventDefault();
+							commitText();
+						} else if (e.key === 'Escape') {
+							e.preventDefault();
+							cancelText();
+						}
 					}
 				}}
 			/>
 		{:else}
-			<div
-				role="button"
-				tabindex="0"
-				class={cellClass}
-				aria-label={`Edit ${def.name}`}
-				onclick={() => {
-					void startEditing();
-				}}
-				onkeydown={(e) => {
-					if (e.key === 'Enter' || e.key === ' ') {
-						e.preventDefault();
-						void startEditing();
-					}
-				}}
-			>
+			<Button variant="ghost" color="neutral" class={cellClass} label={`Edit ${def.name}`} onclick={() => void startEditing()}>
 				<PropertyValue {def} {value} {members} {resolvePage} {fileInfo} {pageHref} {compact} />
-			</div>
+			</Button>
 		{/if}
 	{:else if popup}
 		<Popover position="bottom-start" focusOnOpen="first" modal={false} bind:open={popoverOpen} offset={4}>
 			{#snippet trigger(popover)}
-				<button type="button" class={cellClass} aria-label={`Edit ${def.name}`} aria-haspopup="dialog" {@attach popover.trigger}>
+				<Button variant="ghost" color="neutral" class={cellClass} label={`Edit ${def.name}`} haspopup="dialog" {@attach popover.trigger}>
 					<PropertyValue {def} {value} {members} {resolvePage} {fileInfo} {pageHref} {compact} />
-				</button>
+				</Button>
 			{/snippet}
 			{#snippet children(popover)}
 				{#if type === 'select' || type === 'status' || type === 'multi_select'}

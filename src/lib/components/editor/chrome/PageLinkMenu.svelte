@@ -2,27 +2,25 @@
 	import { words } from './words.svelte.js';
 	import TriggerMenu from './TriggerMenu.svelte';
 	import type { PageLinkItem, TriggerMenuController } from 'edytor';
-	import { Button } from '../ui/index.ts';
-	import { cn } from '../ui/cn.ts';
-	import { row as rowClass } from './ui.js';
+	import { MenuOption } from 'entasis/menu-option';
 
 	/** Notion's `[[` menu, drawn for `createPageLinkPlugin({ menu })`: a page's icon and title. */
 	let { controller }: { controller: TriggerMenuController<PageLinkItem> } = $props();
 </script>
 
 <TriggerMenu {controller} said={words.pageLink}>
-	{#snippet row(item: PageLinkItem, index: number)}
-		<Button
-			variant="ghost"
-			class={cn(rowClass, 'row')}
-			data-selected={controller.index === index}
+	{#snippet row(item: PageLinkItem, index: number, attrs: (index: number) => Record<string, unknown>)}
+		<MenuOption
+			role="option"
+			size="small"
+			density="compact"
+			highlighted={controller.index === index}
 			{@attach controller.option(index)}
-			data-testid="trigger-menu-item"
-			onmousemove={() => (controller.index = index)}
+			attrs={{ ...attrs(index), 'data-testid': 'trigger-menu-item' }}
 			onclick={() => void controller.pick(item)}
 		>
-			<span aria-hidden="true">{item.icon ?? '📄'}</span>
+			{#snippet prefix()}<span aria-hidden="true">{item.icon ?? '📄'}</span>{/snippet}
 			<span class="title truncate">{item.title}</span>
-		</Button>
+		</MenuOption>
 	{/snippet}
 </TriggerMenu>

@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { float } from './float.js';
+	import Floating from './Floating.svelte';
 	import { Button } from '../ui/index.ts';
 	import { words } from './words.svelte.js';
 	import type { CalloutIconPicker } from 'edytor';
@@ -11,12 +11,15 @@
 	let { picker }: { picker: CalloutIconPicker } = $props();
 </script>
 
-<div
-	class="callout-icons"
+<!-- The icon grid has no entasis equivalent (`Command` and `Menu` are lists: audit NE-3), so the cells are `Button`s on an entasis `Popover` surface. -->
+<Floating
+	anchor={() => picker.anchor}
+	gap={4}
+	haspopup="grid"
+	class="callout-icons flex flex-col gap-1 p-1.5 outline-none"
 	aria-label={words.calloutIcons.picker}
 	{@attach picker.keys}
 	{@attach picker.popup}
-	{@attach float(() => picker.anchor, { gap: 4 })}
 >
 	<div class="callout-icons-grid" role="none" style:--callout-icon-columns={picker.columns}>
 		{#each picker.icons as icon, index (index)}
@@ -40,45 +43,13 @@
 		onmouseenter={() => (picker.index = picker.icons.length)}
 		onclick={() => picker.pick(picker.icons.length)}>{words.calloutIcons.remove}</Button
 	>
-</div>
+</Floating>
 
 <style>
-	.callout-icons {
-		display: flex;
-		flex-direction: column;
-		gap: 4px;
-		padding: 6px;
-		border-radius: 10px;
-		background: var(--app-page);
-		color: var(--app-text);
-		box-shadow:
-			0 14px 28px -6px rgba(0, 0, 0, 0.1),
-			0 2px 4px -1px rgba(0, 0, 0, 0.06),
-			0 0 0 1px var(--app-hairline);
-		font-family:
-			ui-sans-serif,
-			-apple-system,
-			BlinkMacSystemFont,
-			'Segoe UI',
-			Helvetica,
-			Arial,
-			sans-serif;
-		font-size: 14px;
-		line-height: 20px;
-		outline: 0;
-	}
 	.callout-icons-grid {
 		display: grid;
 		grid-template-columns: repeat(var(--callout-icon-columns), 32px);
 		gap: 2px;
-	}
-	.callout-icons :global(button) {
-		border: 0;
-		border-radius: 6px;
-		background: transparent;
-		color: inherit;
-		font: inherit;
-		cursor: pointer;
 	}
 	.callout-icons-grid :global(button) {
 		width: 32px;
@@ -87,15 +58,14 @@
 		font-size: 20px;
 		line-height: 32px;
 	}
-	.callout-icons :global(button[data-selected='true']) {
+	:global(.callout-icons button[data-selected='true']) {
 		background: var(--app-hover);
 	}
-	.callout-icons :global(button[data-current='true']) {
+	:global(.callout-icons button[data-current='true']) {
 		box-shadow: inset 0 0 0 2px color-mix(in oklab, var(--app-accent) 57%, transparent);
 	}
-	.callout-icons :global(.callout-icons-remove) {
-		padding: 4px 8px;
-		text-align: start;
+	:global(.callout-icons .callout-icons-remove) {
+		justify-content: flex-start;
 		color: var(--app-text-secondary);
 	}
 </style>

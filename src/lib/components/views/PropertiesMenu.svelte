@@ -4,6 +4,9 @@
 -->
 <script lang="ts">
 	import { SortableList } from 'entasis/sortable-list';
+	import { Button } from 'entasis/button';
+	import { TextInput } from 'entasis/text-input';
+	import { magnifyingGlassIcon } from 'entasis/icons/magnifyingGlass';
 	import { eyeIcon } from 'entasis/icons/eye';
 	import { eyeSlashIcon } from 'entasis/icons/eyeSlash';
 	import { TYPE_ICONS } from '#lib/components/properties/icons.ts';
@@ -43,7 +46,9 @@
 </script>
 
 <div class="menu" data-testid="properties-menu">
-	<input class="search" placeholder="Search for a property…" aria-label="Search properties" bind:value={query} />
+	<div class="search">
+		<TextInput size="small" placeholder="Search for a property…" prefix={magnifyingGlassIcon} value={query} onValueChange={(v) => (query = v ?? '')} inputAttrs={{ 'aria-label': 'Search properties' }} />
+	</div>
 	<div class="heading">Shown in table</div>
 	{#if title && match(title.def)}
 		<div class="row locked">
@@ -63,9 +68,7 @@
 			<div class="row" data-testid="properties-visible" data-prop={item.id}>
 				<span class="icon">{@render TYPE_ICONS[item.def.type]({ size: 16 })}</span>
 				<span class="name">{item.def.name}</span>
-				<button type="button" class="eye" aria-label="Hide {item.def.name}" disabled={!env.editable} onclick={() => void toggle(item.id, false)}>
-					{@render eyeIcon({ size: 16 })}
-				</button>
+				<Button variant="ghost" size="small" squared label="Hide {item.def.name}" prefix={eyeIcon} disabled={!env.editable} onclick={() => void toggle(item.id, false)} />
 			</div>
 		{/snippet}
 	</SortableList>
@@ -75,9 +78,7 @@
 			<div class="row" data-testid="properties-hidden" data-prop={entry.def.id}>
 				<span class="icon">{@render TYPE_ICONS[entry.def.type]({ size: 16 })}</span>
 				<span class="name dim">{entry.def.name}</span>
-				<button type="button" class="eye" aria-label="Show {entry.def.name}" disabled={!env.editable} onclick={() => void toggle(entry.def.id, true)}>
-					{@render eyeSlashIcon({ size: 16 })}
-				</button>
+				<Button variant="ghost" size="small" squared label="Show {entry.def.name}" prefix={eyeSlashIcon} disabled={!env.editable} onclick={() => void toggle(entry.def.id, true)} />
 			</div>
 		{/each}
 	{/if}
@@ -93,17 +94,7 @@
 		padding: 6px;
 	}
 	.search {
-		height: var(--app-input-height);
-		padding: 0 8px;
 		margin-bottom: 4px;
-		border: 1px solid var(--app-hairline-strong);
-		border-radius: var(--app-radius-control);
-		background: var(--app-page);
-		color: var(--app-text);
-		outline: none;
-	}
-	.search:focus {
-		border-color: var(--app-accent);
 	}
 	.heading {
 		padding: 6px 6px 2px;
@@ -138,16 +129,5 @@
 	}
 	.locked {
 		opacity: 0.7;
-	}
-	.eye {
-		display: inline-flex;
-		padding: 2px;
-		border-radius: 4px;
-		color: var(--app-text-secondary);
-		cursor: pointer;
-	}
-	.eye:hover:not(:disabled) {
-		background: var(--app-hover);
-		color: var(--app-text);
 	}
 </style>

@@ -5,6 +5,7 @@
 <script lang="ts">
 	import { Popover } from 'entasis/popover';
 	import { Button } from 'entasis/button';
+	import { TextInput } from 'entasis/text-input';
 	import { funnelSimpleIcon } from 'entasis/icons/funnelSimple';
 	import { arrowsDownUpIcon } from 'entasis/icons/arrowsDownUp';
 	import { rowsIcon } from 'entasis/icons/rows';
@@ -94,16 +95,20 @@
 	</Popover>
 
 	{#if showSearch}
-		<input
-			class="search"
-			type="search"
-			placeholder="Search…"
-			aria-label="Search in this view"
-			data-testid="view-search"
-			bind:value={search}
-			onblur={() => setTimeout(() => (searchOpen = search !== ''), 250)}
-			{@attach (el) => el.focus()}
-		/>
+		<div class="w-44" {@attach (el) => el.querySelector('input')?.focus()}>
+			<TextInput
+				size="small"
+				placeholder="Search…"
+				prefix={magnifyingGlassIcon}
+				value={search}
+				onValueChange={(v) => (search = v ?? '')}
+				inputAttrs={{
+					'aria-label': 'Search in this view',
+					'data-testid': 'view-search',
+					onblur: () => setTimeout(() => (searchOpen = search !== ''), 250)
+				}}
+			/>
+		</div>
 	{:else}
 		<Button variant="ghost" size="small" label="Search in this view" prefix={magnifyingGlassIcon} data-testid="view-search-toggle" onclick={() => (searchOpen = true)} />
 	{/if}
@@ -119,19 +124,5 @@
 		align-items: center;
 		gap: 2px;
 		flex-shrink: 0;
-	}
-	.search {
-		width: 160px;
-		height: var(--app-button-height);
-		padding: 0 8px;
-		border: 1px solid var(--app-hairline-strong);
-		border-radius: var(--app-radius-control);
-		background: var(--app-page);
-		color: var(--app-text);
-		font-size: 14px;
-		outline: none;
-	}
-	.search:focus {
-		border-color: var(--app-accent);
 	}
 </style>

@@ -15,6 +15,8 @@
 		type Uploader
 	} from 'edytor';
 	import { toast } from 'entasis/toast';
+	import { Button } from './ui/index.ts';
+	import Floating from './chrome/Floating.svelte';
 	import { createRpc, type Rpc } from '#lib/client/rpc.ts';
 	import { useWorkspace, type WorkspaceStore } from '#lib/client/workspace.svelte.ts';
 	import { BLOCK_KIND, KINDS_VERSION } from '#lib/shared/blocks/kinds.ts';
@@ -324,7 +326,7 @@
 	 * instead: the room writes the anchor for them (`document.access === 'comment'`).
 	 */
 	const commentOnly = $derived(readonly && initial.access === 'comment');
-	let commentAt = $state<{ top: number; left: number } | null>(null);
+	let commentAt = $state<{ getBoundingClientRect: () => DOMRect } | null>(null);
 	let view = $state<HTMLElement>();
 	$effect(() => {
 		if (!commentOnly || !view) return;
@@ -333,8 +335,8 @@
 			const selection = document.getSelection();
 			const inside = selection && !selection.isCollapsed && selection.rangeCount > 0 && root.querySelector('[data-edytor]')?.contains(selection.anchorNode);
 			if (!inside) return (commentAt = null);
-			const rect = selection.getRangeAt(0).getBoundingClientRect();
-			commentAt = { top: Math.max(8, rect.top - 40), left: Math.max(8, rect.left) };
+			// A virtual element the surface places itself against, read live (the selection may move or scroll).
+			commentAt = { getBoundingClientRect: () => (document.getSelection()?.rangeCount ? document.getSelection()!.getRangeAt(0).getBoundingClientRect() : new DOMRect()) };
 		};
 		document.addEventListener('selectionchange', track);
 		return () => {
@@ -371,16 +373,12 @@
 <!-- svelte-ignore a11y_no_static_element_interactions -->
 <div class="flarion-editor-view" {onclickcapture} bind:this={view}>
 	{#if commentOnly && commentAt}
-		<button
-			type="button"
-			class="flarion-comment-button"
-			style="top: {commentAt.top}px; left: {commentAt.left}px"
-			data-testid="comment-selection"
-			onmousedown={(event) => event.preventDefault()}
-			onclick={startComment}
-		>
-			💬 Comment
-		</button>
+		<!-- The comment-only view's "Comment" over the selection: entasis Popover surface and Button, placed against the selection. -->
+		<Floating anchor={() => commentAt} placement="top-start" gap={8} class="p-0.5">
+			<Button variant="ghost" data-testid="comment-selection" onmousedown={(event) => event.preventDefault()} onclick={startComment}>
+				💬 Comment
+			</Button>
+		</Floating>
 	{/if}
 	<Edytor
 		bind:edytor
@@ -396,22 +394,3 @@
 		onSyncRefused={onRefused}
 	/>
 </div>
-
-<style>
-	.flarion-comment-button {
-		position: fixed;
-		z-index: 30;
-		height: var(--app-button-height-small, 28px);
-		padding: 0 10px;
-		border: 1px solid var(--app-hairline-strong);
-		border-radius: var(--app-radius-control);
-		background: var(--app-page);
-		color: var(--app-text);
-		box-shadow: var(--app-shadow-menu);
-		font-size: var(--app-font-size-small, 13px);
-		cursor: pointer;
-	}
-	.flarion-comment-button:hover {
-		background: var(--app-hover);
-	}
-</style>

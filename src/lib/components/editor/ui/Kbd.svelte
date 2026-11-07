@@ -1,14 +1,8 @@
 <script lang="ts">
-	import type { HTMLAttributes } from 'svelte/elements';
-	import { cn } from './cn.ts';
+	import { Kbd, type KbdProps } from 'entasis/kbd';
 
-	let { class: className, children, ...rest }: HTMLAttributes<HTMLElement> = $props();
+	/** A key hint: entasis `Kbd` (its keys are the children's text). */
+	let { children, ...rest }: Omit<KbdProps, 'children' | 'keys'> & { children?: import('svelte').Snippet } = $props();
 </script>
 
-<kbd
-	class={cn(
-		'pointer-events-none inline-flex h-5 min-w-5 items-center justify-center rounded-[3px] px-1 font-sans text-xs font-medium text-[color:var(--app-text-secondary)] select-none',
-		className
-	)}
-	{...rest}>{@render children?.()}</kbd
->
+<Kbd size="small" {...rest} {children} />

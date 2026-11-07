@@ -7,6 +7,11 @@
 	import { untrack } from 'svelte';
 	import { Button } from 'entasis/button';
 	import { Diff } from 'entasis/diff';
+	import { Empty } from 'entasis/empty';
+	import { Menu, type MenuItem } from 'entasis/menu';
+	import { SegmentedControl } from 'entasis/segmented-control';
+	import { Skeleton } from 'entasis/skeleton';
+	import { Spinner } from 'entasis/spinner';
 	import { toast } from 'entasis/toast';
 	import { Edytor, VersionHistory, type EdytorInstance } from 'edytor';
 	import type { JSONDoc } from 'edytor/crdt/edytor';
@@ -52,6 +57,23 @@
 		return names.length || entry.more ? `${names.join(', ')}${entry.more ? ` +${entry.more}` : ''}` : 'No editors recorded';
 	};
 
+	/** The versions as one entasis Menu radio group (the selected version is the checked row). */
+	const versionItems = $derived.by((): MenuItem[] => [
+		{
+			type: 'radio-group',
+			value: history.selected ?? undefined,
+			onValueChange: (key) => void history.select(key),
+			items: (history.versions ?? []).map((entry) => ({
+				value: entry.key,
+				title: titleOf(entry),
+				description: `${authors(entry)} · Saved ${history.timeOf(entry)} · ${entry.blocks} block${entry.blocks === 1 ? '' : 's'}`,
+				// The row's text, for the radio's typeahead and accessible name.
+				textValue: titleOf(entry),
+				attrs: { 'data-testid': 'history-version', 'data-version': entry.key, 'data-entry': entry.key }
+			}))
+		}
+	]);
+
 	const STATUS: Record<string, string> = {
 		restoring: 'Restoring…',
 		restored: 'Version restored. Everyone on the page sees it now.',
@@ -83,29 +105,45 @@
 					{#if diff.changed}<span><i class="mr-1 inline-block size-2 rounded-sm bg-[color:var(--edytor-color-yellow,#dfab01)]"></i>{diff.changed} changed since</span>{/if}
 				</div>
 			{/if}
-			<div class="ml-auto flex items-center gap-1">
-				<Button size="small" variant={tab === 'changes' ? 'soft' : 'ghost'} data-testid="history-tab-changes" onclick={() => (tab = 'changes')}>Changes</Button>
-				<Button size="small" variant={tab === 'preview' ? 'soft' : 'ghost'} data-testid="history-tab-preview" onclick={() => (tab = 'preview')}>Preview</Button>
+			<div class="ml-auto">
+				<SegmentedControl
+					size="small"
+					label="History view"
+					items={[
+						{ value: 'changes', label: 'Changes' },
+						{ value: 'preview', label: 'Preview' }
+					]}
+					value={tab}
+					onValueChange={(next) => (tab = next as typeof tab)}
+				/>
 			</div>
 		</header>
 
 		<div class="min-h-0 flex-1 overflow-auto" aria-busy={history.reading}>
 			{#if history.selected === null || (!history.shown && !history.reading)}
-				<p class="m-0 p-6 text-sm text-[color:var(--app-text-secondary)]">
-					{history.versions === null ? 'Loading versions…' : history.versions.length === 0 ? '' : 'Choose a version to see what changed.'}
-				</p>
+				{#if history.versions === null}
+					<div class="flex flex-col gap-2 p-6" aria-busy="true"><Skeleton class="h-5 w-1/2" /><Skeleton class="h-5 w-3/4" /><Skeleton class="h-5 w-2/3" /></div>
+				{:else if history.versions.length > 0}
+					<Empty title="Choose a version" description="Pick one on the right to see what changed." />
+				{/if}
 			{:else if tab === 'changes'}
 				<div class="p-4" data-testid="history-diff">
 					<div class="mb-2 flex items-center justify-between text-xs text-[color:var(--app-text-secondary)]">
 						<span>This version (left) compared with the page now (right)</span>
-						<span class="flex gap-1">
-							<Button size="small" variant={style === 'unified' ? 'soft' : 'ghost'} onclick={() => (style = 'unified')}>Unified</Button>
-							<Button size="small" variant={style === 'split' ? 'soft' : 'ghost'} onclick={() => (style = 'split')}>Side by side</Button>
-						</span>
+						<SegmentedControl
+							size="small"
+							label="Diff style"
+							items={[
+								{ value: 'unified', label: 'Unified' },
+								{ value: 'split', label: 'Side by side' }
+							]}
+							value={style}
+							onValueChange={(next) => (style = next as typeof style)}
+						/>
 					</div>
 					{#if files}
 						{#if files[0].contents === files[1].contents}
-							<p class="m-0 py-6 text-sm text-[color:var(--app-text-secondary)]" data-testid="history-no-changes">No differences: the page reads the same as this version.</p>
+							<div data-testid="history-no-changes"><Empty title="No differences" description="The page reads the same as this version." /></div>
 						{:else}
 							{#key `${history.selected}:${files[1].contents.length}:${style}`}
 								<Diff {files} diffStyle={style} lineNumbers={false} wrapping />
@@ -127,33 +165,13 @@
 		<h3 class="m-0 px-3 pt-3 pb-1 text-xs font-medium text-[color:var(--app-text-secondary)]">Versions</h3>
 		<div class="min-h-0 flex-1 overflow-auto px-1.5 pb-1.5">
 			{#if history.versions === null}
-				<p class="m-0 px-2 py-2 text-sm text-[color:var(--app-text-secondary)]">Loading…</p>
+				<div class="flex items-center gap-2 px-2 py-2 text-sm text-[color:var(--app-text-secondary)]"><Spinner size="small" label="Loading versions" /> Loading…</div>
 			{:else if history.versions.length === 0}
-				<p class="m-0 px-2 py-2 text-sm text-[color:var(--app-text-secondary)]" data-testid="history-empty">
-					No versions yet. Flarion keeps one for each half day in which the page changed, for 30 days.
-				</p>
+				<div data-testid="history-empty">
+					<Empty size="small" title="No versions yet" description="Flarion keeps one for each half day in which the page changed, for 30 days." />
+				</div>
 			{:else}
-				<ul class="m-0 list-none p-0" role="listbox" aria-label="Versions" {@attach history.keys}>
-					{#each history.versions as entry, index (entry.key)}
-						<li role="presentation">
-							<button
-								type="button"
-								class="flex w-full flex-col gap-0.5 rounded-[var(--app-radius-control)] px-2 py-1.5 text-left hover:bg-[color:var(--app-hover)] data-[selected=true]:bg-[color:var(--app-active,var(--app-hover))]"
-								data-selected={entry.key === history.selected}
-								data-testid="history-version"
-								data-version={entry.key}
-								{@attach history.option(index)}
-								onclick={() => void history.select(entry.key)}
-							>
-								<span class="text-sm font-medium">{titleOf(entry)}</span>
-								<span class="text-xs text-[color:var(--app-text-secondary)]">{authors(entry)}</span>
-								<span class="text-xs text-[color:var(--app-text-secondary)]">
-									Saved <time datetime={new Date(entry.at).toISOString()}>{history.timeOf(entry)}</time> · {entry.blocks} block{entry.blocks === 1 ? '' : 's'}
-								</span>
-							</button>
-						</li>
-					{/each}
-				</ul>
+				<Menu items={versionItems} size="small" />
 			{/if}
 		</div>
 		<footer class="flex flex-col gap-2 border-t border-[color:var(--app-hairline)] p-3">

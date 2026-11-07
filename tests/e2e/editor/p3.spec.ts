@@ -99,10 +99,10 @@ test('history: a version is compared with the page now by the diff, and restore 
 	await expect.poll(async () => (await diff.evaluate((el) => el.innerHTML)).length).toBeGreaterThan(200);
 	await shot(ada.page, 'history-diff');
 
-	await panel.getByTestId('history-tab-preview').click();
+	await panel.getByRole('radio', { name: 'Preview' }).click();
 	await expect(panel.getByTestId('history-preview')).toContainText('First draft of the plan.');
 	await shot(ada.page, 'history-preview');
-	await panel.getByTestId('history-tab-changes').click();
+	await panel.getByRole('radio', { name: 'Changes' }).click();
 
 	// Restore: a forward edit; Bob's open page follows at once.
 	await panel.getByTestId('history-restore').click();

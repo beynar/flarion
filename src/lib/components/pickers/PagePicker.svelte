@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { Command } from 'entasis/command';
+	import { Empty } from 'entasis/empty';
 	import { fileTextIcon } from 'entasis/icons/fileText';
 	import type { WorkspaceStore } from '#lib/client/workspace.svelte.ts';
 
@@ -33,6 +34,6 @@
 
 <Command bind:search {items} shouldFilter={false} autoHighlight="always" {placeholder} onSelect={(value) => onpick(value)}>
 	{#snippet empty()}
-		<div class="px-3 py-6 text-center text-sm text-[color:var(--app-text-tertiary)]">No pages match.</div>
+		<Empty size="small" title="No pages match" />
 	{/snippet}
 </Command>

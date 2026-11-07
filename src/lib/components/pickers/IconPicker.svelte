@@ -1,6 +1,8 @@
 <script lang="ts">
 	import { Popover } from 'entasis/popover';
+	import { Button } from 'entasis/button';
 	import { Command } from 'entasis/command';
+	import { trashIcon } from 'entasis/icons/trash';
 	import type { Snippet } from 'svelte';
 	import { EMOJI_GROUPS } from '#lib/components/page-header/emojis.ts';
 
@@ -32,7 +34,7 @@
 		{@render button({ attach: popover.trigger, open: popover.isOpen })}
 	{/snippet}
 	{#snippet children(popover)}
-		<div class="icon-picker" data-testid="icon-picker">
+		<div class="flex max-h-[380px] w-[320px] flex-col overflow-hidden" data-testid="icon-picker">
 			<Command
 				{items}
 				placeholder="Filter emojis…"
@@ -40,40 +42,27 @@
 					onpick(value);
 					popover.close();
 				}}
-			/>
-			{#if current}
-				<button
-					type="button"
-					class="icon-remove"
-					data-testid="icon-remove"
-					onclick={() => {
-						onpick(null);
-						popover.close();
-					}}>Remove icon</button
-				>
-			{/if}
+			>
+				{#snippet footer()}
+					{#if current}
+						<div class="border-t border-[color:var(--app-hairline)] p-1">
+							<Button
+								variant="ghost"
+								color="neutral"
+								size="small"
+								fullWidth
+								prefix={trashIcon}
+								class="justify-start font-normal text-[color:var(--app-text-secondary)]"
+								data-testid="icon-remove"
+								onclick={() => {
+									onpick(null);
+									popover.close();
+								}}>Remove icon</Button
+							>
+						</div>
+					{/if}
+				{/snippet}
+			</Command>
 		</div>
 	{/snippet}
 </Popover>
-
-<style>
-	.icon-picker {
-		width: 320px;
-		max-height: 380px;
-		display: flex;
-		flex-direction: column;
-		overflow: hidden;
-	}
-	.icon-remove {
-		margin: 0;
-		padding: 6px 12px;
-		border-top: 1px solid var(--app-hairline);
-		color: var(--app-text-secondary);
-		font-size: var(--app-font-size-chrome);
-		text-align: left;
-		cursor: pointer;
-	}
-	.icon-remove:hover {
-		background: var(--app-hover);
-	}
-</style>

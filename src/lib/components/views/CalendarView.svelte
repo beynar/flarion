@@ -6,6 +6,7 @@
 -->
 <script lang="ts">
 	import { EventCalendar, type EventCalendarItem, type EventCalendarItemsChangePayload, type EventCalendarSlotSelectPayload, type EventCalendarRangeChangeInfo } from 'entasis/event-calendar';
+	import { Empty } from 'entasis/empty';
 	import type { ViewData } from '#lib/client/workspace.svelte.ts';
 	import { parseIsoDate, type DateValue } from '#lib/shared/dates.ts';
 	import type { ViewEnv } from './env.ts';
@@ -69,7 +70,7 @@
 
 <div class="calendar" data-testid="view-calendar">
 	{#if !dp.start}
-		<div class="note" data-testid="calendar-needs-date">Add a date property to this database to place its pages on the calendar.</div>
+		<Empty size="small" title="No date property yet" description="Add a date property to this database to place its pages on the calendar." data-testid="calendar-needs-date" />
 	{:else}
 		<EventCalendar
 			bind:items
@@ -100,10 +101,6 @@
 	}
 	.calendar :global(.notion-calendar) {
 		height: 640px;
-	}
-	.note {
-		padding: 24px 8px;
-		color: var(--app-text-secondary);
 	}
 	.foot,
 	.count {

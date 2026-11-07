@@ -1,4 +1,8 @@
 <script lang="ts">
+	import { Button } from 'entasis/button';
+	import { Collapsible } from 'entasis/collapsible';
+	import { TextInput } from 'entasis/text-input';
+	import { tooltip } from 'entasis/tooltip';
 	import { plusIcon } from 'entasis/icons/plus';
 	import { trashIcon } from 'entasis/icons/trash';
 	import { caretLeftIcon } from 'entasis/icons/caretLeft';
@@ -53,14 +57,7 @@
 
 <div class="flex w-[280px] flex-col" data-testid="options-editor">
 	<div class="flex items-center gap-1 border-b border-[color:var(--app-hairline)] px-1" style="height: var(--app-row-height)">
-		<button
-			type="button"
-			class="grid size-6 place-items-center rounded text-[color:var(--app-text-secondary)] hover:bg-[color:var(--app-hover)]"
-			aria-label="Back to options"
-			onclick={onBack}
-		>
-			{@render caretLeftIcon({ size: 14 })}
-		</button>
+		<Button variant="ghost" color="neutral" size="small" label="Back to options" prefix={caretLeftIcon} onclick={onBack} />
 		<span class="text-sm font-medium">Edit options</span>
 	</div>
 
@@ -71,71 +68,80 @@
 			{/if}
 			{#each group.options as o (o.id)}
 				<div data-testid="option-row" data-option-id={o.id}>
-					<button
-						type="button"
-						class="flex w-full items-center gap-2 px-3 text-left text-sm hover:bg-[color:var(--app-hover)]"
-						style="height: var(--app-row-height)"
-						aria-expanded={openId === o.id}
-						aria-label={`Edit option ${o.name}`}
-						onclick={() => {
-							openId = openId === o.id ? null : o.id;
+					<Collapsible
+						open={openId === o.id}
+						onOpenChange={(next) => {
+							openId = next ? o.id : null;
 							draft = o.name;
 						}}
+						theme={{
+							trigger: { base: 'h-[var(--app-row-height)] w-full rounded-none px-3 text-sm font-normal hover:bg-[color:var(--app-hover)]' },
+							content: { base: 'p-0' }
+						}}
 					>
-						<span
-							class="size-3 shrink-0 rounded-full"
-							style="background: var(--app-option-{optionColorName(o.color)}-bg); box-shadow: inset 0 0 0 1px var(--app-option-{optionColorName(o.color)}-fg)"
-						></span>
-						<span class="truncate">{o.name}</span>
-					</button>
-					{#if openId === o.id}
-						<div class="flex flex-col gap-2 border-y border-[color:var(--app-hairline)] bg-[color:var(--app-hover)] px-3 py-2">
-							<input
-								class="rounded-[var(--app-radius-control)] border border-[color:var(--app-hairline-strong)] bg-[color:var(--app-page)] px-2 text-sm outline-none focus:border-[color:var(--app-accent)]"
-								style="height: var(--app-input-height)"
-								aria-label="Option name"
-								bind:value={draft}
-								onblur={() => rename(o.id, draft, o.name)}
-								onkeydown={(e) => {
-									if (e.key === 'Enter') {
-										e.preventDefault();
-										rename(o.id, draft, o.name);
-									}
-								}}
-							/>
-							<div class="flex flex-wrap gap-1" role="radiogroup" aria-label="Color">
-								{#each OPTION_COLORS as c (c)}
-									{@const name = optionColorName(c)}
-									{#if c !== 'default'}
-										<button
-											type="button"
-											role="radio"
-											aria-checked={optionColorName(o.color) === name}
-											aria-label={optionColorLabel(c)}
-											title={optionColorLabel(c)}
-											class="grid size-6 place-items-center rounded-full"
-											style="background: var(--app-option-{name}-bg); color: var(--app-option-{name}-fg); box-shadow: inset 0 0 0 1px var(--app-option-{name}-fg)"
-											onclick={() => onConfig(configWithOptionChanged(def, o.id, { color: c as OptionColor }))}
-										>
-											{#if optionColorName(o.color) === name}{@render checkIcon({ size: 12 })}{/if}
-										</button>
-									{/if}
-								{/each}
+						{#snippet trigger()}
+							<span class="flex min-w-0 flex-1 items-center gap-2 text-left" aria-label={`Edit option ${o.name}`}>
+								<span
+									class="size-3 shrink-0 rounded-full"
+									style="background: var(--app-option-{optionColorName(o.color)}-bg); box-shadow: inset 0 0 0 1px var(--app-option-{optionColorName(o.color)}-fg)"
+								></span>
+								<span class="truncate">{o.name}</span>
+							</span>
+						{/snippet}
+						{#snippet children()}
+							<div class="flex flex-col gap-2 border-y border-[color:var(--app-hairline)] bg-[color:var(--app-hover)] px-3 py-2">
+								<TextInput
+									size="small"
+									bind:value={draft}
+									inputAttrs={{
+										'aria-label': 'Option name',
+										onblur: () => rename(o.id, draft, o.name),
+										onkeydown: (e) => {
+											if (e.key === 'Enter') {
+												e.preventDefault();
+												rename(o.id, draft, o.name);
+											}
+										}
+									}}
+								/>
+								<!-- Exception (audit NE-4): the nine Notion option colors have no entasis picker
+								     (Chip/TagGroup take 7 semantic colors, ColorPicker is free-form), so the swatch row stays custom. -->
+								<div class="flex flex-wrap gap-1" role="radiogroup" aria-label="Color">
+									{#each OPTION_COLORS as c (c)}
+										{@const name = optionColorName(c)}
+										{#if c !== 'default'}
+											<button
+												type="button"
+												role="radio"
+												aria-checked={optionColorName(o.color) === name}
+												aria-label={optionColorLabel(c)}
+												class="grid size-6 place-items-center rounded-full"
+												style="background: var(--app-option-{name}-bg); color: var(--app-option-{name}-fg); box-shadow: inset 0 0 0 1px var(--app-option-{name}-fg)"
+												{@attach tooltip({ content: optionColorLabel(c), position: 'top' })}
+												onclick={() => onConfig(configWithOptionChanged(def, o.id, { color: c as OptionColor }))}
+											>
+												{#if optionColorName(o.color) === name}{@render checkIcon({ size: 12 })}{/if}
+											</button>
+										{/if}
+									{/each}
+								</div>
+								<Button
+									variant="ghost"
+									color="danger"
+									size="small"
+									class="w-fit"
+									prefix={trashIcon}
+									data-testid="delete-option"
+									onclick={() => {
+										openId = null;
+										onConfig(configWithoutOption(def, o.id));
+									}}
+								>
+									Delete option
+								</Button>
 							</div>
-							<button
-								type="button"
-								class="flex items-center gap-1.5 rounded px-1 text-sm text-[color:var(--app-danger)] hover:bg-[color:var(--app-active)]"
-								style="height: var(--app-button-height-small)"
-								data-testid="delete-option"
-								onclick={() => {
-									openId = null;
-									onConfig(configWithoutOption(def, o.id));
-								}}
-							>
-								{@render trashIcon({ size: 14 })} Delete option
-							</button>
-						</div>
-					{/if}
+						{/snippet}
+					</Collapsible>
 				</div>
 			{/each}
 		{/each}
@@ -151,20 +157,9 @@
 			add();
 		}}
 	>
-		<input
-			class="min-w-0 flex-1 rounded-[var(--app-radius-control)] border border-[color:var(--app-hairline-strong)] bg-[color:var(--app-page)] px-2 text-sm outline-none focus:border-[color:var(--app-accent)]"
-			style="height: var(--app-input-height)"
-			placeholder="Add an option…"
-			aria-label="Add an option"
-			bind:value={newName}
-		/>
-		<button
-			type="submit"
-			class="grid size-7 place-items-center rounded text-[color:var(--app-text-secondary)] hover:bg-[color:var(--app-hover)] disabled:opacity-40"
-			aria-label="Add option"
-			disabled={!newName.trim()}
-		>
-			{@render plusIcon({ size: 14 })}
-		</button>
+		<div class="min-w-0 flex-1">
+			<TextInput size="small" placeholder="Add an option…" bind:value={newName} inputAttrs={{ 'aria-label': 'Add an option' }} />
+		</div>
+		<Button type="submit" variant="ghost" color="neutral" size="small" label="Add option" prefix={plusIcon} disabled={!newName.trim()} />
 	</form>
 </div>

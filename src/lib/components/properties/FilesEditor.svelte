@@ -1,5 +1,7 @@
 <script lang="ts">
 	import { Button } from 'entasis/button';
+	import { FileInput } from 'entasis/file-input';
+	import { Empty } from 'entasis/empty';
 	import { paperclipIcon } from 'entasis/icons/paperclip';
 	import { xIcon } from 'entasis/icons/x';
 
@@ -24,10 +26,10 @@
 
 	let busy = $state(false);
 	let error = $state('');
-	let input = $state<HTMLInputElement>();
+	let chosen = $state<File[] | null>(null);
 
-	async function picked(list: FileList | null) {
-		const files = list ? [...list] : [];
+	async function picked(list: File[] | null) {
+		const files = list ?? [];
 		if (!files.length || !onUpload) return;
 		busy = true;
 		error = '';
@@ -37,7 +39,7 @@
 			error = (e as Error).message || 'Upload failed';
 		} finally {
 			busy = false;
-			if (input) input.value = '';
+			chosen = null;
 		}
 	}
 </script>
@@ -48,19 +50,25 @@
 			{@render paperclipIcon({ size: 14 })}
 			<span class="min-w-0 flex-1 truncate text-sm">{name(id)}</span>
 			{#if canEdit}
-				<button type="button" class="grid size-5 place-items-center rounded hover:bg-[color:var(--app-hover)]" aria-label={`Remove ${name(id)}`} onclick={() => onRemove(id)}>
-					{@render xIcon({ size: 12 })}
-				</button>
+				<Button variant="ghost" color="neutral" size="small" squared prefix={xIcon} label={`Remove ${name(id)}`} onclick={() => onRemove(id)} />
 			{/if}
 		</div>
 	{:else}
-		<div class="px-3 text-sm text-[color:var(--app-text-tertiary)]" style="line-height: var(--app-row-height)">No files yet.</div>
+		<Empty size="small" description="No files yet." />
 	{/each}
 	{#if canEdit && onUpload}
-		<div class="px-2 pt-1">
-			<input bind:this={input} type="file" multiple class="hidden" data-testid="file-input" onchange={(e) => picked(e.currentTarget.files)} />
-			<Button variant="ghost" size="small" loading={busy} prefix={paperclipIcon} onclick={() => input?.click()}>Upload a file</Button>
-			{#if error}<p class="px-1 pt-1 text-xs text-[color:var(--app-danger)]">{error}</p>{/if}
+		<div class="px-2 pt-1" data-testid="file-input">
+			<FileInput
+				mode="multiple"
+				size="small"
+				types={[]}
+				placeholder={busy ? 'Uploading…' : 'Drop files here or click to upload'}
+				disabled={busy}
+				bind:value={chosen}
+				onValueChange={(files) => void picked(files)}
+				onReject={(rejections) => (error = `Could not add ${rejections[0]?.file.name ?? 'that file'} (${rejections[0]?.reason ?? 'rejected'})`)}
+			/>
+			{#if error}<p class="m-0 px-1 pt-1 text-xs text-[color:var(--app-danger)]" role="alert">{error}</p>{/if}
 		</div>
 	{/if}
 </div>

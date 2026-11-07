@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { onDestroy, untrack } from 'svelte';
+	import { Button } from 'entasis/button';
 	import { trashIcon } from 'entasis/icons/trash';
 	import type { WorkspaceStore } from '#lib/client/workspace.svelte.ts';
 	import { filterKey, type FilterGroup } from '#lib/shared/filter-ast.ts';
@@ -7,7 +8,6 @@
 	import type { BuilderApi } from './api.ts';
 	import FilterGroupView from './FilterGroupView.svelte';
 	import { countConditions, filterableProps, pruneFilter, registryOf } from './logic.ts';
-	import { ghostButtonClass } from './styles.ts';
 
 	/**
 	 * The nested filter builder (AND/OR groups up to three levels). It edits a working draft, where a
@@ -96,21 +96,14 @@
 	const count = $derived(countConditions(draft));
 </script>
 
-<div class="flex min-w-[420px] flex-col gap-2 p-3" data-testid="filter-builder">
+<div class="flex min-w-[540px] flex-col gap-2 p-3" data-testid="filter-builder">
 	{#if count === 0}
 		<p class="px-0.5 text-sm text-[color:var(--app-text-tertiary)]" data-testid="filter-empty">No filters applied. Add a rule to narrow this view.</p>
 	{/if}
 	<FilterGroupView group={draft} path={[]} {api} />
 	{#if count > 0 && !readonly}
 		<div class="border-t border-[color:var(--app-hairline)] pt-1.5">
-			<button
-				type="button"
-				class="{ghostButtonClass} hover:text-[color:var(--app-danger)]"
-				data-testid="filter-clear"
-				onclick={() => edit(() => ({ and: [] }))}
-			>
-				{@render trashIcon({ size: 14 })} Delete filter
-			</button>
+			<Button variant="ghost" size="small" color="danger" prefix={trashIcon} data-testid="filter-clear" onclick={() => edit(() => ({ and: [] }))}>Delete filter</Button>
 		</div>
 	{/if}
 </div>

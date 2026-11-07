@@ -105,6 +105,40 @@ test('an inline database block renders its rows, and a new row appears in it', a
 	await shot(ada.page, 'database-inline');
 });
 
+test('a linked database view picks its database with an entasis combobox, by the keyboard', async () => {
+	const { ada } = world;
+	// A database page for the picker to list (the sidebar's "New database"), then a page of its own for the block.
+	await ada.page.getByRole('button', { name: 'New database' }).click();
+	await expect.poll(() => ada.page.evaluate(() => [...(window as any).__flarion.pages.values()].some((p: any) => p.isDatabase)), { timeout: 20_000 }).toBe(true);
+	await freshPage('Linked view page');
+	await newLine(ada.page);
+	await ada.page.keyboard.type('/linked');
+	await expect(ada.page.getByTestId('slash-menu')).toBeVisible();
+	await ada.page.keyboard.press('Enter');
+	const picker = ada.page.getByTestId('database-picker');
+	await expect(picker).toBeVisible({ timeout: 20_000 });
+	// The picker is a Combobox: it lists the workspace's databases, ArrowDown + Enter picks one.
+	await picker.getByRole('combobox').click();
+	await expect(ada.page.getByRole('option').first()).toBeVisible({ timeout: 20_000 });
+	await ada.page.screenshot({ path: 'docs/screens/entasis/c-database-linker-light.png' });
+	await ada.page.keyboard.press('ArrowDown');
+	await ada.page.keyboard.press('Enter');
+	await expect(ada.page.getByTestId('database-view')).toBeVisible({ timeout: 20_000 });
+});
+
+test('a breadcrumb block is entasis Breadcrumbs showing the page it sits on', async () => {
+	const { ada } = world;
+	await freshPage('Crumbs page');
+	await newLine(ada.page);
+	await ada.page.keyboard.type('/breadcrumb');
+	await expect(ada.page.getByTestId('slash-menu')).toBeVisible();
+	await ada.page.keyboard.press('Enter');
+	const crumbs = ada.page.getByTestId('breadcrumb');
+	await expect(crumbs).toBeVisible({ timeout: 20_000 });
+	await expect(crumbs).toContainText('Crumbs page');
+	await ada.page.screenshot({ path: 'docs/screens/entasis/c-breadcrumb-block-light.png' });
+});
+
 test('a date mention shows Today, and the picker changes it to Tomorrow', async () => {
 	const { ada } = world;
 	await freshPage('Date page');

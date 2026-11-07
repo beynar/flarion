@@ -3,9 +3,8 @@
 	import TriggerMenu from './TriggerMenu.svelte';
 	import type { MentionItem, TriggerMenuController } from 'edytor';
 	import { Avatar } from 'entasis/avatar';
-	import { Button } from '../ui/index.ts';
-	import { cn } from '../ui/cn.ts';
-	import { row as rowClass } from './ui.js';
+	import { MenuOption } from 'entasis/menu-option';
+	import { isPageMention } from '../mentions.ts';
 
 	/** Notion's `@` menu, drawn for `createMentionPlugin({ menu })`: a person's avatar, name and line. */
 	let { controller }: { controller: TriggerMenuController<MentionItem> } = $props();
@@ -16,22 +15,26 @@
 </script>
 
 <TriggerMenu {controller} said={words.mention}>
-	{#snippet row(item: MentionItem, index: number)}
-		<Button
-			variant="ghost"
-			class={cn(rowClass, 'row h-auto min-h-8 py-1')}
-			data-selected={controller.index === index}
+	{#snippet row(item: MentionItem, index: number, attrs: (index: number) => Record<string, unknown>)}
+		<MenuOption
+			role="option"
+			size="small"
+			density="compact"
+			highlighted={controller.index === index}
 			{@attach controller.option(index)}
-			data-testid="trigger-menu-item"
-			data-mention-kind={controller.trigger.name}
-			onmousemove={() => (controller.index = index)}
+			attrs={{ ...attrs(index), 'data-testid': 'trigger-menu-item', 'data-mention-kind': controller.trigger.name }}
 			onclick={() => void controller.pick(item)}
 		>
-			<Avatar name={item.label} src={avatarOf(item.avatar)} size="small" alt="" />
+			{#snippet prefix()}
+				{#if isPageMention(item.id)}
+					<!-- A page's label already starts with its emoji when it has one; initials of an emoji are garbage. -->
+					{#if !/^\p{Extended_Pictographic}/u.test(item.label)}<span aria-hidden="true">📄</span>{/if}
+				{:else}
+					<Avatar name={item.label} src={avatarOf(item.avatar)} size="small" alt="" />
+				{/if}
+			{/snippet}
 			<span class="name truncate">{item.label}</span>
-			{#if item.description}<span class="description text-[color:var(--app-text-secondary)] ml-auto truncate text-xs"
-					>{item.description}</span
-				>{/if}
-		</Button>
+			{#snippet suffix()}{#if item.description}<span class="description text-neutral/70 truncate text-xs">{item.description}</span>{/if}{/snippet}
+		</MenuOption>
 	{/snippet}
 </TriggerMenu>

@@ -3,10 +3,13 @@
 	tab to rename, duplicate or delete it. Edits go through the store (`createView`, `updateView`, `deleteView`).
 -->
 <script lang="ts">
-	import { tick } from 'svelte';
 	import { Tabs } from 'entasis/tabs';
 	import { Popover } from 'entasis/popover';
+	import { PopupMenu } from 'entasis/popup-menu';
+	import type { MenuItem } from 'entasis/menu';
 	import { Button } from 'entasis/button';
+	import { TextInput } from 'entasis/text-input';
+	import { confirmation } from 'entasis/confirmation';
 	import { plusIcon } from 'entasis/icons/plus';
 	import { dotsThreeIcon } from 'entasis/icons/dotsThree';
 	import { pencilSimpleIcon } from 'entasis/icons/pencilSimple';
@@ -21,22 +24,14 @@
 
 	const items = $derived(views.map((v) => ({ value: v.id, label: v.name })));
 
-	let adding = $state(false);
-	let menuOpen = $state(false);
 	let renaming = $state(false);
 	let draft = $state('');
-	let confirmDelete = $state(false);
+	let anchor = $state<HTMLElement | null>(null);
+	/** What the options menu chose; it runs once the menu has closed and given focus back. */
+	let afterMenu: (() => void) | null = null;
 	const active = $derived(views.find((v) => v.id === activeId));
 
-	$effect(() => {
-		if (!menuOpen) {
-			renaming = false;
-			confirmDelete = false;
-		}
-	});
-
-	async function addView(type: ViewType, close: () => void) {
-		close();
+	async function addView(type: ViewType) {
 		try {
 			await env.store.createView(env.collection.id, {
 				type,
@@ -53,13 +48,11 @@
 	async function rename() {
 		const name = draft.trim();
 		renaming = false;
-		menuOpen = false;
 		if (name && active && name !== active.name) await env.updateView({ name }).catch(() => undefined);
 	}
 
 	async function duplicate() {
 		if (!active) return;
-		menuOpen = false;
 		try {
 			await env.store.createView(env.collection.id, {
 				type: active.type,
@@ -79,16 +72,54 @@
 		if (!active || views.length < 2) return;
 		const doomed = active.id;
 		const next = views.find((v) => v.id !== doomed)!;
-		menuOpen = false;
 		onPick(next.id);
 		await env.store.deleteView(env.collection.id, doomed).catch(() => undefined);
 	}
 
-	async function startRename() {
-		draft = active?.name ?? '';
-		renaming = true;
-		await tick();
+	function confirmRemove() {
+		if (!active) return;
+		void confirmation({
+			title: `Delete the view '${active.name}'?`,
+			description: 'The pages stay in the database. Only this view is removed.',
+			confirm: { text: 'Delete view', color: 'danger', 'data-testid': 'view-delete-confirm' },
+			cancel: 'Cancel',
+			onConfirm: remove
+		});
 	}
+
+	const later = (fn: () => void) => () => {
+		afterMenu = fn;
+	};
+	const viewMenu = $derived<MenuItem[]>([
+		{
+			type: 'option',
+			title: 'Rename',
+			prefix: pencilSimpleIcon,
+			'data-testid': 'view-rename',
+			onclick: later(() => {
+				draft = active?.name ?? '';
+				renaming = true;
+			})
+		} as MenuItem,
+		{ type: 'option', title: 'Duplicate', prefix: copyIcon, 'data-testid': 'view-duplicate', onclick: () => void duplicate() } as MenuItem,
+		{ type: 'separator' },
+		{
+			type: 'option',
+			title: 'Delete view',
+			prefix: trashIcon,
+			color: 'danger',
+			disabled: views.length < 2,
+			'data-testid': 'view-delete',
+			onclick: later(confirmRemove)
+		} as MenuItem
+	]);
+	const addMenu = $derived<MenuItem[]>([
+		{
+			type: 'group',
+			label: 'Add a view',
+			items: VIEW_TYPE_ORDER.map((type) => ({ type: 'option', title: VIEW_LABELS[type], prefix: VIEW_ICONS[type], 'data-testid': `view-add-${type}`, onclick: () => void addView(type) }) as MenuItem)
+		}
+	]);
 </script>
 
 <div class="tabs" data-testid="view-tabs">
@@ -104,62 +135,40 @@
 	</Tabs>
 
 	{#if env.editable}
-		<Popover position="bottom-start" bind:open={menuOpen} modal={false} offset={4} focusOnOpen="first">
+		<PopupMenu
+			position="bottom-start"
+			menu={{ items: viewMenu }}
+			onAfterClose={() => {
+				const fn = afterMenu;
+				afterMenu = null;
+				fn?.();
+			}}
+		>
 			{#snippet trigger(popover)}
-				<Button variant="ghost" size="small" label="View options" prefix={dotsThreeIcon} data-testid="view-menu" {@attach popover.trigger} />
+				<Button bind:ref={anchor} variant="ghost" size="small" label="View options" prefix={dotsThreeIcon} data-testid="view-menu" {@attach popover.trigger} />
 			{/snippet}
+		</PopupMenu>
+		<!-- Renaming is a small popover on the same button as the menu: the menu has no text field of its own. -->
+		<Popover trigger={false} ref={anchor} bind:open={renaming} position="bottom-start" modal={false} offset={4} focusOnOpen="first" label="Rename view">
 			{#snippet children()}
-				<div class="menu" data-testid="view-menu-body">
-					{#if renaming}
-						<form
-							class="rename"
-							onsubmit={(e) => {
-								e.preventDefault();
-								void rename();
-							}}
-						>
-							<input
-								aria-label="View name"
-								data-testid="view-rename-input"
-								bind:value={draft}
-								{@attach (el) => {
-									el.focus();
-									el.select();
-								}}
-							/>
-						</form>
-					{:else}
-						<button type="button" class="item" data-testid="view-rename" onclick={() => void startRename()}>{@render pencilSimpleIcon({ size: 16 })} Rename</button>
-						<button type="button" class="item" data-testid="view-duplicate" onclick={() => void duplicate()}>{@render copyIcon({ size: 16 })} Duplicate</button>
-						{#if confirmDelete}
-							<button type="button" class="item danger" data-testid="view-delete-confirm" onclick={() => void remove()}>{@render trashIcon({ size: 16 })} Confirm delete</button>
-						{:else}
-							<button type="button" class="item danger" data-testid="view-delete" disabled={views.length < 2} onclick={() => (confirmDelete = true)}>
-								{@render trashIcon({ size: 16 })} Delete view
-							</button>
-						{/if}
-					{/if}
-				</div>
+				<form
+					class="w-[220px] p-2"
+					data-testid="view-rename-form"
+					onsubmit={(e) => {
+						e.preventDefault();
+						void rename();
+					}}
+				>
+					<TextInput size="small" value={draft} onValueChange={(v) => (draft = v ?? '')} inputAttrs={{ 'aria-label': 'View name', 'data-testid': 'view-rename-input', onfocus: (e) => e.currentTarget.select() }} />
+				</form>
 			{/snippet}
 		</Popover>
 
-		<Popover position="bottom-start" bind:open={adding} modal={false} offset={4} focusOnOpen="first">
+		<PopupMenu position="bottom-start" menu={{ items: addMenu }}>
 			{#snippet trigger(popover)}
 				<Button variant="ghost" size="small" label="Add a view" prefix={plusIcon} data-testid="view-add" {@attach popover.trigger} />
 			{/snippet}
-			{#snippet children(popover)}
-				<div class="menu" data-testid="view-add-menu">
-					<div class="heading">Add a view</div>
-					{#each VIEW_TYPE_ORDER as type (type)}
-						{@const Icon = VIEW_ICONS[type]}
-						<button type="button" class="item" data-testid="view-add-{type}" onclick={() => void addView(type, () => popover.close())}>
-							{@render Icon({ size: 16 })}
-							{VIEW_LABELS[type]}
-						</button>
-					{/each}
-				</div>
-			{/snippet}
-		</Popover>
+		</PopupMenu>
 	{/if}
 </div>
 
@@ -172,49 +181,5 @@
 	}
 	.tabs :global(.view-tabs) {
 		min-width: 0;
-	}
-	.menu {
-		display: flex;
-		flex-direction: column;
-		gap: 1px;
-		min-width: 180px;
-		padding: 4px;
-	}
-	.heading {
-		padding: 4px 8px;
-		font-size: 12px;
-		color: var(--app-text-tertiary);
-	}
-	.item {
-		display: flex;
-		align-items: center;
-		gap: 8px;
-		height: var(--app-row-height);
-		padding: 0 8px;
-		border-radius: var(--app-radius-control);
-		font-size: 14px;
-		text-align: left;
-		cursor: pointer;
-		color: var(--app-text);
-	}
-	.item:hover:not(:disabled) {
-		background: var(--app-hover);
-	}
-	.item:disabled {
-		opacity: 0.4;
-		cursor: default;
-	}
-	.item.danger {
-		color: var(--app-danger);
-	}
-	.rename input {
-		width: 100%;
-		height: var(--app-input-height);
-		padding: 0 8px;
-		border: 1px solid var(--app-accent);
-		border-radius: var(--app-radius-control);
-		background: var(--app-page);
-		color: var(--app-text);
-		outline: none;
 	}
 </style>

@@ -7,7 +7,10 @@
 <script lang="ts">
 	import { untrack } from 'svelte';
 	import { DataTable, type DataTableColumn, type DataTableState } from 'entasis/data-table';
-	import { Popover } from 'entasis/popover';
+	import { PopupMenu } from 'entasis/popup-menu';
+	import type { MenuItem } from 'entasis/menu';
+	import { Button } from 'entasis/button';
+	import { Empty } from 'entasis/empty';
 	import { plusIcon } from 'entasis/icons/plus';
 	import { caretDownIcon } from 'entasis/icons/caretDown';
 	import { sortAscendingIcon } from 'entasis/icons/sortAscending';
@@ -121,6 +124,14 @@
 	function attach(def: PropertyDef) {
 		void env.updateView({ columns: { columns: withColumnShown(env.view, env.collection, env.properties, def.id, true), options: env.view.columns.options } }).catch(() => undefined);
 	}
+	/** The menu under a column header: sort either way, hide (the title stays). */
+	const headerMenu = (def: PropertyDef): MenuItem[] => [
+		{ type: 'option', title: 'Sort ascending', prefix: sortAscendingIcon, disabled: !env.editable, 'data-testid': 'column-sort-asc', onclick: () => sortBy(def.id, 'asc') } as MenuItem,
+		{ type: 'option', title: 'Sort descending', prefix: sortDescendingIcon, disabled: !env.editable, 'data-testid': 'column-sort-desc', onclick: () => sortBy(def.id, 'desc') } as MenuItem,
+		...(def.id !== TITLE_PROP_ID
+			? [{ type: 'option', title: 'Hide', prefix: eyeSlashIcon, disabled: !env.editable, 'data-testid': 'column-hide', onclick: () => hide(def.id) } as MenuItem]
+			: [])
+	];
 	const hiddenDefs = $derived(allColumns(env.view, env.collection, env.properties).filter((e) => e.hidden).map((e) => e.def));
 	const canWriteRow = (row: ViewRow) => env.editable && row.access !== 'read' && row.access !== 'comment';
 </script>
@@ -168,28 +179,20 @@
 								{#if sortOf(def.id) === 'asc'}{@render sortAscendingIcon({ size: 12 })}{:else}{@render sortDescendingIcon({ size: 12 })}{/if}
 							</span>
 						{/if}
-						<Popover position="bottom-start" modal={false} offset={4}>
+						<PopupMenu position="bottom-start" menu={{ items: headerMenu(def) }}>
 							{#snippet trigger(popover)}
-								<button type="button" class="hmenu" aria-label="{def.name} options" data-testid="column-menu" {@attach popover.trigger}>
-									{@render caretDownIcon({ size: 12 })}
-								</button>
+								<Button
+									variant="ghost"
+									size="small"
+									squared
+									label="{def.name} options"
+									prefix={caretDownIcon}
+									data-testid="column-menu"
+									class="size-5! min-h-0! opacity-0 group-hover/data-table-header:opacity-100 focus-visible:opacity-100"
+									{@attach popover.trigger}
+								/>
 							{/snippet}
-							{#snippet children(popover)}
-								<div class="menu" data-testid="column-menu-body">
-									<button type="button" class="mitem" disabled={!env.editable} onclick={() => (sortBy(def.id, 'asc'), popover.close())}>
-										{@render sortAscendingIcon({ size: 16 })} Sort ascending
-									</button>
-									<button type="button" class="mitem" disabled={!env.editable} onclick={() => (sortBy(def.id, 'desc'), popover.close())}>
-										{@render sortDescendingIcon({ size: 16 })} Sort descending
-									</button>
-									{#if def.id !== TITLE_PROP_ID}
-										<button type="button" class="mitem" disabled={!env.editable} data-testid="column-hide" onclick={() => (hide(def.id), popover.close())}>
-											{@render eyeSlashIcon({ size: 16 })} Hide
-										</button>
-									{/if}
-								</div>
-							{/snippet}
-						</Popover>
+						</PopupMenu>
 					</span>
 				{/if}
 			{/snippet}
@@ -214,16 +217,14 @@
 				{/if}
 			{/snippet}
 			{#snippet empty()}
-				<div class="empty" data-testid="view-empty">No pages yet</div>
+				<Empty size="small" title="No pages yet" data-testid="view-empty" />
 			{/snippet}
 		</DataTable>
 	{/key}
 
 	<div class="foot">
 		{#if env.editable}
-			<button type="button" class="add" data-testid="view-add-row" onclick={() => void env.newRow()}>
-				{@render plusIcon({ size: 14 })} New page
-			</button>
+			<Button variant="ghost" size="small" prefix={plusIcon} data-testid="view-add-row" onclick={() => void env.newRow()}>New page</Button>
 			<AddProperty existing={hiddenDefs} names={env.properties} onCreate={addProperty} onAttach={attach} />
 		{/if}
 		<span class="count" data-testid="view-count">
@@ -262,42 +263,6 @@
 		display: inline-flex;
 		color: var(--app-accent);
 	}
-	.hmenu {
-		display: inline-flex;
-		padding: 2px;
-		border-radius: 4px;
-		opacity: 0;
-		cursor: pointer;
-		color: var(--app-text-secondary);
-	}
-	.head:hover .hmenu,
-	.hmenu:focus-visible {
-		opacity: 1;
-	}
-	.hmenu:hover {
-		background: var(--app-hover);
-	}
-	.menu {
-		display: flex;
-		flex-direction: column;
-		min-width: 190px;
-		padding: 4px;
-	}
-	.mitem {
-		display: flex;
-		align-items: center;
-		gap: 8px;
-		height: var(--app-row-height);
-		padding: 0 8px;
-		border-radius: var(--app-radius-control);
-		font-size: 14px;
-		text-align: left;
-		cursor: pointer;
-		color: var(--app-text);
-	}
-	.mitem:hover:not(:disabled) {
-		background: var(--app-hover);
-	}
 	.tcell {
 		display: flex;
 		align-items: center;
@@ -318,10 +283,6 @@
 		align-items: flex-start;
 		padding-block: 4px;
 	}
-	.empty {
-		padding: 16px;
-		color: var(--app-text-secondary);
-	}
 	.foot {
 		display: flex;
 		align-items: center;
@@ -331,20 +292,6 @@
 		font-size: 13px;
 		color: var(--app-text-secondary);
 		border-bottom: 1px solid var(--app-hairline);
-	}
-	.add {
-		display: inline-flex;
-		align-items: center;
-		gap: 4px;
-		height: 26px;
-		padding: 0 8px;
-		border-radius: var(--app-radius-control);
-		color: var(--app-text-secondary);
-		cursor: pointer;
-	}
-	.add:hover {
-		background: var(--app-hover);
-		color: var(--app-text);
 	}
 	.count {
 		margin-left: auto;

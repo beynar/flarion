@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { Button } from '../ui/index.ts';
 	import { Input } from '../ui/index.ts';
+	import { FileInput } from 'entasis/file-input';
 	import { words } from './words.svelte.js';
 	import { MAX_INLINE_IMAGE_BYTES, type MediaEmptyController } from 'edytor';
 
@@ -70,25 +71,27 @@
 	{#if panel.open}
 		<div class="empty-form" {...mark('form')}>
 			<Input
+				class="empty-link"
 				placeholder={own.placeholder}
 				aria-label={own.field}
 				bind:value={panel.draft}
 				{@attach panel.field}
 			/>
-			<Button variant="ghost" onclick={() => panel.embed()}>{own.submit}</Button>
+			<Button variant="default" onclick={() => panel.embed()}>{own.submit}</Button>
 			{#if panel.canUpload}
-				<label class="empty-upload" {...mark('upload')}>
-					{upload}
-					<input
-						type="file"
-						accept={panel.accept}
-						hidden
-						onchange={(event) => {
-							const picked = event.currentTarget.files?.[0];
+				<div class="empty-upload" {...mark('upload')}>
+					<FileInput
+						mode="single"
+						types={panel.accept ? panel.accept.split(',').map((type) => type.trim()) : undefined}
+						placeholder={upload}
+						size="small"
+						theme={{ inputContainer: { base: 'min-h-8! py-0! px-3! w-auto' } }}
+						placeholderClass="flex-row gap-2"
+						onValueChange={(picked) => {
 							if (picked) void panel.upload(picked);
 						}}
 					/>
-				</label>
+				</div>
 			{/if}
 			{#if panel.failed}
 				<small {...mark('error', panel.failed)}>{failure(panel.failed)}</small>
@@ -101,24 +104,19 @@
 	:global(.empty-add) {
 		display: flex;
 		align-items: center;
+		justify-content: flex-start;
 		gap: 10px;
 		width: 100%;
+		min-height: 48px;
 		padding: 12px 36px 12px 12px;
-		border-radius: 6px;
 		background: var(--app-hover);
 		color: var(--app-text-secondary);
-		font: inherit;
 		font-size: 14px;
 		text-align: left;
-		text-decoration: none;
-		cursor: pointer;
-		transition: background-color 80ms ease;
 	}
 	div.empty-add {
 		cursor: default;
-	}
-	:global(button.empty-add:hover) {
-		background: var(--app-hover);
+		border-radius: 6px;
 	}
 	.empty-uploading {
 		display: flex;
@@ -142,29 +140,9 @@
 		align-items: center;
 		gap: 8px;
 	}
-	.empty-form :global(input:not([type='file'])) {
+	.empty-form :global(.empty-link) {
 		flex: 1;
 		min-width: 200px;
-		height: 32px;
-		padding: 0 10px;
-		border-radius: 6px;
-		background: var(--app-hover);
-		box-shadow: inset 0 0 0 1px var(--app-hairline);
-		font: inherit;
-		font-size: 14px;
-		outline: 0;
-	}
-	.empty-form :global(button),
-	.empty-upload {
-		height: 32px;
-		padding: 0 12px;
-		border-radius: 6px;
-		background: var(--app-accent);
-		color: #fff;
-		font-size: 14px;
-		font-weight: 500;
-		line-height: 32px;
-		cursor: pointer;
 	}
 	.empty-form small {
 		flex-basis: 100%;

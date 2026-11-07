@@ -72,10 +72,10 @@ test('the Trash screen lists, searches and restores; Delete forever asks first',
 	await expect(page.getByTestId('trash-row')).toHaveCount(2, { timeout: 20_000 });
 	await shotsP3(page, 'trash');
 
-	await page.getByTestId('trash-search').fill('old');
+	await page.getByPlaceholder('Search trashed pages…').fill('old');
 	await expect(page.getByTestId('trash-row')).toHaveCount(1);
 	await expect(page.getByTestId('trash-row')).toContainText('Old plan');
-	await page.getByTestId('trash-search').fill('');
+	await page.getByPlaceholder('Search trashed pages…').fill('');
 	await expect(page.getByTestId('trash-row')).toHaveCount(2);
 
 	// Restore "Scratch notes": it returns to the sidebar and Bob's open page comes back.
@@ -122,8 +122,8 @@ test('an archived teamspace is not in Trash: its owner restores it, with its pag
 	await teamspace.getByRole('button', { name: new RegExp(`More actions for ${NAME}`) }).click();
 	await page.getByRole('menuitem', { name: 'Teamspace settings' }).click();
 	const settings = page.getByTestId('teamspace-settings-dialog');
-	await settings.getByTestId('teamspace-add-member').fill('Bob');
-	await settings.getByTestId('teamspace-candidate').filter({ hasText: 'Bob Babbage' }).click();
+	await settings.getByTestId('teamspace-add-member').getByRole('combobox').fill('Bob');
+	await settings.page().getByTestId('teamspace-candidate').filter({ hasText: 'Bob Babbage' }).click();
 	await expect(settings.getByTestId('teamspace-member-row').filter({ hasText: 'Bob Babbage' })).toBeVisible();
 	await page.keyboard.press('Escape');
 	await newTeamspacePage(page, NAME, 'Roadmap');

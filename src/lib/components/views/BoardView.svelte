@@ -7,7 +7,12 @@
 -->
 <script lang="ts">
 	import { Kanban, type KanbanCardMove, type KanbanColumnData, type KanbanColumnMove } from 'entasis/kanban';
-	import { Popover } from 'entasis/popover';
+	import { PopupMenu } from 'entasis/popup-menu';
+	import type { MenuItem } from 'entasis/menu';
+	import { Button } from 'entasis/button';
+	import { Chip } from 'entasis/chip';
+	import { Empty } from 'entasis/empty';
+	import { Alert } from 'entasis/alert';
 	import { MAX_WINDOW } from '#lib/shared/protocol.ts';
 	import { dotsThreeIcon } from 'entasis/icons/dotsThree';
 	import { plusIcon } from 'entasis/icons/plus';
@@ -86,6 +91,9 @@
 		setSpec({ sort: 'manual', order: [...next, ...(spec?.hidden ?? [])] });
 	}
 
+	const columnMenu = (key: string): MenuItem[] => [
+		{ type: 'option', title: 'Hide', prefix: eyeSlashIcon, disabled: !env.editable, 'data-testid': 'board-column-hide', onclick: () => hide(key) } as MenuItem
+	];
 	const hide = (key: string) => setSpec({ hidden: [...(spec?.hidden ?? []), key] });
 	const show = (key: string) => setSpec({ hidden: (spec?.hidden ?? []).filter((k) => k !== key) });
 	const startValue = (key: string) => (def ? valueOfGroup(def, key, spec) : undefined);
@@ -97,7 +105,12 @@
 
 <div class="board" class:bleed={env.fullPage} data-testid="view-board" data-groups={columns.length}>
 	{#if !spec || !def}
-		<div class="note" data-testid="board-needs-group">Group this board by a status, select or person property to see its columns. Use the Group menu above.</div>
+		<Empty
+			size="small"
+			title="This board has no columns yet"
+			description="Group it by a status, select or person property to see its columns. Use the Group menu above."
+			data-testid="board-needs-group"
+		/>
 	{:else}
 		<Kanban
 			bind:columns
@@ -129,30 +142,20 @@
 					{/if}
 					<span class="count" data-testid="board-column-count">{g?.total ?? column.cards.length}</span>
 					<span class="spacer"></span>
-					<Popover position="bottom-end" modal={false} offset={4}>
+					<PopupMenu position="bottom-end" menu={{ items: columnMenu(column.id) }}>
 						{#snippet trigger(popover)}
-							<button type="button" class="ibtn" aria-label="{m.label} options" data-testid="board-column-menu" {@attach popover.trigger}>
-								{@render dotsThreeIcon({ size: 16 })}
-							</button>
+							<Button variant="ghost" size="small" squared label="{m.label} options" prefix={dotsThreeIcon} data-testid="board-column-menu" {@attach popover.trigger} />
 						{/snippet}
-						{#snippet children(popover)}
-							<div class="menu">
-								<button type="button" class="mitem" disabled={!env.editable} data-testid="board-column-hide" onclick={() => (hide(column.id), popover.close())}>
-									{@render eyeSlashIcon({ size: 16 })} Hide
-								</button>
-							</div>
-						{/snippet}
-					</Popover>
+					</PopupMenu>
 					{#if env.editable}
-						<button type="button" class="ibtn" aria-label="Add a card to {m.label}" data-testid="board-column-add" onclick={() => addCard(column.id)}>
-							{@render plusIcon({ size: 16 })}
-						</button>
+						<Button variant="ghost" size="small" squared label="Add a card to {m.label}" prefix={plusIcon} data-testid="board-column-add" onclick={() => addCard(column.id)} />
 					{/if}
 				</div>
 			{/snippet}
 			{#snippet card({ card, column })}
 				{@const row = card.row}
 				{@const cover = env.cover(row)}
+				<!-- Content of the Kanban card (entasis owns the draggable card element): a link-like surface, as it holds links of its own. -->
 				<div
 					class="card"
 					role="link"
@@ -179,14 +182,12 @@
 			{#snippet columnFooter({ column })}
 				{@const g = info(column.id)}
 				{#if g && g.loaded < g.total && g.loaded < MAX_WINDOW}
-					<button type="button" class="more" data-testid="board-load-more" onclick={() => env.loadMore(column.id)}>Load more ({g.total - g.loaded})</button>
+					<Button variant="ghost" size="small" fullWidth class="justify-start text-[color:var(--app-text-tertiary)]" data-testid="board-load-more" onclick={() => env.loadMore(column.id)}>Load more ({g.total - g.loaded})</Button>
 				{:else if g && g.loaded < g.total}
-					<div class="more capped" data-testid="board-window-cap">Showing the first {g.loaded.toLocaleString('en-US')} cards. Filter this view to see the rest.</div>
+					<Alert size="small" variant="soft" color="info" data-testid="board-window-cap">Showing the first {g.loaded.toLocaleString('en-US')} cards. Filter this view to see the rest.</Alert>
 				{/if}
 				{#if env.editable}
-					<button type="button" class="new" data-testid="board-new" onclick={() => addCard(column.id)}>
-						{@render plusIcon({ size: 14 })} New
-					</button>
+					<Button variant="ghost" size="small" fullWidth prefix={plusIcon} class="justify-start text-[color:var(--app-text-tertiary)]" data-testid="board-new" onclick={() => addCard(column.id)}>New</Button>
 				{/if}
 			{/snippet}
 		</Kanban>
@@ -195,9 +196,9 @@
 				<span class="hlabel">Hidden groups</span>
 				{#each hiddenGroups as g (g.key)}
 					{@const m = meta(g.key)}
-					<button type="button" class="hchip" data-testid="board-show-group" onclick={() => show(g.key)}>
+					<Chip size="small" variant="soft" color="neutral" data-testid="board-show-group" onclick={() => show(g.key)}>
 						{m.label}{#if g.total !== undefined} <span class="count">{g.total}</span>{/if}
-					</button>
+					</Chip>
 				{/each}
 			</div>
 		{/if}
@@ -225,10 +226,6 @@
 		margin-inline: calc(-1 * var(--bleed));
 		padding-inline: var(--bleed);
 	}
-	.note {
-		padding: 24px 8px;
-		color: var(--app-text-secondary);
-	}
 	.colhead {
 		display: flex;
 		align-items: center;
@@ -247,36 +244,6 @@
 	.empty-label {
 		font-size: 14px;
 		color: var(--app-text-secondary);
-	}
-	.ibtn {
-		display: inline-flex;
-		padding: 3px;
-		border-radius: 4px;
-		color: var(--app-text-tertiary);
-		cursor: pointer;
-	}
-	.ibtn:hover {
-		background: var(--app-hover);
-		color: var(--app-text);
-	}
-	.menu {
-		display: flex;
-		flex-direction: column;
-		min-width: 160px;
-		padding: 4px;
-	}
-	.mitem {
-		display: flex;
-		align-items: center;
-		gap: 8px;
-		height: var(--app-row-height);
-		padding: 0 8px;
-		border-radius: var(--app-radius-control);
-		cursor: pointer;
-		text-align: left;
-	}
-	.mitem:hover:not(:disabled) {
-		background: var(--app-hover);
 	}
 	.card {
 		display: flex;
@@ -303,30 +270,6 @@
 		color: var(--app-text-tertiary);
 		font-weight: 400;
 	}
-	.more,
-	.new {
-		display: flex;
-		align-items: center;
-		gap: 6px;
-		width: 100%;
-		height: 28px;
-		padding: 0 8px;
-		border-radius: var(--app-radius-control);
-		color: var(--app-text-tertiary);
-		cursor: pointer;
-		font-size: 14px;
-	}
-	.more.capped {
-		height: auto;
-		padding: 6px 8px;
-		cursor: default;
-		line-height: 1.35;
-	}
-	.more:hover:not(.capped),
-	.new:hover {
-		background: var(--app-hover);
-		color: var(--app-text-secondary);
-	}
 	.hidden-groups {
 		display: flex;
 		flex-wrap: wrap;
@@ -335,14 +278,5 @@
 		margin-top: 12px;
 		font-size: 13px;
 		color: var(--app-text-secondary);
-	}
-	.hchip {
-		display: inline-flex;
-		align-items: center;
-		gap: 6px;
-		padding: 2px 8px;
-		border-radius: 4px;
-		background: var(--app-hover);
-		cursor: pointer;
 	}
 </style>

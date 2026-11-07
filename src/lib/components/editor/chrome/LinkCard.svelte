@@ -1,5 +1,6 @@
 <script lang="ts">
-	import { float } from './float.js';
+	import Floating from './Floating.svelte';
+	import { tooltip } from 'entasis/tooltip';
 	import { Button } from '../ui/index.ts';
 	import { words } from './words.svelte.js';
 	import { linkIcon } from './icons.js';
@@ -15,15 +16,16 @@
 	Edit and Remove, just below the link. No press on it takes the editor's
 	focus (its host cancels each `mousedown`).
 -->
-<div
-	class="link-card"
-	data-testid="link-card"
-	data-edytor-link-card
+<Floating
+	anchor={() => controller.cardAnchor}
+	gap={0}
+	class="link-card box-border flex h-9 max-w-[420px] items-center gap-0.5 whitespace-nowrap pr-1 pl-2 text-[13px]"
 	role="toolbar"
 	aria-label={labels.card}
-	{@attach float(() => controller.cardAnchor, { gap: 0 })}
+	data-testid="link-card"
+	data-edytor-link-card
 >
-	<span class="link-card-url" style:--link-card-icon={linkIcon} title={controller.hoveredHref}
+	<span class="link-card-url" style:--link-card-icon={linkIcon} {@attach tooltip({ content: controller.hoveredHref, position: 'top', delay: 400 })}
 		>{controller.hoveredHref}</span
 	>
 	<Button
@@ -44,45 +46,9 @@
 		title={labels.removeLink}
 		onclick={() => controller.removeHovered()}>{labels.remove}</Button
 	>
-</div>
+</Floating>
 
 <style>
-	/* Its host's top padding bridges the link and the card for the pointer. */
-	.link-card {
-		display: flex;
-		align-items: center;
-		gap: 2px;
-		box-sizing: border-box;
-		max-width: 420px;
-		height: 36px;
-		padding: 0 4px 0 8px;
-		border-radius: 10px;
-		background: var(--app-page);
-		box-shadow:
-			0 14px 28px -6px rgba(0, 0, 0, 0.1),
-			0 2px 4px -1px rgba(0, 0, 0, 0.06),
-			0 0 0 1px var(--app-hairline);
-		color: var(--app-text);
-		font-family:
-			ui-sans-serif,
-			-apple-system,
-			BlinkMacSystemFont,
-			'Segoe UI Variable Display',
-			'Segoe UI',
-			Helvetica,
-			Arial,
-			sans-serif;
-		font-size: 13px;
-		line-height: 20px;
-		white-space: nowrap;
-		animation: link-card-in 120ms cubic-bezier(0.2, 0, 0, 1);
-	}
-	@keyframes link-card-in {
-		from {
-			opacity: 0;
-			transform: translateY(-2px);
-		}
-	}
 	.link-card-url {
 		display: inline-flex;
 		align-items: center;
@@ -101,20 +67,5 @@
 		background: currentColor;
 		-webkit-mask: var(--link-card-icon) center / 16px no-repeat;
 		mask: var(--link-card-icon) center / 16px no-repeat;
-	}
-	.link-card :global(button) {
-		flex: none;
-		height: 28px;
-		padding: 0 8px;
-		border: 0;
-		border-radius: 6px;
-		background: transparent;
-		color: inherit;
-		font: inherit;
-		cursor: pointer;
-		transition: background-color 80ms ease;
-	}
-	.link-card :global(button:hover) {
-		background: var(--app-hover);
 	}
 </style>

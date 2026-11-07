@@ -1,6 +1,12 @@
 <script lang="ts">
 	import { Popover } from 'entasis/popover';
+	import { Button } from 'entasis/button';
+	import { Select } from 'entasis/select';
+	import { Separator } from 'entasis/separator';
+	import { TextInput } from 'entasis/text-input';
+	import { confirmation } from 'entasis/confirmation';
 	import { trashIcon } from 'entasis/icons/trash';
+	import { focusInput } from '#lib/components/pickers/focus.ts';
 	import type { PropertyDef } from '#lib/shared/property-types.ts';
 	import { NUMBER_FORMATS, typeLabel } from './helpers.ts';
 	import { TYPE_ICONS } from './icons.ts';
@@ -25,19 +31,29 @@
 
 	let open = $state(false);
 	let draft = $state('');
-	let confirming = $state(false);
 	const icon = $derived(TYPE_ICONS[def.type]);
 
 	$effect(() => {
 		if (open) {
 			draft = def.name;
-			confirming = false;
 		}
 	});
 
 	function commit() {
 		const t = draft.trim();
 		if (t && t !== def.name) onRename(t);
+	}
+
+	/** Deleting a property removes it for everyone: the popover closes and entasis' confirmation asks first. */
+	async function askDelete() {
+		open = false;
+		const outcome = await confirmation({
+			title: `Delete the property '${def.name}'?`,
+			description: 'It disappears from every page in the workspace, with its values.',
+			confirm: { text: 'Delete property', color: 'danger', 'data-testid': 'delete-property-confirm' },
+			cancel: 'Cancel'
+		});
+		if (outcome.confirmed) onDelete();
 	}
 </script>
 
@@ -52,65 +68,65 @@
 	{#if editable}
 		<Popover position="bottom-start" focusOnOpen="first" modal={false} bind:open offset={4}>
 			{#snippet trigger(popover)}
-				<button
-					type="button"
-					class="flex min-h-[28px] w-full min-w-0 items-center rounded-[var(--app-radius-control)] px-1.5 text-left text-sm text-[color:var(--app-text-secondary)] hover:bg-[color:var(--app-hover)]"
-					aria-label={`Property ${def.name}`}
+				<Button
+					variant="ghost"
+					color="neutral"
+					size="small"
+					fullWidth
+					label={`Property ${def.name}`}
+					class="min-h-[28px] justify-start px-1.5 text-left font-normal text-[color:var(--app-text-secondary)]"
 					{@attach popover.trigger}
 				>
 					{@render body()}
-				</button>
+				</Button>
 			{/snippet}
 			{#snippet children()}
 				<div class="flex w-[240px] flex-col gap-1 p-2" data-testid="property-menu">
-					<input
-						class="rounded-[var(--app-radius-control)] border border-[color:var(--app-hairline-strong)] bg-[color:var(--app-page)] px-2 text-sm outline-none focus:border-[color:var(--app-accent)]"
-						style="height: var(--app-input-height)"
-						aria-label="Property name"
-						bind:value={draft}
-						onblur={commit}
-						onkeydown={(e) => {
-							if (e.key === 'Enter') {
-								e.preventDefault();
-								commit();
-								open = false;
-							}
-						}}
-					/>
+					<div {@attach focusInput}>
+						<TextInput
+							size="small"
+							bind:value={draft}
+							inputAttrs={{
+								'aria-label': 'Property name',
+								onblur: commit,
+								onkeydown: (e) => {
+									if (e.key === 'Enter') {
+										e.preventDefault();
+										commit();
+										open = false;
+									}
+								}
+							}}
+						/>
+					</div>
 					<div class="flex items-center gap-1.5 px-1 text-xs text-[color:var(--app-text-tertiary)]" style="height: var(--app-row-height)">
 						{@render icon({ size: 14 })}
 						{typeLabel(def.type)}
 					</div>
 					{#if def.type === 'number'}
-						<label class="flex flex-col gap-1 px-1 text-xs text-[color:var(--app-text-tertiary)]">
-							Number format
-							<select
-								class="rounded-[var(--app-radius-control)] border border-[color:var(--app-hairline-strong)] bg-[color:var(--app-page)] px-1.5 text-sm text-[color:var(--app-text)]"
-								style="height: var(--app-input-height)"
-								value={(def.config as { format?: string }).format ?? 'number'}
-								onchange={(e) => onConfig({ ...def.config, format: e.currentTarget.value })}
-							>
-								{#each NUMBER_FORMATS as f (f.value)}<option value={f.value}>{f.label}</option>{/each}
-							</select>
-						</label>
+						<Select
+							size="small"
+							label="Number format"
+							alignItemWithTrigger={false}
+							items={NUMBER_FORMATS}
+							value={(def.config as { format?: string }).format ?? 'number'}
+							onValueChange={(v) => v && onConfig({ ...def.config, format: v })}
+							triggerAttrs={{ 'data-testid': 'number-format' }}
+						/>
 					{/if}
-					<div class="my-1 border-t border-[color:var(--app-hairline)]"></div>
-					<button
-						type="button"
-						class="flex items-center gap-1.5 rounded px-1.5 text-left text-sm text-[color:var(--app-danger)] hover:bg-[color:var(--app-hover)]"
-						style="height: var(--app-row-height)"
+					<Separator />
+					<Button
+						variant="ghost"
+						color="danger"
+						size="small"
+						fullWidth
+						prefix={trashIcon}
+						class="justify-start"
 						data-testid="delete-property"
-						onclick={() => {
-							if (!confirming) confirming = true;
-							else {
-								open = false;
-								onDelete();
-							}
-						}}
+						onclick={() => void askDelete()}
 					>
-						{@render trashIcon({ size: 14 })}
-						{confirming ? 'Click again to delete for everyone' : 'Delete property'}
-					</button>
+						Delete property
+					</Button>
 				</div>
 			{/snippet}
 		</Popover>

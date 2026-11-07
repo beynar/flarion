@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { Button } from '../ui/index.ts';
+	import { Button, Kbd } from '../ui/index.ts';
 	import { words } from './words.svelte.js';
 	import type { SuggestionBarPayload } from 'edytor';
 
@@ -20,6 +20,7 @@
 	);
 </script>
 
+<!-- Placed inline by the plugin's host (under the block, no anchor to float from), so the bar keeps its own raised card. -->
 <div data-suggestion-bar>
 	<span data-edytor-suggestion-label style:--edytor-range-color={author?.color}
 		>{suggestion.status === 'streaming'
@@ -31,7 +32,7 @@
 	{#if bar.canDecide}
 		<Button variant="ghost" data-edytor-suggestion-accept onmousedown={keep} onclick={bar.accept}
 			>{labels.accept}
-			{#if !suggestion.shared}<kbd>{bar.mac ? '⌘↵' : `${labels.ctrl}+↵`}</kbd>{/if}</Button
+			{#if !suggestion.shared}<Kbd>{bar.mac ? '⌘↵' : `${labels.ctrl}+↵`}</Kbd>{/if}</Button
 		>
 	{/if}
 	{#if suggestion.shared && bar.canDecide && !suggestion.mine}
@@ -41,7 +42,7 @@
 	{:else if !suggestion.shared || !bar.readonly}
 		<Button variant="ghost" data-edytor-suggestion-discard onmousedown={keep} onclick={bar.discard}
 			>{suggestion.shared ? labels.withdraw : labels.discard}
-			{#if !suggestion.shared}<kbd>{labels.escape}</kbd>{/if}</Button
+			{#if !suggestion.shared}<Kbd>{labels.escape}</Kbd>{/if}</Button
 		>
 	{:else}
 		<span data-edytor-suggestion-pending>{labels.pending}</span>
@@ -78,26 +79,5 @@
 	[data-edytor-suggestion-pending] {
 		padding: 0 6px;
 		color: var(--app-text-secondary);
-	}
-	[data-suggestion-bar] :global(button) {
-		display: inline-flex;
-		align-items: center;
-		gap: 6px;
-		height: 26px;
-		padding: 0 8px;
-		border: 0;
-		border-radius: 6px;
-		background: transparent;
-		color: inherit;
-		font: inherit;
-		cursor: pointer;
-	}
-	[data-suggestion-bar] :global(button:hover) {
-		background: var(--app-hover);
-	}
-	kbd {
-		color: var(--app-text-secondary);
-		font: inherit;
-		font-size: 11px;
 	}
 </style>

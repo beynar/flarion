@@ -15,9 +15,10 @@
 </script>
 
 <script lang="ts">
-	import { float } from './float.js';
+	import Floating from './Floating.svelte';
+	import MaskIcon from './MaskIcon.svelte';
+	import { MenuOption } from 'entasis/menu-option';
 	import { Button } from '../ui/index.ts';
-	import { css } from './ui.js';
 	import { words } from './words.svelte.js';
 	import { iconOf } from './icons.js';
 	import { keepFocus } from './keepFocus.js';
@@ -39,30 +40,38 @@
 		data-edytor-table-grip={grip.kind}
 		aria-label={words.table[`${grip.kind}Menu`]}
 		{@attach grip.grip}
-	></Button>
+		><span aria-hidden="true" class="table-grip-glyph">{grip.kind === 'column' ? '⋯' : '⋮⋮'}</span></Button
+	>
 {:else if menu}
-	<div
-		class="table-menu"
+	<Floating
+		anchor={() => menu.anchor}
+		gap={4}
+		class="table-menu w-[200px] p-1.5 pointer-events-auto"
 		aria-label={words.table[`${menu.menu?.kind ?? 'row'}Menu`]}
 		{@attach menu.popup}
 		{@attach menu.keys}
-		{@attach float(() => menu.anchor, { gap: 4 })}
 	>
 		{#each menu.items as item (item.item.id)}
-			<Button
-				variant="ghost"
-				class={['table-menu-row', item.danger && 'danger']}
-				data-selected={item.selected}
+			<MenuOption
+				role="menuitem"
+				size="small"
+				density="compact"
+				color={item.danger ? 'danger' : 'neutral'}
 				disabled={item.disabled}
+				highlighted={item.selected}
 				{@attach item.option}
-				data-testid={`table-menu-${item.item.id}`}
-				onmousemove={item.select}
+				attrs={{
+					'data-selected': item.selected,
+					'data-testid': `table-menu-${item.item.id}`,
+					onpointermove: item.select
+				}}
 				onclick={item.run}
-				style={css({ '--table-menu-icon': iconOf(TABLE_ICONS[item.item.id] ?? '') })}
-				>{words.table[item.item.id.replace(/-./g, (m) => m[1]!.toUpperCase())]}</Button
 			>
+				{#snippet prefix()}<MaskIcon icon={iconOf(TABLE_ICONS[item.item.id] ?? '')} />{/snippet}
+				{words.table[item.item.id.replace(/-./g, (m) => m[1]!.toUpperCase())]}
+			</MenuOption>
 		{/each}
-	</div>
+	</Floating>
 {:else if add}
 	<Button
 		variant="ghost"
@@ -72,7 +81,8 @@
 		title={add.kind === 'row' ? words.table.addRow : words.table.addColumn}
 		onmousedown={keepFocus}
 		onclick={add.add}
-	></Button>
+		><span aria-hidden="true">+</span></Button
+	>
 {/if}
 
 <style>
@@ -100,17 +110,14 @@
 		width: 24px;
 		height: 18px;
 	}
-	:global(.table-grip::before) {
-		content: '⋮⋮';
+	.table-grip-glyph {
 		font-size: 10px;
 		letter-spacing: -2px;
-		line-height: 24px;
+		line-height: 1;
 	}
-	:global(.table-grip[data-edytor-table-grip='column']::before) {
-		content: '⋯';
+	:global(.table-grip[data-edytor-table-grip='column']) .table-grip-glyph {
 		font-size: 14px;
 		letter-spacing: 0;
-		line-height: 18px;
 	}
 	:global(.table-add) {
 		display: block;
@@ -127,68 +134,12 @@
 		width: 16px;
 		height: 100%;
 	}
-	:global(.table-add::before) {
-		content: '+';
+	:global(.table-add) {
 		font-size: 14px;
 	}
 	:global(.table-add:hover),
 	:global(.table-add:focus-visible) {
 		opacity: 1;
 		background: var(--app-hover);
-	}
-	.table-menu {
-		min-width: 180px;
-		padding: 6px;
-		border-radius: 10px;
-		background: var(--edytor-menu-background, var(--app-page));
-		box-shadow:
-			0 0 0 1px var(--app-hover),
-			0 3px 6px var(--app-hairline),
-			0 9px 24px var(--app-hairline);
-		pointer-events: auto;
-	}
-	:global(.table-menu-row) {
-		display: flex;
-		align-items: center;
-		gap: 8px;
-		width: 100%;
-		padding: 4px 8px;
-		border: none;
-		border-radius: 6px;
-		background: transparent;
-		color: var(--app-text);
-		font: inherit;
-		font-size: 14px;
-		text-align: start;
-		cursor: pointer;
-	}
-	:global(.table-menu-row::before) {
-		content: '';
-		flex: none;
-		width: 20px;
-		height: 20px;
-		background: var(--app-text);
-		-webkit-mask: var(--table-menu-icon) center / 20px no-repeat;
-		mask: var(--table-menu-icon) center / 20px no-repeat;
-	}
-	/* The menu holds the keys; its keyboard's row shows as hovered. */
-	.table-menu:focus {
-		outline: none;
-	}
-	:global(.table-menu-row:hover:not(:disabled)),
-	:global(.table-menu-row[data-selected='true']:not(:disabled)),
-	:global(.table-menu-row:focus-visible) {
-		background: var(--app-hover);
-		outline: none;
-	}
-	:global(.table-menu-row:disabled) {
-		opacity: 0.4;
-		cursor: default;
-	}
-	:global(.table-menu-row.danger:hover:not(:disabled)) {
-		color: var(--app-danger);
-	}
-	:global(.table-menu-row.danger:hover:not(:disabled)::before) {
-		background: var(--app-danger);
 	}
 </style>

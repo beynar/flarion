@@ -3,6 +3,7 @@
 	import { Textarea } from '../ui/index.ts';
 	import { words } from './words.svelte.js';
 	import { tick } from 'svelte';
+	import { Avatar } from 'entasis/avatar';
 	import type { CommentCardPayload } from 'edytor';
 
 	/**
@@ -64,7 +65,7 @@
 						>{labels.cancel}</Button
 					>
 				{/if}
-				<Button variant="ghost" data-edytor-comment-post disabled={!body.trim()} onclick={post}
+				<Button variant="default" data-edytor-comment-post disabled={!body.trim()} onclick={post}
 					>{labels.post}</Button
 				>
 			</div>
@@ -113,13 +114,14 @@
 				{@const author = comments.userOf(comment.author)}
 				<li data-edytor-comment={comment.id}>
 					<div data-edytor-comment-meta>
-						{#if author.avatar}
-							<img data-edytor-comment-avatar src={author.avatar} alt="" />
-						{:else}
-							<span data-edytor-comment-avatar style:background={author.color} aria-hidden="true"
-								>{nameOf(comment.author).slice(0, 1).toUpperCase()}</span
-							>
-						{/if}
+						<Avatar
+							data-edytor-comment-avatar
+							name={nameOf(comment.author)}
+							src={author.avatar}
+							size="small"
+							alt=""
+							{@attach (node: HTMLElement) => void (author.color && node.style.setProperty('background', author.color))}
+						/>
 						<span data-edytor-comment-author>{nameOf(comment.author)}</span>
 						<time data-edytor-comment-time datetime={new Date(comment.createdAt).toISOString()}
 							>{labels.when(comment.createdAt)}</time
@@ -191,21 +193,6 @@
 		line-clamp: 2;
 		-webkit-box-orient: vertical;
 	}
-	[data-edytor-comment-head] :global(button),
-	:global([data-edytor-comment-delete]) {
-		border: 0;
-		border-radius: 4px;
-		background: transparent;
-		color: var(--app-text-secondary);
-		font: inherit;
-		font-size: 13px;
-		cursor: pointer;
-		padding: 0 6px;
-	}
-	[data-edytor-comment-head] :global(button:hover),
-	:global([data-edytor-comment-delete]:hover) {
-		background: var(--app-hover);
-	}
 	[data-edytor-comment-resolved] {
 		margin: 0 0 6px;
 		font-size: 12px;
@@ -223,18 +210,6 @@
 		display: flex;
 		align-items: center;
 		gap: 6px;
-	}
-	[data-edytor-comment-avatar] {
-		width: 20px;
-		height: 20px;
-		border-radius: 50%;
-		display: inline-flex;
-		align-items: center;
-		justify-content: center;
-		color: #fff;
-		font-size: 11px;
-		font-weight: 600;
-		object-fit: cover;
 	}
 	[data-edytor-comment-author] {
 		font-weight: 600;
@@ -255,42 +230,11 @@
 	[data-edytor-comment-composer] {
 		margin-top: 8px;
 	}
-	[data-edytor-comment-composer] :global(textarea) {
-		box-sizing: border-box;
-		width: 100%;
-		min-height: 32px;
-		resize: vertical;
-		border: 1px solid var(--app-hairline);
-		border-radius: 6px;
-		padding: 6px 8px;
-		font: inherit;
-		color: inherit;
-		background: transparent;
-		field-sizing: content;
-	}
 	[data-edytor-comment-actions] {
 		display: flex;
 		justify-content: flex-end;
 		gap: 6px;
 		margin-top: 6px;
-	}
-	[data-edytor-comment-actions] :global(button) {
-		border: 0;
-		border-radius: 6px;
-		padding: 4px 10px;
-		font: inherit;
-		font-size: 13px;
-		cursor: pointer;
-		background: var(--app-hover);
-		color: inherit;
-	}
-	:global([data-edytor-comment-post]) {
-		background: var(--app-accent) !important;
-		color: #fff !important;
-	}
-	:global([data-edytor-comment-post]:disabled) {
-		opacity: 0.4;
-		cursor: default;
 	}
 	[data-edytor-comment-error] {
 		margin: 6px 0 0;

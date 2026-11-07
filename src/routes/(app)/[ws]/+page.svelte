@@ -2,7 +2,9 @@
 	import { clockIcon } from 'entasis/icons/clock';
 	import { starIcon } from 'entasis/icons/star';
 	import { goto } from '$app/navigation';
-	import { Button } from 'entasis/button';
+	import { Card } from 'entasis/card';
+	import { Empty } from 'entasis/empty';
+	import { Menu, type MenuItem } from 'entasis/menu';
 	import { notePencilIcon } from 'entasis/icons/notePencil';
 	import { coverBackground } from '#lib/components/page-header/covers.ts';
 	import { useWorkspace } from '#lib/client/workspace.svelte.ts';
@@ -35,6 +37,16 @@
 		return 'Just now';
 	}
 
+	const favoriteItems = $derived<MenuItem[]>(
+		favoritePages.map((entry) => ({
+			type: 'option' as const,
+			title: entry.title || 'Untitled',
+			prefix: entry.icon ?? '📄',
+			href: `/${ws}/${entry.id}`,
+			'data-testid': 'favorite-row'
+		})) as MenuItem[]
+	);
+
 	async function newPage() {
 		try {
 			await goto(`/${ws}/${await store.createPage({ parentId: null, teamspaceId: null })}`);
@@ -60,9 +72,11 @@
 		{#if recentPages.length}
 			<div class="grid grid-cols-2 gap-3 md:grid-cols-4">
 				{#each recentPages as entry (entry.page.id)}
-					<a
+					<Card
+						variant="outline"
+						density="compact"
 						href={`/${ws}/${entry.page.id}`}
-						class="block overflow-hidden rounded-[var(--app-radius-panel)] border border-[color:var(--app-hairline)] bg-[color:var(--app-page)] text-[color:var(--app-text)] no-underline shadow-[var(--app-shadow-card)] transition-colors hover:bg-[color:var(--app-hover)]"
+						theme={{ root: { base: 'group/card flex flex-col rounded-[var(--app-radius-panel)] overflow-hidden py-0! gap-0! ring-0! bg-[color:var(--app-page)] text-[color:var(--app-text)] no-underline shadow-[var(--app-shadow-card),0_0_0_1px_var(--app-hairline)] hover:bg-[color:var(--app-hover)]' }, content: { base: 'p-0! px-0!' } }}
 						data-testid="recent-card"
 					>
 						<div
@@ -74,14 +88,17 @@
 							<span class="truncate text-sm font-medium">{entry.page.title || 'Untitled'}</span>
 							<span class="truncate text-xs text-[color:var(--app-text-tertiary)]">{ago(entry.at)}</span>
 						</div>
-					</a>
+					</Card>
 				{/each}
 			</div>
 		{:else}
-			<div class="flex items-center gap-3 rounded-[var(--app-radius-panel)] border border-dashed border-[color:var(--app-hairline-strong)] px-4 py-5 text-sm text-[color:var(--app-text-secondary)]">
-				<span class="flex-1">Pages you open show up here. Pick one from the sidebar or start a new one.</span>
-				<Button size="small" prefix={notePencilIcon} disabled={!store.canEdit} onclick={newPage}>New page</Button>
-			</div>
+			<Empty
+				bordered
+				size="small"
+				title="No recent pages"
+				description="Pages you open show up here. Pick one from the sidebar or start a new one."
+				actions={[{ content: 'New page', prefix: notePencilIcon, disabled: !store.canEdit, onclick: newPage }]}
+			/>
 		{/if}
 	</section>
 
@@ -90,22 +107,9 @@
 			{@render starIcon({ size: 14 })} Favorites
 		</h2>
 		{#if favoritePages.length}
-			<ul class="m-0 flex list-none flex-col p-0">
-				{#each favoritePages as entry (entry.id)}
-					<li>
-						<a
-							href={`/${ws}/${entry.id}`}
-							class="flex items-center gap-2 rounded-[var(--app-radius-control)] px-2 text-sm text-[color:var(--app-text)] no-underline hover:bg-[color:var(--app-hover)]"
-							style="height: var(--app-row-height)"
-						>
-							<span class="w-5 text-center">{entry.icon ?? '📄'}</span>
-							<span class="flex-1 truncate">{entry.title || 'Untitled'}</span>
-						</a>
-					</li>
-				{/each}
-			</ul>
+			<Menu items={favoriteItems} />
 		{:else}
-			<p class="m-0 px-2 text-sm text-[color:var(--app-text-tertiary)]">Star a page to keep it here.</p>
+			<Empty size="small" description="Star a page to keep it here." />
 		{/if}
 	</section>
 </div>

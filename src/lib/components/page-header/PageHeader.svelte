@@ -11,11 +11,16 @@
 	import { Avatar } from 'entasis/avatar';
 	import { AvatarGroup } from 'entasis/avatar';
 	import { Popover } from 'entasis/popover';
+	import { Button } from 'entasis/button';
+	import { FileInput } from 'entasis/file-input';
+	import { TextArea } from 'entasis/text-area';
+	import { TextInput } from 'entasis/text-input';
+	import { Alert } from 'entasis/alert';
 	import { smileyIcon } from 'entasis/icons/smiley';
 	import { imageIcon } from 'entasis/icons/image';
 	import { COVER_PRESETS, clampPosition, coverBackground, safeCoverUrl } from './covers.ts';
 	import { TITLE_DEBOUNCE_MS, debounced } from './debounce.ts';
-	import IconPicker from './IconPicker.svelte';
+	import IconPicker from '#lib/components/pickers/IconPicker.svelte';
 	import { canEditHeader, type PageHeaderAccess, type PageHeaderPage, type PresenceUser } from './types.ts';
 
 	let {
@@ -57,7 +62,6 @@
 	// ───────────── title ─────────────
 	let title = $state(untrack(() => page.title));
 	let focused = $state(false);
-	let field = $state<HTMLTextAreaElement>();
 	const sendTitle = debounced<string>((value) => onTitle(value), TITLE_DEBOUNCE_MS);
 	onDestroy(() => sendTitle.flush());
 
@@ -74,16 +78,6 @@
 			sendTitle.cancel();
 			title = page.title;
 		}
-	});
-
-	const fit = () => {
-		if (!field) return;
-		field.style.height = '0px';
-		field.style.height = `${field.scrollHeight}px`;
-	};
-	$effect(() => {
-		void title;
-		fit();
 	});
 
 	const focusEditor = () => {
@@ -140,11 +134,8 @@
 
 	let uploading = $state(false);
 	let uploadError = $state('');
-	let picker = $state<HTMLInputElement>();
-	const chooseFile = async (event: Event, close: () => void) => {
-		const input = event.currentTarget as HTMLInputElement;
-		const file = input.files?.[0];
-		input.value = '';
+	let chosen = $state<File | null>(null);
+	const chooseFile = async (file: File | null, close: () => void) => {
 		if (!file || !uploadCover) return;
 		uploading = true;
 		uploadError = '';
@@ -155,10 +146,12 @@
 			uploadError = error instanceof Error && error.message ? error.message : 'The upload failed';
 		} finally {
 			uploading = false;
+			chosen = null;
 		}
 	};
 
-	const iconSize = 'var(--app-page-icon-size)';
+	/** Cover buttons sit on the image: a page-colored fill with the button shadow, as Notion's. */
+	const coverButton = 'bg-[color:var(--app-page)]! text-[color:var(--app-text-secondary)]! font-normal';
 </script>
 
 <!-- Cover: about 30vh, full bleed. -->
@@ -194,15 +187,16 @@
 			<div class="cover-actions" class:always={repositioning}>
 				{#if repositioning}
 					<span class="cover-hint">Drag the cover to reposition</span>
-					<button type="button" class="chip" data-testid="cover-cancel" onclick={() => (repositioning = false)}>Cancel</button>
-					<button type="button" class="chip primary" data-testid="cover-save" onclick={saveReposition}>Save position</button>
+					<Button variant="outline" color="neutral" size="small" class={coverButton} data-testid="cover-cancel" onclick={() => (repositioning = false)}>Cancel</Button>
+					<Button variant="solid" color="primary" size="small" data-testid="cover-save" onclick={saveReposition}>Save position</Button>
 				{:else}
 					<Popover position="bottom-end">
 						{#snippet trigger(popover)}
-							<button type="button" class="chip" data-testid="cover-change" {@attach popover.trigger}>Change cover</button>
+							<Button variant="outline" color="neutral" size="small" class={coverButton} data-testid="cover-change" {@attach popover.trigger}>Change cover</Button>
 						{/snippet}
 						{#snippet children(popover)}
 							<div class="cover-menu" data-testid="cover-menu">
+								<!-- Exception (audit NE-5): cover presets are gradient previews; entasis has no swatch/gradient selector. -->
 								<div class="swatches">
 									{#each Object.entries(COVER_PRESETS) as [key, image] (key)}
 										<button
@@ -219,38 +213,41 @@
 									{/each}
 								</div>
 								{#if uploadCover}
-									<div class="cover-upload">
-										<input
-											bind:this={picker}
-											type="file"
-											accept="image/png,image/jpeg,image/webp,image/gif,image/avif"
-											hidden
-											data-testid="cover-file"
-											onchange={(event) => chooseFile(event, () => popover.close())}
+									<div data-testid="cover-file">
+										<FileInput
+											mode="single"
+											size="small"
+											types={['image/png', 'image/jpeg', 'image/webp', 'image/gif', 'image/avif']}
+											placeholder={uploading ? 'Uploading…' : 'Upload an image'}
+											disabled={uploading}
+											bind:value={chosen}
+											onValueChange={(file) => void chooseFile(file, () => popover.close())}
+											onReject={() => (uploadError = 'Choose a PNG, JPEG, WebP, GIF or AVIF image')}
 										/>
-										<button type="button" class="chip" data-testid="cover-upload" disabled={uploading} onclick={() => picker?.click()}>
-											{uploading ? 'Uploading…' : 'Upload an image'}
-										</button>
-										{#if uploadError}<span class="cover-error" role="alert" data-testid="cover-upload-error">{uploadError}</span>{/if}
 									</div>
+									{#if uploadError}
+										<div data-testid="cover-upload-error"><Alert color="danger" variant="soft" size="small">{uploadError}</Alert></div>
+									{/if}
 								{/if}
 								<form
-									class="cover-url"
 									onsubmit={(event) => {
 										event.preventDefault();
 										submitCoverUrl(() => popover.close());
 									}}
 								>
-									<input bind:value={coverUrl} placeholder="Paste an image link" aria-label="Cover image link" data-testid="cover-url" />
-									<button type="submit" class="chip" disabled={!safeCoverUrl(coverUrl)}>Add</button>
+									<TextInput size="small" placeholder="Paste an image link" bind:value={coverUrl} inputAttrs={{ 'aria-label': 'Cover image link', 'data-testid': 'cover-url' }}>
+										{#snippet suffix()}
+											<Button type="submit" variant="soft" size="small" disabled={!safeCoverUrl(coverUrl)}>Add</Button>
+										{/snippet}
+									</TextInput>
 								</form>
 							</div>
 						{/snippet}
 					</Popover>
 					{#if cover.isImage}
-						<button type="button" class="chip" data-testid="cover-reposition" onclick={startReposition}>Reposition</button>
+						<Button variant="outline" color="neutral" size="small" class={coverButton} data-testid="cover-reposition" onclick={startReposition}>Reposition</Button>
 					{/if}
-					<button type="button" class="chip" data-testid="cover-remove" onclick={() => onCover(null)}>Remove</button>
+					<Button variant="outline" color="neutral" size="small" class={coverButton} data-testid="cover-remove" onclick={() => onCover(null)}>Remove</Button>
 				{/if}
 			</div>
 		{/if}
@@ -264,7 +261,15 @@
 				{#if editable}
 					<IconPicker current={page.icon} onpick={onIcon}>
 						{#snippet button({ attach })}
-							<button type="button" class="icon" data-testid="page-icon" aria-label="Change page icon" {@attach attach}>{page.icon}</button>
+							<Button
+								variant="ghost"
+								color="neutral"
+								class="mb-1 {cover ? '-mt-[calc(var(--app-page-icon-size)/2)]' : ''}"
+								theme={{ root: { base: 'h-[var(--app-page-icon-size)]! min-h-0! rounded-[var(--app-radius-control)]! p-0! text-[calc(var(--app-page-icon-size)*0.86)]! leading-none! font-normal' } }}
+								data-testid="page-icon"
+								label="Change page icon"
+								{@attach attach}>{page.icon}</Button
+							>
 						{/snippet}
 					</IconPicker>
 				{:else}
@@ -277,39 +282,42 @@
 					{#if !page.icon}
 						<IconPicker current={null} onpick={onIcon}>
 							{#snippet button({ attach })}
-								<button type="button" class="control" data-testid="add-icon" {@attach attach}>
-									{@render smileyIcon({ size: 16 })} Add icon
-								</button>
+								<Button variant="ghost" color="neutral" size="small" class="font-normal text-[color:var(--app-text-tertiary)]" prefix={smileyIcon} data-testid="add-icon" {@attach attach}>Add icon</Button>
 							{/snippet}
 						</IconPicker>
 					{/if}
 					{#if !cover}
-						<button type="button" class="control" data-testid="add-cover" onclick={() => onCover('dawn', 50)}>
-							{@render imageIcon({ size: 16 })} Add cover
-						</button>
+						<Button variant="ghost" color="neutral" size="small" class="font-normal text-[color:var(--app-text-tertiary)]" prefix={imageIcon} data-testid="add-cover" onclick={() => onCover('dawn', 50)}>Add cover</Button>
 					{/if}
 				</div>
 			{/if}
 		</div>
 
 		{#if editable}
-			<textarea
-				bind:this={field}
-				bind:value={title}
-				class="title"
-				rows="1"
-				placeholder="Untitled"
-				aria-label="Page title"
-				data-testid="page-title"
-				spellcheck="true"
-				onfocus={() => (focused = true)}
-				onblur={() => {
-					focused = false;
-					sendTitle.flush();
-				}}
-				oninput={() => sendTitle.schedule(title)}
-				onkeydown={onTitleKeydown}
-			></textarea>
+			<!-- entasis TextArea (autosizing), chrome stripped through its theme: the 40px title is an in-place editor. -->
+			<div class="title-field">
+				<TextArea
+					rows={1}
+					placeholder="Untitled"
+					bind:value={title}
+					onValueChange={(next) => sendTitle.schedule(next ?? '')}
+					theme={{
+						inputContainer: { base: 'min-h-0! border-0! bg-transparent! p-0! ring-0! focus-within:ring-0! rounded-none!' },
+						input: { base: 'p-0 text-[length:var(--app-font-size-title)]! font-bold! leading-[1.2]! tracking-[-0.01em] text-[color:var(--app-text)] [overflow-wrap:anywhere] placeholder:text-[color:var(--app-text-tertiary)] placeholder:opacity-60' }
+					}}
+					textareaAttrs={{
+						'aria-label': 'Page title',
+						'data-testid': 'page-title',
+						spellcheck: true,
+						onfocus: () => (focused = true),
+						onblur: () => {
+							focused = false;
+							sendTitle.flush();
+						},
+						onkeydown: onTitleKeydown
+					}}
+				/>
+			</div>
 		{:else}
 			<h1 class="title static" data-testid="page-title">{page.title || 'Untitled'}</h1>
 		{/if}
@@ -373,28 +381,6 @@
 		font-size: var(--app-font-size-small);
 		line-height: var(--app-button-height-small);
 	}
-	.chip {
-		height: var(--app-button-height-small);
-		padding: 0 8px;
-		border-radius: var(--app-radius-control);
-		background: var(--app-page);
-		color: var(--app-text-secondary);
-		box-shadow: var(--app-shadow-button);
-		font-size: var(--app-font-size-small);
-		cursor: pointer;
-	}
-	.chip:hover:not(:disabled) {
-		background: color-mix(in srgb, var(--app-page) 85%, var(--app-text));
-	}
-	.chip:disabled {
-		opacity: 0.5;
-		cursor: default;
-	}
-	.chip.primary {
-		background: var(--app-accent);
-		color: #fff;
-		box-shadow: none;
-	}
 	.cover-menu {
 		width: 300px;
 		padding: 12px;
@@ -416,36 +402,6 @@
 	.swatch:hover {
 		box-shadow: inset 0 0 0 2px var(--app-accent);
 	}
-	.cover-url {
-		display: flex;
-		gap: 8px;
-	}
-	.cover-upload {
-		display: flex;
-		flex-direction: column;
-		align-items: flex-start;
-		gap: 6px;
-	}
-	.cover-error {
-		color: var(--app-danger, #c4554d);
-		font-size: var(--app-font-size-chrome);
-	}
-	.cover-url input {
-		flex: 1;
-		min-width: 0;
-		height: var(--app-input-height);
-		padding: 0 8px;
-		border-radius: var(--app-radius-control);
-		background: var(--app-input-fill);
-		box-shadow: inset 0 0 0 1px var(--app-hairline-strong);
-		color: var(--app-text);
-		font-size: var(--app-font-size-chrome);
-		outline: none;
-	}
-	.cover-url input:focus {
-		box-shadow: inset 0 0 0 2px var(--app-accent);
-	}
-
 	.header {
 		width: 100%;
 	}
@@ -478,25 +434,17 @@
 	.top.covered > * {
 		pointer-events: auto;
 	}
-	.icon {
+	.icon.static {
 		display: flex;
 		align-items: flex-end;
 		height: var(--app-page-icon-size);
 		margin-bottom: 4px;
-		padding: 0;
-		border-radius: var(--app-radius-control);
 		font-size: calc(var(--app-page-icon-size) * 0.86);
 		line-height: 1;
-		cursor: pointer;
-	}
-	.icon.static {
 		cursor: default;
 	}
 	.top.covered .icon {
 		margin-top: calc(var(--app-page-icon-size) / -2);
-	}
-	.icon:not(.static):hover {
-		background: var(--app-hover);
 	}
 	.controls {
 		display: flex;
@@ -512,41 +460,20 @@
 	.top.covered .controls {
 		padding-top: 8px;
 	}
-	.control {
-		display: inline-flex;
-		align-items: center;
-		gap: 6px;
-		height: var(--app-button-height);
-		padding: 0 6px;
-		border-radius: var(--app-radius-control);
-		color: var(--app-text-tertiary);
-		font-size: var(--app-font-size-chrome);
-		cursor: pointer;
+	.title-field {
+		margin: 4px 0 8px;
 	}
-	.control:hover {
-		background: var(--app-hover);
-	}
-	.title {
+	.title.static {
 		display: block;
 		width: 100%;
 		margin: 4px 0 8px;
 		padding: 0;
-		border: 0;
-		outline: 0;
-		resize: none;
-		overflow: hidden;
-		background: transparent;
 		color: var(--app-text);
-		font-family: inherit;
 		font-size: var(--app-font-size-title);
 		font-weight: 700;
 		line-height: 1.2;
 		letter-spacing: -0.01em;
 		overflow-wrap: anywhere;
-	}
-	.title::placeholder {
-		color: var(--app-text-tertiary);
-		opacity: 0.6;
 	}
 	h1.title.static {
 		white-space: pre-wrap;

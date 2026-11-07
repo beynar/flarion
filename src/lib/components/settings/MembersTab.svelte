@@ -1,13 +1,17 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
+	import { Alert } from 'entasis/alert';
 	import { Avatar } from 'entasis/avatar';
 	import { Button } from 'entasis/button';
+	import { Chip } from 'entasis/chip';
+	import { DataTable, type DataTableColumn } from 'entasis/data-table';
+	import { Select } from 'entasis/select';
 	import { TextInput } from 'entasis/text-input';
 	import { toast } from 'entasis/toast';
 	import { rpc } from '#lib/client/rpc.ts';
 	import { useWorkspace } from '#lib/client/workspace.svelte.ts';
 	import type { Invite, Member } from '#lib/shared/schemas.ts';
-	import OptionTag from '#lib/components/shell/OptionTag.svelte';
+	import { listTheme } from '#lib/components/lists/list-theme.ts';
 
 	const store = useWorkspace();
 	const ROLES = ['admin', 'member', 'guest'] as const;
@@ -22,7 +26,9 @@
 	let sending = $state(false);
 
 	const canManage = $derived(store.workspace.role === 'owner' || store.workspace.role === 'admin');
-	const roleColor = (r: string) => (r === 'owner' ? 'purple' : r === 'admin' ? 'blue' : r === 'guest' ? 'orange' : 'gray');
+	const roleColor = (r: string) => (r === 'owner' ? 'primary' : r === 'admin' ? 'info' : r === 'guest' ? 'warning' : 'neutral');
+	const capitalize = (r: string) => r[0].toUpperCase() + r.slice(1);
+	const ROLE_ITEMS = ROLES.map((r) => ({ value: r, label: capitalize(r) }));
 	const fail = (title: string, e: unknown) => toast.danger({ title, description: (e as Error).message });
 
 	async function load() {
@@ -40,8 +46,8 @@
 	}
 	onMount(load);
 
-	async function invite(event: SubmitEvent) {
-		event.preventDefault();
+	async function invite(event?: SubmitEvent) {
+		event?.preventDefault();
 		if (!email.trim()) return;
 		sending = true;
 		try {
@@ -84,7 +90,76 @@
 			fail('Could not remove the member', e);
 		}
 	}
+
+	const memberColumns: DataTableColumn<Member>[] = [
+		{ id: 'member', accessor: 'name', header: 'Name', cell: memberCell },
+		{ id: 'email', accessor: 'email', header: 'Email', cell: emailCell, class: 'max-md:hidden', headerClass: 'max-md:hidden' },
+		{ id: 'role', accessor: 'role', header: 'Role', cell: roleCell },
+		{ id: 'actions', accessor: 'userId', header: '', cell: removeCell, align: 'end' }
+	];
+	const inviteColumns: DataTableColumn<Invite>[] = [
+		{ id: 'email', accessor: 'email', header: 'Pending invitations', cell: inviteEmail },
+		{ id: 'role', accessor: 'role', header: 'Role', cell: inviteRole },
+		{ id: 'expires', accessor: 'expiresAt', header: 'Expires', cell: inviteExpires, class: 'max-md:hidden', headerClass: 'max-md:hidden' },
+		{ id: 'actions', accessor: 'id', header: '', cell: revokeCell, align: 'end' }
+	];
+	const memberTheme = listTheme({
+		columns: 'max-md:grid-cols-[minmax(0,1fr)_136px_96px]! md:grid-cols-[minmax(0,1fr)_minmax(0,1.3fr)_136px_96px]!'
+	});
+	const inviteTheme = listTheme({
+		columns: 'max-md:grid-cols-[minmax(0,1fr)_96px_72px]! md:grid-cols-[minmax(0,1fr)_96px_120px_72px]!'
+	});
 </script>
+
+{#snippet memberCell(p: { row: Member })}
+	<span class="flex min-w-0 items-center gap-3">
+		<Avatar size="small" name={p.row.name} />
+		<span class="truncate">{p.row.name}{p.row.userId === store.user.id ? ' (you)' : ''}</span>
+	</span>
+{/snippet}
+
+{#snippet emailCell(p: { row: Member })}
+	<span class="truncate text-xs text-[color:var(--app-text-tertiary)]">{p.row.email}</span>
+{/snippet}
+
+{#snippet roleCell(p: { row: Member })}
+	{#if canManage && p.row.role !== 'owner' && p.row.userId !== store.user.id}
+		<div class="w-full">
+			<Select
+				size="small"
+				items={ROLE_ITEMS}
+				value={p.row.role}
+				alignItemWithTrigger={false}
+				onValueChange={(next) => next && next !== p.row.role && setRole(p.row, next as Role)}
+				triggerAttrs={{ 'aria-label': `Role of ${p.row.name}` }}
+			/>
+		</div>
+	{:else}
+		<Chip size="small" variant="soft" color={roleColor(p.row.role)}>{capitalize(p.row.role)}</Chip>
+	{/if}
+{/snippet}
+
+{#snippet removeCell(p: { row: Member })}
+	{#if canManage && p.row.role !== 'owner' && p.row.userId !== store.user.id}
+		<Button variant="ghost" size="small" color="danger" onclick={() => remove(p.row)}>Remove</Button>
+	{/if}
+{/snippet}
+
+{#snippet inviteEmail(p: { row: Invite })}
+	<span class="truncate">{p.row.email}</span>
+{/snippet}
+
+{#snippet inviteRole(p: { row: Invite })}
+	<Chip size="small" variant="soft" color={roleColor(p.row.role)}>{capitalize(p.row.role)}</Chip>
+{/snippet}
+
+{#snippet inviteExpires(p: { row: Invite })}
+	<span class="truncate text-xs text-[color:var(--app-text-tertiary)]">Expires {new Date(p.row.expiresAt).toLocaleDateString()}</span>
+{/snippet}
+
+{#snippet revokeCell(p: { row: Invite })}
+	{#if canManage}<Button variant="ghost" size="small" onclick={() => revoke(p.row.id)}>Revoke</Button>{/if}
+{/snippet}
 
 <section aria-labelledby="members-h" data-testid="members-tab">
 	<h2 id="members-h" class="mb-1 text-base font-semibold">Members</h2>
@@ -95,63 +170,39 @@
 			<div class="min-w-[220px] flex-1">
 				<TextInput label="Invite by email" type="email" placeholder="teammate@company.com" bind:value={email} />
 			</div>
-			<label class="flex flex-col gap-1 text-sm text-[color:var(--app-text-secondary)]">
-				<span class="font-medium text-[color:var(--app-text)]">Role</span>
-				<select
-					class="rounded-[var(--app-radius-control)] border border-[color:var(--app-hairline-strong)] bg-[color:var(--app-page)] px-2 text-sm text-[color:var(--app-text)]"
-					style="height: var(--app-input-height)"
-					bind:value={role}
-				>
-					{#each ROLES as r (r)}<option value={r}>{r[0].toUpperCase() + r.slice(1)}</option>{/each}
-				</select>
-			</label>
+			<div class="w-32">
+				<Select label="Role" items={ROLE_ITEMS} value={role} onValueChange={(v) => v && (role = v as Role)} alignItemWithTrigger={false} />
+			</div>
 			<Button type="submit" loading={sending} disabled={!email.trim()}>Send invite</Button>
 		</form>
 	{/if}
 
 	{#if error}
-		<p class="text-sm text-[color:var(--app-danger)]">{error}</p>
-	{:else if loading}
-		<div class="flex flex-col gap-2" aria-busy="true">
-			{#each [1, 2, 3] as i (i)}<div class="h-9 animate-pulse rounded bg-[color:var(--app-hover)]"></div>{/each}
-		</div>
+		<Alert color="danger" variant="soft" size="small">{error}</Alert>
 	{:else}
-		<ul class="m-0 flex list-none flex-col border-t border-[color:var(--app-hairline)] p-0">
-			{#each members as member (member.userId)}
-				<li class="flex items-center gap-3 border-b border-[color:var(--app-hairline)] text-sm" style="min-height: var(--app-table-row-height)">
-					<Avatar size="small" name={member.name} />
-					<span class="min-w-0 flex-1 truncate">{member.name}{member.userId === store.user.id ? ' (you)' : ''}</span>
-					<span class="hidden truncate text-xs text-[color:var(--app-text-tertiary)] md:inline">{member.email}</span>
-					{#if canManage && member.role !== 'owner' && member.userId !== store.user.id}
-						<select
-							class="rounded-[var(--app-radius-control)] border border-[color:var(--app-hairline)] bg-transparent px-1 text-xs"
-							style="height: var(--app-button-height-small)"
-							aria-label={`Role of ${member.name}`}
-							value={member.role}
-							onchange={(e) => setRole(member, e.currentTarget.value as Role)}
-						>
-							{#each ROLES as r (r)}<option value={r}>{r[0].toUpperCase() + r.slice(1)}</option>{/each}
-						</select>
-						<Button variant="ghost" size="small" color="danger" onclick={() => remove(member)}>Remove</Button>
-					{:else}
-						<OptionTag color={roleColor(member.role)} label={member.role[0].toUpperCase() + member.role.slice(1)} />
-					{/if}
-				</li>
-			{/each}
-		</ul>
+		<DataTable
+			items={members}
+			columns={memberColumns}
+			getRowId={(m) => m.userId}
+			density="compact"
+			pagination={false}
+			{loading}
+			caption="Members"
+			theme={memberTheme}
+		/>
 
 		{#if invites.length}
-			<h3 class="mt-8 mb-2 text-xs font-medium text-[color:var(--app-text-tertiary)]">Pending invitations</h3>
-			<ul class="m-0 flex list-none flex-col border-t border-[color:var(--app-hairline)] p-0" data-testid="pending-invites">
-				{#each invites as inv (inv.id)}
-					<li class="flex items-center gap-3 border-b border-[color:var(--app-hairline)] text-sm" style="min-height: var(--app-table-row-height)">
-						<span class="min-w-0 flex-1 truncate">{inv.email}</span>
-						<OptionTag color={roleColor(inv.role)} label={inv.role[0].toUpperCase() + inv.role.slice(1)} />
-						<span class="hidden text-xs text-[color:var(--app-text-tertiary)] md:inline">Expires {new Date(inv.expiresAt).toLocaleDateString()}</span>
-						{#if canManage}<Button variant="ghost" size="small" onclick={() => revoke(inv.id)}>Revoke</Button>{/if}
-					</li>
-				{/each}
-			</ul>
+			<div class="mt-8" data-testid="pending-invites">
+				<DataTable
+					items={invites}
+					columns={inviteColumns}
+					getRowId={(i) => i.id}
+					density="compact"
+					pagination={false}
+					caption="Pending invitations"
+					theme={inviteTheme}
+				/>
+			</div>
 		{/if}
 	{/if}
 </section>

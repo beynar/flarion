@@ -20,6 +20,9 @@
 <script lang="ts">
 	import { untrack } from 'svelte';
 	import { toast } from 'entasis/toast';
+	import { Alert } from 'entasis/alert';
+	import { Button } from 'entasis/button';
+	import { Skeleton } from 'entasis/skeleton';
 	import { goto } from '$app/navigation';
 	import { subKey, tryWorkspace, type ViewData } from '#lib/client/workspace.svelte.ts';
 	import { newId } from '#lib/client/runtime.ts';
@@ -355,25 +358,35 @@
 	});
 </script>
 
+{#snippet loading()}
+	<div class="flex flex-col gap-2 px-3 py-3" aria-hidden="true" data-testid="view-skeleton">
+		<Skeleton class="h-4 w-3/5" />
+		<Skeleton class="h-4 w-2/5" />
+		<Skeleton class="h-4 w-1/2" />
+	</div>
+{/snippet}
+
 <div class="view-host" class:full={fullPage} data-testid="view-host" data-view-type={view?.type} data-state={failure && !collection ? 'error' : shown && env ? 'ready' : 'loading'} aria-busy={!shown && !(failure && !collection)}>
 	{#if !store}
-		<div class="note">Open this page in the app to see its database.</div>
+		<Alert color="info" variant="soft" size="small">Open this page in the app to see its database.</Alert>
 	{:else if failure && !collection}
-		<div class="note" role="alert">
-			<span>{failure}</span>
-			<button type="button" onclick={() => void store.loadCollection(collectionId, true)}>Try again</button>
-		</div>
+		<Alert color="danger" variant="soft" size="small" data-testid="view-error">
+			<span class="flex items-center gap-2">
+				{failure}
+				<Button variant="ghost" size="small" onclick={() => void store.loadCollection(collectionId, true)}>Try again</Button>
+			</span>
+		</Alert>
 	{:else if !env || !view}
-		<div class="note" aria-hidden="true"><span class="skeleton"></span></div>
+		{@render loading()}
 	{:else}
 		<div class="chrome">
 			<ViewTabs {env} {views} activeId={view.id} onPick={pickView} />
 			<ViewToolbar {env} bind:search={searchText} />
 		</div>
 		{#if windowFailed && !shown}
-			<div class="note" role="alert">This view could not be loaded.</div>
+			<Alert color="danger" variant="soft" size="small" data-testid="view-error">This view could not be loaded.</Alert>
 		{:else if !shown}
-			<div class="note" aria-hidden="true"><span class="skeleton"></span></div>
+			{@render loading()}
 		{:else if view.type === 'table'}
 			<TableView {env} data={shown} bind:focusId />
 		{:else if view.type === 'board'}
@@ -388,9 +401,9 @@
 			<TimelineView {env} data={shown} onRange={showRange} />
 		{/if}
 		{#if shown && !shown.groups && shown.rows.length >= MAX_WINDOW && shown.total > shown.rows.length}
-			<div class="note capnote" data-testid="view-window-cap">
+			<Alert color="info" variant="soft" size="small" data-testid="view-window-cap">
 				Showing the first {MAX_WINDOW.toLocaleString('en-US')} of {shown.total.toLocaleString('en-US')} rows. Search or filter to narrow this view.
-			</div>
+			</Alert>
 		{/if}
 	{/if}
 </div>
@@ -409,28 +422,5 @@
 		min-height: 36px;
 		border-bottom: 1px solid var(--app-hairline);
 		margin-bottom: 2px;
-	}
-	.note {
-		display: flex;
-		align-items: center;
-		gap: 10px;
-		padding: 10px 12px;
-		color: var(--app-text-secondary);
-	}
-	.note button {
-		color: var(--app-accent);
-		text-decoration: underline;
-		cursor: pointer;
-	}
-	.capnote {
-		font-size: 13px;
-		color: var(--app-text-tertiary);
-	}
-	.skeleton {
-		display: block;
-		width: 60%;
-		height: 14px;
-		border-radius: 4px;
-		background: var(--app-hover);
 	}
 </style>

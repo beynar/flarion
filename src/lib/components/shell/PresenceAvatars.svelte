@@ -1,42 +1,57 @@
 <script lang="ts">
+	import { Avatar, AvatarGroup } from 'entasis/avatar';
+	import { Tooltip } from 'entasis/tooltip';
 	import type { PresenceUser } from '#lib/shared/protocol.ts';
 	import { userColor } from '#lib/client/runtime.ts';
 
+	/**
+	 * Who else is on a page: an entasis `AvatarGroup`. Each person keeps their presence color (the cursor color) on the
+	 * initials through a CSS variable, and a Tooltip names everyone. `tiny` is the 16px sidebar size, `small` the top bar's.
+	 */
 	let {
 		users,
 		max = 3,
-		size = 22
+		size = 'small'
 	}: {
 		users: PresenceUser[];
 		max?: number;
-		size?: number;
+		size?: 'small' | 'tiny';
 	} = $props();
 
-	const shown = $derived(users.slice(0, max));
-	const extra = $derived(users.length - shown.length);
-	const initials = (name: string) =>
-		name
-			.split(/\s+/)
-			.map((p) => p[0])
-			.filter(Boolean)
-			.slice(0, 2)
-			.join('')
-			.toUpperCase();
+	const tiny = $derived(size === 'tiny');
+	const names = $derived(users.map((u) => u.name).join(', '));
+	const colorOf = (user: PresenceUser) => user.color ?? userColor(user.userId);
+	// The only inline color is a per-user value (a hex string), set as a variable the theme classes read.
+	const tint = (color: string) => (el: HTMLElement) => el.style.setProperty('--presence-color', color);
 </script>
 
 {#if users.length}
-	<span class="flex shrink-0 items-center" aria-label={`${users.map((u) => u.name).join(', ')} here now`} data-testid="presence">
-		{#each shown as user, i (user.userId)}
-			<span
-				class="grid place-items-center rounded-full font-semibold text-white ring-2 ring-[color:var(--app-page)]"
-				style="width:{size}px; height:{size}px; font-size:{Math.round(size * 0.42)}px; background:{user.color ?? userColor(user.userId)}; margin-left:{i ? -size * 0.3 : 0}px"
-				title={user.name}
-			>
-				{initials(user.name)}
+	<Tooltip content={names} position="bottom" delay={200}>
+		{#snippet trigger(attach)}
+			<span class="flex shrink-0 items-center" aria-label={`${names} here now`} data-testid="presence" {@attach attach}>
+				<AvatarGroup
+					items={users.map((u) => ({ name: u.name, userId: u.userId, color: colorOf(u) }))}
+					{max}
+					size="small"
+					theme={{
+						root: { base: tiny ? 'ml-0 [&>[data-avatar]]:ml-[-0.2rem]' : 'ml-0' },
+						avatarGroupCount: { base: tiny ? 'size-4! ml-[-0.2rem]! text-[8px]!' : '' }
+					}}
+				>
+					{#snippet avatar({ item, avatarProps })}
+						<Avatar
+							{...avatarProps}
+							name={item.name}
+							alt=""
+							theme={{
+								root: { base: tiny ? 'size-4! ring-0!' : 'ring-2 ring-[color:var(--app-page)]' },
+								avatarInitials: { base: `bg-[var(--presence-color)]! text-white! ${tiny ? 'text-[8px]!' : ''}` }
+							}}
+							{@attach tint(item.color)}
+						/>
+					{/snippet}
+				</AvatarGroup>
 			</span>
-		{/each}
-		{#if extra > 0}
-			<span class="ml-1 text-xs text-[color:var(--app-text-tertiary)]">+{extra}</span>
-		{/if}
-	</span>
+		{/snippet}
+	</Tooltip>
 {/if}

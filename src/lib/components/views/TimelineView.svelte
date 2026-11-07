@@ -5,6 +5,7 @@
 -->
 <script lang="ts">
 	import { GanttChart, type GanttTask, type GanttTasksChange } from 'entasis/gantt-chart';
+	import { Empty } from 'entasis/empty';
 	import type { ViewData } from '#lib/client/workspace.svelte.ts';
 	import { DAY_MS, parseIsoDate, type DateValue } from '#lib/shared/dates.ts';
 	import type { ViewEnv } from './env.ts';
@@ -74,7 +75,7 @@
 
 <div class="timeline" data-testid="view-timeline">
 	{#if !dp.start}
-		<div class="note" data-testid="timeline-needs-date">Add a date property to this database to place its pages on the timeline.</div>
+		<Empty size="small" title="No date property yet" description="Add a date property to this database to place its pages on the timeline." data-testid="timeline-needs-date" />
 	{:else}
 		<GanttChart
 			bind:tasks
@@ -101,10 +102,6 @@
 	}
 	.timeline :global(.notion-timeline) {
 		height: 460px;
-	}
-	.note {
-		padding: 24px 8px;
-		color: var(--app-text-secondary);
 	}
 	.foot,
 	.count {

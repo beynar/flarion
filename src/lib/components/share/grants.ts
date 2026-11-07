@@ -107,9 +107,6 @@ export function inviteSuggestions(query: string, ctx: GrantContext & { grants: r
 	return out.slice(0, limit);
 }
 
-/** The first suggestion Enter should pick: an exact match first, else the first one. */
-export const defaultSuggestion = (list: readonly Suggestion[]): Suggestion | undefined => list[0];
-
 /** A friendly line for a failed RPC; "not implemented yet" gets its own wording. */
 export function shareErrorMessage(error: unknown): string {
 	const e = error as { code?: string; message?: string; status?: number };

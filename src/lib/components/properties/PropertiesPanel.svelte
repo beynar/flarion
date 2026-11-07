@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { tick, untrack } from 'svelte';
 	import { SvelteSet } from 'svelte/reactivity';
+	import { Button } from 'entasis/button';
 	import { rpc } from '#lib/client/rpc.ts';
 	import { fileUrl, uploadToPage } from '#lib/components/editor/uploads.ts';
 	import type { PageEntity, WorkspaceStore } from '#lib/client/workspace.svelte.ts';
@@ -205,27 +206,29 @@
 
 		<div class="mt-1 flex flex-wrap items-center gap-x-1">
 			{#if hidden.length}
-				<button
-					type="button"
-					class="inline-flex w-fit items-center rounded-[var(--app-radius-control)] px-1.5 text-sm text-[color:var(--app-text-tertiary)] hover:bg-[color:var(--app-hover)] hover:text-[color:var(--app-text-secondary)]"
-					style="height: var(--app-button-height)"
+				<Button
+					variant="ghost"
+					color="neutral"
+					size="small"
+					class="font-normal text-[color:var(--app-text-tertiary)]"
 					data-testid="toggle-empty"
-					aria-expanded={showEmpty}
+					expanded={showEmpty}
 					onclick={() => (showEmpty = !showEmpty)}
 				>
 					{showEmpty ? 'Hide' : 'Show'} {hidden.length} empty {hidden.length === 1 ? 'property' : 'properties'}
-				</button>
+				</Button>
 			{:else if showEmpty && rows.length}
-				<button
-					type="button"
-					class="inline-flex w-fit items-center rounded-[var(--app-radius-control)] px-1.5 text-sm text-[color:var(--app-text-tertiary)] hover:bg-[color:var(--app-hover)]"
-					style="height: var(--app-button-height)"
+				<Button
+					variant="ghost"
+					color="neutral"
+					size="small"
+					class="font-normal text-[color:var(--app-text-tertiary)]"
 					data-testid="toggle-empty"
-					aria-expanded="true"
+					expanded
 					onclick={() => (showEmpty = false)}
 				>
 					Hide empty properties
-				</button>
+				</Button>
 			{/if}
 			{#if editable}
 				<AddProperty existing={attachable} names={defs} onCreate={createProperty} onAttach={attach} />
