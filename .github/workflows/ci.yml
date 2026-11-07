@@ -1,0 +1,120 @@
+# CI and deploys (docs/PLAN.md "Testing, observability and operations"):
+#   every push to main and every PR : type check, unit + workers tests, build
+#   PR (same repository)            : preview deploy, `wrangler versions upload --env staging --preview-alias pr-<n>`
+#   push to main                    : staging (full deploy), then production (gradual: 10% -> 50% -> 100%)
+#
+# Repository secrets: CLOUDFLARE_API_TOKEN, CLOUDFLARE_ACCOUNT_ID.
+# Put a required reviewer on the `production` environment to gate the production rollout.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      full_deploy:
+        description: Use `wrangler deploy` instead of a gradual rollout (first deploy, Durable Object migrations)
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  verify:
+    name: Check, test, build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup
+      - run: pnpm check
+      - run: pnpm exec vitest run --project unit
+      - run: pnpm exec vitest run --project workers
+      - run: pnpm build
+
+  preview:
+    name: Preview deploy
+    needs: verify
+    # Fork PRs get no secrets.
+    if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      pull-requests: write
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup
+      - run: pnpm build
+      # A preview is a version of the staging Worker that gets no traffic of its own: it is reachable
+      # at its alias URL only, uses staging bindings, and D1 migrations are NOT applied for it.
+      - name: Upload preview version
+        run: >
+          pnpm exec wrangler versions upload --env staging
+          --preview-alias pr-${{ github.event.pull_request.number }}
+          --tag pr-${{ github.event.pull_request.number }}-${{ github.sha }}
+          --message "PR #${{ github.event.pull_request.number }} ${{ github.sha }}"
+        env:
+          WRANGLER_OUTPUT_FILE_PATH: ${{ runner.temp }}/upload.ndjson
+      - name: Comment the preview URL
+        run: |
+          url=$(node -e '
+            const lines = require("node:fs").readFileSync(process.argv[1], "utf8").split("\n").filter(Boolean);
+            const e = lines.map((l) => JSON.parse(l)).reverse().find((x) => x.type === "version-upload");
+            process.stdout.write(e?.preview_alias_url ?? e?.preview_url ?? "");
+          ' "$RUNNER_TEMP/upload.ndjson")
+          [ -n "$url" ] || { echo "No preview URL in wrangler output"; exit 0; }
+          gh pr comment ${{ github.event.pull_request.number }} --repo "$GITHUB_REPOSITORY" \
+            --edit-last --create-if-none --body "Preview: $url (commit ${GITHUB_SHA::7}, staging bindings, no migrations applied)"
+
+  deploy-staging:
+    name: Deploy staging
+    needs: verify
+    if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: staging
+    concurrency:
+      group: deploy-staging
+      cancel-in-progress: false
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      FULL_DEPLOY: ${{ inputs.full_deploy && '1' || '0' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup
+      # Builds, checks secrets, applies D1 migrations, then `wrangler deploy --env staging`.
+      - run: scripts/deploy.sh staging
+
+  deploy-production:
+    name: Deploy production (gradual)
+    needs: deploy-staging
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: production
+    concurrency:
+      group: deploy-production
+      cancel-in-progress: false
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      FULL_DEPLOY: ${{ inputs.full_deploy && '1' || '0' }}
+      ROLLOUT_STEPS: '10 50'
+      ROLLOUT_WAIT: '120'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup
+      # Builds, checks secrets, applies D1 migrations, `versions upload`, then `versions deploy`
+      # at 10%, 50% and 100% with a /healthz check at each step and an automatic rollback.
+      - run: scripts/deploy.sh production

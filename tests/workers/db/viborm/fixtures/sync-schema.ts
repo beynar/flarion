@@ -1,0 +1,52 @@
+// @ts-nocheck
+// Vendored from viborm (tests/fixtures/sync-schema.ts); import specifiers rewritten to the public package entry points
+// and `vitest` replaced by the Durable Object harness (../../harness/do-vitest.ts). Treat as read-only upstream code.
+/**
+ * Test-only live schema sync. Production callers use push() with consent.
+ * Additive empty-database setup does not need consent.
+ */
+
+import { addDropResolver, createMigrationClient } from "viborm/migrations";
+import type { MigrationClient } from "@migrations/push/planner";
+import type { ResolveCallback } from "@migrations/types";
+
+interface SyncLiveSchemaOptions {
+  readonly tables?: readonly string[];
+  readonly dryRun?: boolean;
+  readonly force?: boolean;
+  readonly forceReset?: boolean;
+  readonly resolve?: ResolveCallback;
+  readonly skipValidation?: boolean;
+}
+
+export async function syncLiveSchema(
+  client: MigrationClient,
+  options: SyncLiveSchemaOptions = {}
+) {
+  const resolve: ResolveCallback | undefined = options.force
+    ? async (change) =>
+        (await options.resolve?.(change)) ?? addDropResolver(change)
+    : options.resolve;
+  const migrations =
+    options.tables === undefined
+      ? createMigrationClient(client)
+      : createMigrationClient(client, { tables: options.tables });
+  const preview = await migrations.push({
+    dryRun: true,
+    forceReset: options.forceReset,
+    resolve,
+    skipValidation: options.skipValidation,
+  });
+  const outcome = options.dryRun
+    ? preview
+    : await migrations.push({ consent: preview.consent });
+  return {
+    ...outcome,
+    applied: outcome.outcome === "applied",
+    operations: outcome.operations.map((operation) => ({
+      ...operation,
+      type: operation.id.slice(0, operation.id.indexOf(":")),
+    })),
+    sql: outcome.statements.map((statement) => statement.sql),
+  };
+}

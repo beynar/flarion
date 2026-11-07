@@ -1,0 +1,257 @@
+/**
+ * Workspace access policy (viborm/permissions), DRAFT from the P0 policy spike. P2 owns the final
+ * rules; this version is the plan's sketch translated to viborm 1.12.1's real vocabulary and measured
+ * against Durable Object SQLite's statement limits (docs/spikes/p0-policy-limits.md).
+ *
+ * Vocabulary used (viborm 1.12.1):
+ * - `{ actor: "path" }` in a value position is the actor's field, bound as one parameter;
+ * - `{ actor: { path: value } }` in a filter is a condition on the actor alone, folded per call;
+ * - a relation whose value is an action name is the target's predicate for that action;
+ * - `parent: { recurse: { depth: false }, self: true, some: ... }` walks the ancestors in one
+ *   `WITH RECURSIVE` inside the statement, the row itself included;
+ * - `$exists: { model: where }` is a row-independent check that does not repeat per row.
+ */
+import { v, type InferOutput } from 'viborm/validation';
+import { permissions, type Rule } from 'viborm/permissions';
+import { ACCESS_LEVELS, GRANT_SUBJECT_KINDS, WORKSPACE_ROLES } from './workspace.schema';
+
+/** Facts about the caller, supplied by the Worker per request. Never read from the database by the policy. */
+export const actorSchema = v.object({
+	userId: v.optional(v.string()),
+	/** Workspace owner or admin: full access to every page. */
+	admin: v.boolean(),
+	guest: v.boolean(),
+	/** Public-link token presented by an anonymous visitor. */
+	shareToken: v.optional(v.string()),
+	/**
+	 * Share keys this actor matches (see {@link grantSubjectKey}): `user:<id>`, `workspace` (not for
+	 * guests), `public:<token>` and `teamspace:<id>` for every teamspace the actor belongs to. Used by
+	 * {@link policy} and {@link joinedPolicy}; the plan's sketch reads the three scalar facts above.
+	 */
+	subjects: v.array(v.string()),
+	/** Teamspaces in which the actor holds at least the level (owners hold every level). Used by {@link policy}. */
+	teamspaces: v.object({
+		read: v.array(v.string()),
+		comment: v.array(v.string()),
+		update: v.array(v.string()),
+		full: v.array(v.string())
+	})
+});
+
+export type Actor = InferOutput<typeof actorSchema>;
+
+/** The `subjectKey` stored on a grant. */
+export function grantSubjectKey(kind: (typeof GRANT_SUBJECT_KINDS)[number], subjectId?: string | null, token?: string | null): string {
+	switch (kind) {
+		case 'user':
+			return `user:${subjectId}`;
+		case 'teamspace':
+			return `teamspace:${subjectId}`;
+		case 'public':
+			return `public:${token}`;
+		case 'workspace':
+			return 'workspace';
+	}
+}
+
+export interface ActorInput {
+	userId?: string;
+	/** From the D1 membership. `anonymous`: a visitor with no account. */
+	role: (typeof WORKSPACE_ROLES)[number] | 'anonymous';
+	shareToken?: string;
+	/** The actor's rows of `teamspace_member`. */
+	memberships: readonly { teamspaceId: string; role: string }[];
+	/** Default level of every teamspace the actor is a member of. */
+	teamspaces: readonly { id: string; defaultLevel: string }[];
+}
+
+/**
+ * The actor facts of one request. Pure: the Workspace DO reads `teamspace_member`/`teamspace` once per
+ * actor (cached with the visibility set, recomputed when a membership changes) and calls this.
+ */
+export function actorFacts(input: ActorInput): Actor {
+	const guest = input.role === 'guest' || input.role === 'anonymous';
+	const subjects: string[] = [];
+	if (input.userId) subjects.push(grantSubjectKey('user', input.userId));
+	if (!guest) subjects.push('workspace');
+	if (input.shareToken) subjects.push(grantSubjectKey('public', null, input.shareToken));
+	const defaults = new Map(input.teamspaces.map((t) => [t.id, t.defaultLevel]));
+	const teamspaces = { read: [] as string[], comment: [] as string[], update: [] as string[], full: [] as string[] };
+	for (const membership of input.memberships) {
+		subjects.push(grantSubjectKey('teamspace', membership.teamspaceId));
+		const held = membership.role === 'owner' ? 'full' : (defaults.get(membership.teamspaceId) ?? 'read');
+		const rank = ACCESS_LEVELS.indexOf(held as never);
+		ACCESS_LEVELS.forEach((level, i) => {
+			if (i <= rank) teamspaces[level].push(membership.teamspaceId);
+		});
+	}
+	return {
+		userId: input.userId,
+		admin: input.role === 'owner' || input.role === 'admin',
+		guest,
+		shareToken: input.shareToken,
+		subjects,
+		teamspaces
+	};
+}
+
+const isMember = { members: { some: { userId: { actor: 'userId' } } } } as const;
+const isOwner = { members: { some: { userId: { actor: 'userId' }, role: 'owner' } } } as const;
+
+/**
+ * Who holds a share, at a level matched by `levelMatch` (an equality in the plan's sketch, an `in` list
+ * in the compact policy).
+ */
+const sharedWith = (levelMatch: string | { in: readonly string[] }) =>
+	({
+		grants: {
+			some: {
+				level: levelMatch,
+				deletedAt: null,
+				OR: [
+					{ subjectKind: 'user', subjectId: { actor: 'userId' } },
+					{ subjectKind: 'workspace', actor: { guest: false } },
+					{ subjectKind: 'teamspace', teamspace: { is: isMember } },
+					{ subjectKind: 'public', token: { actor: 'shareToken' } }
+				]
+			}
+		}
+	}) as const;
+
+const ancestorsOrSelf = (rule: unknown) => ({ parent: { recurse: { depth: false }, self: true, some: rule } });
+
+// ----- the plan's sketch, as written -----
+
+/** Members get their teamspace's default level (`teamspaceId` is copied onto every page of a subtree). */
+const viaTeamspace = (level: string) => ({ teamspace: { is: { defaultLevel: level, ...isMember } } }) as const;
+
+const sketchAccess = (level: string) => ({
+	OR: [
+		{ actor: { admin: true } },
+		viaTeamspace(level),
+		// Private section: no teamspace, created by the caller.
+		{ teamspaceId: null, createdById: { actor: 'userId' } },
+		ancestorsOrSelf(sharedWith(level))
+	]
+});
+
+const pageCreate = {
+	OR: [
+		{ parent: 'update' },
+		{ parentId: null, teamspace: { is: isMember } },
+		{ parentId: null, teamspaceId: null, createdById: { actor: 'userId' } }
+	]
+} as const;
+
+const supportingModels = {
+	teamspace: {
+		read: {
+			OR: [{ AND: [{ privacy: { in: ['open', 'closed'] } }, { actor: { guest: false } }] }, isMember]
+		},
+		'update, full': isOwner,
+		create: { actor: { guest: false } }
+	},
+	teamspaceMember: {
+		read: { teamspace: 'read' },
+		'create, update': { teamspace: 'update' }
+	},
+	grant: {
+		read: { page: 'read' },
+		'create, update': { page: 'full' },
+		operations: { delete: 'update' }
+	}
+} as const;
+
+/**
+ * The plan's policy sketch, translated literally. Every level carries its own rule body and viborm ORs
+ * the bodies of every level at or above the asked one, so `read` repeats the body four times. Kept for
+ * the spike's measurements only (see docs/spikes/p0-policy-limits.md): it exceeds SQLite's expression
+ * depth on a move and sits at 97 of 100 bound values on `can` with four actions.
+ */
+export const sketchPolicy = permissions({
+	actor: actorSchema,
+	levels: ACCESS_LEVELS,
+	models: {
+		page: {
+			operations: { delete: 'full' },
+			'read, comment, update': sketchAccess,
+			full: (level) => ({ OR: [sketchAccess(level), { teamspace: { is: isOwner } }] }),
+			create: pageCreate,
+			fields: { parentId: { write: 'full' }, teamspaceId: { write: 'full' } }
+		},
+		...supportingModels
+	}
+});
+
+// ----- the compact policies -----
+
+const levelsFrom = (action: string) => ACCESS_LEVELS.slice(ACCESS_LEVELS.indexOf(action as never));
+
+/** A share on the page or an ancestor, matched in ONE flat condition against the actor's share keys. */
+const sharedWithActor = (levels: readonly string[]) =>
+	({ grants: { some: { level: { in: levels }, deletedAt: null, subjectKey: { in: { actor: 'subjects' } } } } }) as const;
+
+const compactActions = { read: [], comment: [], update: [], full: [], create: [] } as const;
+
+/**
+ * Compact rules, shared by {@link joinedPolicy} and {@link policy}. Two changes against the sketch:
+ *
+ * 1. The level is DATA, not a copy of the rule. A share or teamspace default holds `action` when its
+ *    level is `action` or higher (`level in [..]`), and the actions declare no implications between
+ *    themselves, so viborm does not OR four copies of the body for `read` (only its built-in "update
+ *    grants read" edge remains).
+ * 2. The OR over the four share kinds is one flat `subjectKey in actor.subjects`; the Worker puts
+ *    `workspace`, `user:<id>`, `public:<token>` and `teamspace:<id>` into `subjects` per request.
+ *
+ * Teamspace owners hold every action.
+ */
+function compact(viaTeamspace: (action: string) => Rule) {
+	return (action: string): Rule => ({
+		OR: [
+			{ actor: { admin: true } },
+			viaTeamspace(action),
+			// Private section: no teamspace, created by the caller.
+			{ teamspaceId: null, createdById: { actor: 'userId' } },
+			ancestorsOrSelf(sharedWithActor(levelsFrom(action)))
+		]
+	});
+}
+
+/** Teamspace access through rows: the teamspace's default level and the caller's membership. */
+const viaTeamspaceRows = (action: string): Rule => ({
+	teamspace: { is: { OR: [{ defaultLevel: { in: levelsFrom(action) }, ...isMember }, isOwner] } }
+});
+
+/** Teamspace access through actor facts: `page.teamspaceId in actor.teamspaces[action]`. No join. */
+const viaTeamspaceFacts = (action: string): Rule => ({ teamspaceId: { in: { actor: `teamspaces.${action}` } } });
+
+const governed = (access: (action: string) => Rule) => ({
+	page: {
+		actions: compactActions,
+		operations: { delete: 'full' as const },
+		'read, comment, update, full': access,
+		create: pageCreate,
+		fields: { parentId: { write: 'full' }, teamspaceId: { write: 'full' } } as const
+	},
+	...supportingModels
+});
+
+/**
+ * Compact rules that still read the teamspace default level and membership from rows. Fits the limits
+ * (a move takes 77 of 100 bound values), but with less headroom than {@link policy}. The fallback if
+ * the Worker cannot supply `actor.teamspaces`.
+ */
+export const joinedPolicy = permissions({
+	actor: actorSchema,
+	models: governed(compact(viaTeamspaceRows))
+});
+
+/**
+ * The workspace policy. Compact rules (see {@link compact}) with teamspace access taken from actor
+ * facts, so a page's access is its own columns, one `WITH RECURSIVE` over its ancestors' shares and no
+ * other join: 9 bound values for a read, 49 for a move (docs/spikes/p0-policy-limits.md).
+ */
+export const policy = permissions({
+	actor: actorSchema,
+	models: governed(compact(viaTeamspaceFacts))
+});

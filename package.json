@@ -13,7 +13,8 @@
     "test:unit": "vitest run --project unit",
     "test:workers": "vitest run --project workers",
     "deploy": "vite build && wrangler deploy",
-    "deploy:staging": "vite build && wrangler deploy --env staging"
+    "deploy:staging": "vite build && wrangler deploy --env staging",
+    "gen:theme": "node --experimental-strip-types scripts/gen-theme.ts"
   },
   "devDependencies": {
     "@cloudflare/vitest-plugin": "^1.6.0",
@@ -25,7 +26,7 @@
     "@tailwindcss/vite": "4.3.5",
     "svelte": "5.57.3",
     "svelte-check": "^4.7.8",
-    "sveltekit-cloudflare-worker": "file:../sveltekit-cloudflare-worker",
+    "sveltekit-cloudflare-worker": "file:vendor/sveltekit-cloudflare-worker-0.0.1.tgz",
     "tailwindcss": "4.3.5",
     "typescript": "6.0.3",
     "vite": "8.3.6",
@@ -57,5 +58,8 @@
     "katex": "^0.19.1",
     "valibot": "1.5.0",
     "viborm": "1.12.1"
+  },
+  "imports": {
+    "#lib/*": "./src/lib/*"
   }
 }

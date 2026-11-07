@@ -1,1 +1,35 @@
 @import 'tailwindcss';
+@source '../node_modules/entasis/dist';
+
+/* Theme blocks generated from src/lib/design/notion.tokens.ts (pnpm gen:theme). */
+@import './lib/design/generated/entasis-theme.css';
+
+/* edytor's Notion document theme, then our tokens over it (light, and a dark redefinition). */
+@import 'edytor/themes/notion.css';
+@import './lib/design/generated/edytor-overrides.css';
+
+/* App variables, the menu shadow and the row-height fixes. Unlayered, so they win. */
+@import './lib/design/generated/app-vars.css';
+
+@theme {
+	--font-sans:
+		ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, 'Apple Color Emoji',
+		Arial, sans-serif, 'Segoe UI Emoji', 'Segoe UI Symbol';
+	--font-mono: 'SFMono-Regular', Menlo, Consolas, monospace;
+}
+
+@layer base {
+	html {
+		font-family: var(--font-sans);
+		font-size: 16px;
+		-webkit-text-size-adjust: 100%;
+	}
+	body {
+		margin: 0;
+		background: var(--app-page);
+		color: var(--app-text);
+		font-size: var(--app-font-size-chrome);
+		line-height: 1.5;
+		-webkit-font-smoothing: auto;
+	}
+}
