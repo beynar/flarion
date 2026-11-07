@@ -54,6 +54,22 @@ export const RAW_STEPS: readonly string[][] = [
 		)`,
 		// Full-text search (docs/spikes/p0-fts5.md). Created now, filled and queried from P3.
 		`CREATE VIRTUAL TABLE search USING fts5(page_num UNINDEXED, field, text, tokenize = 'porter unicode61')`
+	],
+	[
+		// ----- live views (P3) -----
+		// The property-to-subscription index: the properties a view unit filters, sorts, groups by and takes its
+		// membership from (`$parent`, `$teamspace` and `$edited` stand for the page-level fields). A commit checks
+		// only the units whose properties it wrote.
+		`CREATE TABLE sub_prop (
+			prop TEXT NOT NULL,
+			unit_key TEXT NOT NULL,
+			PRIMARY KEY (prop, unit_key)
+		) WITHOUT ROWID`,
+		'CREATE INDEX sub_prop_unit ON sub_prop (unit_key)',
+		// Per-group window sizes of a grouped view subscription (JSON: group key -> limit).
+		'ALTER TABLE socket_sub ADD COLUMN glim TEXT',
+		// Flags of a view unit: 1 = depends on the clock (relative dates), 2 = hand-picked members only.
+		'ALTER TABLE sub_unit ADD COLUMN flags INTEGER NOT NULL DEFAULT 0'
 	]
 ];
 

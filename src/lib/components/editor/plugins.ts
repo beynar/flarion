@@ -43,6 +43,7 @@ import {
 	type Uploader
 } from 'edytor';
 import * as chrome from './chrome/chrome.svelte';
+import { createAiPlugin, type AiPluginHost } from './ai/plugin.ts';
 import { createCustomKindsPlugin, type CustomKindsHost } from './custom-kinds.svelte';
 import { mentionItems, pageLinkItems, type PagesSearch, type PeopleSearch } from './mentions.ts';
 import type { Unfurl } from './unfurl.ts';
@@ -66,11 +67,14 @@ export interface EditorPluginInput {
 	marqueeContainer: string;
 	/** What the custom blocks' slash commands ask of the editor view (database creation, read-only). */
 	custom: CustomKindsHost;
+	/** What the `/ai` commands run: the editor view's runner (`ai/run.ts`). */
+	ai: AiPluginHost;
 }
 
 /** The plugin names as wired, in list order (the Editor's tests and the report read this). */
 export const WIRED_PLUGINS = [
 	'customKinds (database_view, breadcrumb, date_mention)',
+	'createAiPlugin (/ai commands)',
 	'createBlockHandlesPlugin',
 	'createArrowMovePlugin',
 	'createImagePlugin',
@@ -106,6 +110,8 @@ export const WIRED_PLUGINS = [
 export function createEditorPlugins(input: EditorPluginInput): Plugin[] {
 	return [
 		createCustomKindsPlugin(input.custom),
+		// `/ai`: continue, summarize, improve, fix spelling, translate, change tone, explain (drafts arrive as shared suggestions).
+		createAiPlugin(input.ai),
 		// Chrome that sits beside blocks.
 		createBlockHandlesPlugin({ handle: chrome.blockHandle }),
 		createArrowMovePlugin(),

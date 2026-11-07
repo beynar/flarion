@@ -14,6 +14,12 @@
  * unit's new ids against the stored ones, derives every subscription's window diff from that (a window is
  * the concatenation of its units, cut at its limit), and sends each socket one `diff` frame; sockets the
  * commit does not touch get a `head`.
+ *
+ * View units (`view-unit.ts`) hold the ordered ids of a live database view, per group when grouped, and are
+ * maintained incrementally through the query engine; the property-to-subscription index (`sub_prop`) finds the
+ * units a commit's writes can touch. Evaluating a view is asynchronous (the engine runs through viborm), so
+ * `register`, `snapshot`, `resizeWindow`, `fanOut` and `replaySub` are async: the Workspace DO runs them in the
+ * same serial queue as commits, so a socket message never observes a half fanned-out commit.
  */
 import type {
 	BacklinkRow,
@@ -30,9 +36,27 @@ import { TITLE_PROP_ID } from '../../../lib/shared/property-types';
 import { visibilityScope } from './actor';
 import type { VisibilityView } from './access';
 import type { Actor } from '../../auth/session';
+import type { WorkspaceDb } from '../../db/workspace.client';
 import type { LogRow } from './changelog';
 import { RowReader, type AccessOf } from './rows';
 import { chunks, MAX_PARAMS, qmarks } from './util';
+import { filterKey } from '../../../lib/shared/filter-ast';
+import { loadEavRegistry, type EavRegistry } from './eav/registry';
+import {
+	EDITED,
+	EMPTY_STATE,
+	FLAT,
+	MAX_INCREMENTAL,
+	TupleCache,
+	ViewState,
+	evaluateView,
+	groupKeysFor,
+	maintainView,
+	resolveView,
+	unitReads,
+	type ResolvedView,
+	type ViewUnitSpec
+} from './view-unit';
 
 export type UnitKind = 'tree' | 'page' | 'backlinks' | 'view';
 
@@ -48,6 +72,8 @@ interface SubRow {
 	kind: Subscription['kind'];
 	sub: Subscription;
 	lim: number | null;
+	/** Per-group window sizes of a grouped view (group key -> limit); the others use `lim`. */
+	glim: Record<string, number>;
 	unitKeys: string[];
 }
 
@@ -63,6 +89,10 @@ export interface CommitInfo {
 
 export interface LiveHost {
 	sql: SqlStorage;
+	/** The base client: view units run the query engine on it (read only). */
+	db: WorkspaceDb;
+	/** Epoch ms, for relative dates. */
+	now(): number;
 	/** Pushes a message on the socket's stream; false when the socket or its stream is gone. */
 	send(socketId: string, message: ServerMessage): boolean;
 	/** The actor stored in the socket's attachment. */
@@ -80,7 +110,11 @@ const fnv = (text: string): string => {
 	return (h >>> 0).toString(16);
 };
 
-export function unitsOf(sub: Subscription, scope: string): UnitRef[] {
+/**
+ * The shared units of a subscription. `scope` is the visibility scope of the unit's key; `me` is set (with a
+ * `me:` scope) for a view whose query reads `is me`, so users never share an evaluation they would not share.
+ */
+export function unitsOf(sub: Subscription, scope: string, me?: string): UnitRef[] {
 	switch (sub.kind) {
 		case 'tree':
 			return [...new Set(sub.parents)].map((parent) => ({
@@ -93,13 +127,26 @@ export function unitsOf(sub: Subscription, scope: string): UnitRef[] {
 		case 'backlinks':
 			return [{ key: `bl|${scope}|${sub.pageId}`, kind: 'backlinks', spec: { pageId: sub.pageId } }];
 		case 'view': {
-			// Filter, sorts and grouping belong to the unit (they change its ids); `props` and `limit` do not.
-			const query = { filter: sub.filter ?? null, sorts: sub.sorts ?? null, groupBy: sub.groupBy ?? null };
+			// Filter, sorts and grouping belong to the unit (they change its ids); `props` and `limit` do not. The
+			// key hashes the canonical filter, so equivalent filters share a unit.
+			const query: Record<string, unknown> = {
+				filter: sub.filter ? filterKey(sub.filter) : null,
+				sorts: sub.sorts ?? null
+			};
+			if (sub.groupBy !== undefined) query.groupBy = sub.groupBy;
+			const spec: ViewUnitSpec = {
+				collectionId: sub.collectionId,
+				viewId: sub.viewId ?? null,
+				filter: sub.filter ?? null,
+				sorts: sub.sorts ?? null,
+				...(sub.groupBy !== undefined ? { groupBy: sub.groupBy } : {}),
+				...(me ? { me } : {})
+			};
 			return [
 				{
 					key: `view|${scope}|${sub.collectionId}|${sub.viewId ?? ''}|${fnv(JSON.stringify(query))}`,
 					kind: 'view',
-					spec: { collectionId: sub.collectionId, viewId: sub.viewId ?? null, ...query }
+					spec: spec as unknown as Record<string, unknown>
 				}
 			];
 		}
@@ -135,6 +182,8 @@ export function diffWindows<R>(oldIds: readonly string[], newIds: readonly strin
 
 type RowKind = 'tree' | 'page' | 'view' | 'backlinks';
 type AnyRow = TreeRow | PageRow | ViewRow | BacklinkRow;
+/** What a unit holds: ordered ids, or the state of a view unit. */
+type UnitValue = string[] | ViewState;
 
 interface Touch {
 	/** Pages whose membership in some unit can change (create, move, trash, restore, and subtrees). */
@@ -143,6 +192,10 @@ interface Touch {
 	parents: Set<string>;
 	structural: boolean;
 	all: boolean;
+	/** A definition changed (property, collection, view, member): every view unit is evaluated in full. */
+	definition: boolean;
+	/** The clock moved (a system `clock` record): units with relative dates are evaluated in full. */
+	clock: boolean;
 	/** page -> value properties written. */
 	valueProps: Map<string, Set<string>>;
 	/** page -> `$` fields that changed. */
@@ -150,7 +203,15 @@ interface Touch {
 	subtreeRoots: string[];
 	/** Roots whose subtree changed teamspace. */
 	teamspaceRoots: string[];
+	/** Descendants of the roots that changed teamspace. */
+	teamspaceDescendants: Set<string>;
 	backlinkTargets: Set<string>;
+	/** Pages created, trashed or restored (a trash or restore brings its whole subtree): candidates of every view. */
+	lifecycle: Set<string>;
+	/** Pages that moved (parent, teamspace or rank). */
+	moved: Set<string>;
+	/** Pages the commit stamps as edited (every page with a record but a create or a links record). */
+	edited: Set<string>;
 }
 
 /** Change kinds that write one property of one page (the EAV module's `setProp`, `addOption`, `removeOption`). */
@@ -168,25 +229,36 @@ export function analyze(rows: readonly LogRow[]): Touch {
 		parents: new Set(),
 		structural: false,
 		all: false,
+		definition: false,
+		clock: false,
 		valueProps: new Map(),
 		fields: new Map(),
 		subtreeRoots: [],
 		teamspaceRoots: [],
-		backlinkTargets: new Set()
+		teamspaceDescendants: new Set(),
+		backlinkTargets: new Set(),
+		lifecycle: new Set(),
+		moved: new Set(),
+		edited: new Set()
 	};
 	for (const row of rows) {
 		const oldV = asRecord(row.old);
 		const newV = asRecord(row.new);
+		if (row.page && row.kind !== 'create' && row.kind !== 'links') t.edited.add(row.page);
 		switch (row.kind) {
 			case 'create':
 				t.structural = true;
-				if (row.page) t.structPages.add(row.page);
+				if (row.page) {
+					t.structPages.add(row.page);
+					t.lifecycle.add(row.page);
+				}
 				t.parents.add((newV.parentId as string | null) ?? '');
 				break;
 			case 'move':
 				t.structural = true;
 				if (!row.page) break;
 				t.structPages.add(row.page);
+				t.moved.add(row.page);
 				t.parents.add((oldV.parentId as string | null) ?? '');
 				t.parents.add((newV.parentId as string | null) ?? '');
 				if (oldV.parentId !== newV.parentId) addTo(t.fields, row.page, '$parent');
@@ -222,6 +294,9 @@ export function analyze(rows: readonly LogRow[]): Touch {
 				t.structural = true;
 				t.all = true;
 				break;
+			case 'clock':
+				t.clock = true;
+				break;
 			case 'grant.set':
 			case 'grant.revoke':
 			case 'member.sync':
@@ -233,6 +308,7 @@ export function analyze(rows: readonly LogRow[]): Touch {
 				} else if (!row.kind.startsWith('teamspace')) {
 					// Definition ops (collections, members, views, properties): they can change a view's rows.
 					t.structural = true;
+					t.definition = true;
 				}
 		}
 	}
@@ -243,6 +319,17 @@ const countEvaluations = { value: 0 };
 /** Test hook: how many unit evaluations ran in this isolate. */
 export const unitEvaluations = () => countEvaluations.value;
 
+/** The windows of one view subscription for one actor, at one point in time. */
+interface WindowSet {
+	/** Group keys in display order (`[FLAT]` when ungrouped). */
+	keys: string[];
+	lists: Map<string, { all: string[]; window: string[] }>;
+	/** Distinct visible pages. */
+	distinct: number;
+}
+
+const sameKeys = (a: readonly string[], b: readonly string[]): boolean => a.length === b.length && a.every((k, i) => k === b[i]);
+
 export class LiveHub {
 	readonly #host: LiveHost;
 	readonly #reader: RowReader;
@@ -251,11 +338,15 @@ export class LiveHub {
 	evaluations = 0;
 	/** Page id -> dense number: numbers never change, so this never needs invalidating. */
 	readonly #nums = new Map<string, number>();
+	/** Parsed view unit states (the SQL row is the source of truth; this skips re-parsing big lists). */
+	readonly #states = new Map<string, ViewState>();
+	/** Resolved view units, dropped whenever a definition changes. */
+	readonly #resolved = new Map<string, ResolvedView | null>();
 
 	constructor(host: LiveHost) {
 		this.#host = host;
 		this.#sql = host.sql;
-		this.#reader = new RowReader(host.sql);
+		this.#reader = new RowReader(host.sql, host.db);
 	}
 
 	get reader(): RowReader {
@@ -366,12 +457,21 @@ export class LiveHub {
 	}
 
 	#gcUnits(): void {
+		const dead = this.#all<{ unit_key: string }>('SELECT unit_key FROM sub_unit WHERE unit_key NOT IN (SELECT DISTINCT unit_key FROM sub_link)');
+		if (dead.length === 0) return;
 		this.#run('DELETE FROM sub_unit WHERE unit_key NOT IN (SELECT DISTINCT unit_key FROM sub_link)');
+		this.#run('DELETE FROM sub_prop WHERE unit_key NOT IN (SELECT DISTINCT unit_key FROM sub_link)');
+		for (const { unit_key } of dead) {
+			this.#states.delete(unit_key);
+			this.#resolved.delete(unit_key);
+		}
 	}
 
 	/** Forgets every socket's registry (after a failed fan-out: the clients reconnect and resume). */
 	clearRegistry(): void {
-		for (const table of ['socket_stream', 'socket_sub', 'sub_link', 'sub_unit']) this.#run(`DELETE FROM ${table}`);
+		for (const table of ['socket_stream', 'socket_sub', 'sub_link', 'sub_unit', 'sub_prop']) this.#run(`DELETE FROM ${table}`);
+		this.#states.clear();
+		this.#resolved.clear();
 	}
 
 	subCount(socketId: string): number {
@@ -383,19 +483,22 @@ export class LiveHub {
 	}
 
 	/** Test/diagnostic: units whose stored ids differ from a fresh evaluation (should always be empty). */
-	staleUnits(): string[] {
+	async staleUnits(): Promise<string[]> {
 		const stale: string[] = [];
-		for (const u of this.#all<{ unit_key: string; kind: UnitKind; spec: string; ids: string }>(
-			'SELECT unit_key, kind, spec, ids FROM sub_unit'
-		)) {
-			const fresh = this.#evaluate(u.kind, JSON.parse(u.spec), false);
-			if (JSON.stringify(fresh) !== u.ids) stale.push(u.unit_key);
+		for (const u of this.#all<{ unit_key: string; kind: UnitKind; spec: string; ids: string }>('SELECT unit_key, kind, spec, ids FROM sub_unit')) {
+			const spec = JSON.parse(u.spec) as Record<string, unknown>;
+			if (u.kind === 'view') {
+				const resolved = await resolveView(this.#host.db, spec as unknown as ViewUnitSpec);
+				const fresh = resolved ? await evaluateView(this.#host.db, resolved, spec as unknown as ViewUnitSpec, { now: this.#host.now() }) : EMPTY_STATE;
+				if (!fresh.equals(ViewState.parse(u.ids))) stale.push(u.unit_key);
+			} else if (JSON.stringify(this.#evaluate(u.kind, spec, false)) !== u.ids) stale.push(u.unit_key);
 		}
 		return stale;
 	}
 
 	// ───────────────────────── units ─────────────────────────
 
+	/** Tree, page and backlinks units: synchronous reads of the object's SQLite. */
 	#evaluate(kind: UnitKind, spec: Record<string, unknown>, count = true): string[] {
 		if (count) {
 			this.evaluations++;
@@ -409,7 +512,7 @@ export class LiveHub {
 			case 'backlinks':
 				return this.#reader.backlinkIds(spec.pageId as string);
 			case 'view':
-				return this.#reader.viewIds(spec.collectionId as string);
+				return [];
 		}
 	}
 
@@ -418,28 +521,83 @@ export class LiveHub {
 		return row ? (JSON.parse(row.ids) as string[]) : [];
 	}
 
-	#ensureUnit(unit: UnitRef): string[] {
+	#viewState(key: string): ViewState {
+		let state = this.#states.get(key);
+		if (!state) {
+			const row = this.#all<{ ids: string }>('SELECT ids FROM sub_unit WHERE unit_key = ?', key)[0];
+			state = row ? ViewState.parse(row.ids) : EMPTY_STATE;
+			this.#states.set(key, state);
+		}
+		return state;
+	}
+
+	#writeView(key: string, state: ViewState): void {
+		this.#run('UPDATE sub_unit SET ids = ? WHERE unit_key = ?', state.serialize(), key);
+		this.#states.set(key, state);
+	}
+
+	#valueOf(key: string, kind: UnitKind): UnitValue {
+		return kind === 'view' ? this.#viewState(key) : this.#unitIds(key);
+	}
+
+	async #resolve(key: string, spec: ViewUnitSpec, fresh = false): Promise<ResolvedView | null> {
+		if (!fresh && this.#resolved.has(key)) return this.#resolved.get(key) ?? null;
+		const resolved = await resolveView(this.#host.db, spec);
+		this.#resolved.set(key, resolved);
+		this.#indexUnit(key, resolved);
+		return resolved;
+	}
+
+	/** The property-to-subscription index of a view unit, and its flags (1: reads the clock, 2: hand-picked only). */
+	#indexUnit(key: string, resolved: ResolvedView | null): void {
+		this.#run('DELETE FROM sub_prop WHERE unit_key = ?', key);
+		if (!resolved) {
+			this.#run('UPDATE sub_unit SET flags = 0 WHERE unit_key = ?', key);
+			return;
+		}
+		for (const prop of resolved.props) this.#run('INSERT OR IGNORE INTO sub_prop (prop, unit_key) VALUES (?, ?)', prop, key);
+		this.#run('UPDATE sub_unit SET flags = ? WHERE unit_key = ?', (resolved.timed ? 1 : 0) | (resolved.manual ? 2 : 0), key);
+	}
+
+	async #ensureUnit(unit: UnitRef): Promise<void> {
 		const existing = this.#all<{ ids: string }>('SELECT ids FROM sub_unit WHERE unit_key = ?', unit.key)[0];
-		if (existing) return JSON.parse(existing.ids) as string[];
+		if (existing) return;
+		if (unit.kind === 'view') {
+			const spec = unit.spec as unknown as ViewUnitSpec;
+			this.evaluations++;
+			countEvaluations.value++;
+			const resolved = await resolveView(this.#host.db, spec);
+			const state = resolved ? await evaluateView(this.#host.db, resolved, spec, { now: this.#host.now() }) : EMPTY_STATE;
+			this.#run('INSERT OR REPLACE INTO sub_unit (unit_key, kind, spec, ids) VALUES (?, ?, ?, ?)', unit.key, unit.kind, JSON.stringify(unit.spec), state.serialize());
+			this.#states.set(unit.key, state);
+			this.#resolved.set(unit.key, resolved);
+			this.#indexUnit(unit.key, resolved);
+			return;
+		}
 		const ids = this.#evaluate(unit.kind, unit.spec);
 		this.#run('INSERT INTO sub_unit (unit_key, kind, spec, ids) VALUES (?, ?, ?, ?)', unit.key, unit.kind, JSON.stringify(unit.spec), JSON.stringify(ids));
-		return ids;
 	}
 
 	// ───────────────────────── subscriptions ─────────────────────────
 
-	/** Registers (or replaces) a subscription; returns its full ids (the window is the first `lim`). */
-	register(socketId: string, subId: string, sub: Subscription, actor: Actor): { ids: string[]; lim: number | null } {
+	/** Registers (or replaces) a subscription: its units are evaluated now when nobody watches them yet. */
+	async register(socketId: string, subId: string, sub: Subscription, actor: Actor): Promise<void> {
 		this.#unregister(socketId, subId);
 		const lim = sub.kind === 'view' ? sub.limit : sub.kind === 'backlinks' ? (sub.limit ?? MAX_WINDOW) : null;
 		this.#run('INSERT INTO socket_sub (socket_id, sub_id, kind, spec, lim) VALUES (?, ?, ?, ?, ?)', socketId, subId, sub.kind, JSON.stringify(sub), lim);
-		const units = unitsOf(sub, visibilityScope(actor));
-		const ids: string[] = [];
-		units.forEach((unit, ord) => {
-			ids.push(...this.#ensureUnit(unit));
+		let units: UnitRef[];
+		if (sub.kind === 'view') {
+			// A query that reads `is me` is evaluated for that user; the rest is shared by everyone.
+			const probe = unitsOf(sub, visibilityScope(actor))[0];
+			const resolved = await resolveView(this.#host.db, probe.spec as unknown as ViewUnitSpec);
+			units = resolved?.usesMe ? unitsOf(sub, `me:${actor.userId}`, actor.userId) : [probe];
+		} else {
+			units = unitsOf(sub, visibilityScope(actor));
+		}
+		for (const [ord, unit] of units.entries()) {
+			await this.#ensureUnit(unit);
 			this.#run('INSERT INTO sub_link (socket_id, sub_id, ord, unit_key) VALUES (?, ?, ?, ?)', socketId, subId, ord, unit.key);
-		});
-		return { ids, lim };
+		}
 	}
 
 	unregister(socketId: string, subId: string): void {
@@ -453,8 +611,8 @@ export class LiveHub {
 	}
 
 	#loadSub(socketId: string, subId: string): SubRow | null {
-		const row = this.#all<{ kind: Subscription['kind']; spec: string; lim: number | null }>(
-			'SELECT kind, spec, lim FROM socket_sub WHERE socket_id = ? AND sub_id = ?',
+		const row = this.#all<{ kind: Subscription['kind']; spec: string; lim: number | null; glim: string | null }>(
+			'SELECT kind, spec, lim, glim FROM socket_sub WHERE socket_id = ? AND sub_id = ?',
 			socketId,
 			subId
 		)[0];
@@ -464,7 +622,15 @@ export class LiveHub {
 			socketId,
 			subId
 		).map((r) => r.unit_key);
-		return { socketId, subId, kind: row.kind, sub: JSON.parse(row.spec) as Subscription, lim: row.lim, unitKeys };
+		return {
+			socketId,
+			subId,
+			kind: row.kind,
+			sub: JSON.parse(row.spec) as Subscription,
+			lim: row.lim,
+			glim: row.glim ? (JSON.parse(row.glim) as Record<string, number>) : {},
+			unitKeys
+		};
 	}
 
 	/** Every subscription of a socket, in registration order of their ids. */
@@ -477,7 +643,7 @@ export class LiveHub {
 
 	// ───────────────────────── rows ─────────────────────────
 
-	#rowsFor(sub: Subscription, ids: readonly string[], access: AccessOf): Map<string, AnyRow> {
+	async #rowsFor(sub: Subscription, ids: readonly string[], access: AccessOf): Promise<Map<string, AnyRow>> {
 		switch (sub.kind) {
 			case 'tree':
 				return this.#reader.treeRows(ids, access);
@@ -490,15 +656,99 @@ export class LiveHub {
 		}
 	}
 
+	// ───────────────────────── view windows ─────────────────────────
+
+	/** The windows of a view subscription over `state`, for the pages `has` lets through. */
+	#windows(state: ViewState, row: Pick<SubRow, 'lim' | 'glim'>, has: (num: number) => boolean, registry: EavRegistry): WindowSet {
+		const limit = row.lim ?? MAX_WINDOW;
+		const lists = new Map<string, { all: string[]; window: string[] }>();
+		if (!state.groupBy) {
+			const all = this.#visible(state.lists.get(FLAT) ?? [], has);
+			lists.set(FLAT, { all, window: all.slice(0, limit) });
+			return { keys: [FLAT], lists, distinct: all.length };
+		}
+		const sizes = new Map<string, number>();
+		const distinct = new Set<string>();
+		for (const [key, list] of state.lists) {
+			const all = this.#visible(list, has);
+			if (all.length === 0) continue;
+			sizes.set(key, all.length);
+			lists.set(key, { all, window: all.slice(0, row.glim[key] ?? limit) });
+			for (const id of all) distinct.add(id);
+		}
+		const keys = groupKeysFor(registry, state.groupBy, sizes);
+		// A hidden group (an empty one with `hideEmpty`) is not a window the client holds.
+		const shown = new Set(keys);
+		for (const key of [...lists.keys()]) if (!shown.has(key)) lists.delete(key);
+		for (const key of keys) if (!lists.has(key)) lists.set(key, { all: [], window: [] });
+		return { keys, lists, distinct: distinct.size };
+	}
+
+	#windowIds(set: WindowSet): Set<string> {
+		const out = new Set<string>();
+		for (const key of set.keys) for (const id of set.lists.get(key)?.window ?? []) out.add(id);
+		return out;
+	}
+
+	/** The ops that turn the windows `oldW` into `newW` (see the protocol header for their order). */
+	async #viewWindowOps(row: SubRow, grouped: boolean, oldW: WindowSet, newW: WindowSet, view: VisibilityView, forceKeys: boolean): Promise<DiffOp[]> {
+		const ops: DiffOp[] = [];
+		// Rows are needed for every page that enters a window, even one the same page's other group already holds.
+		const added = new Set<string>();
+		for (const key of newW.keys) {
+			const before = new Set(oldW.lists.get(key)?.window ?? []);
+			for (const id of newW.lists.get(key)?.window ?? []) if (!before.has(id)) added.add(id);
+		}
+		const rows = added.size ? await this.#rowsFor(row.sub, [...added], view.level) : new Map<string, AnyRow>();
+		if (grouped && (forceKeys || !sameKeys(oldW.keys, newW.keys))) ops.push({ op: 'groups', keys: newW.keys });
+		for (const key of newW.keys) {
+			const before = oldW.lists.get(key)?.window ?? [];
+			const after = newW.lists.get(key)?.window ?? [];
+			const gops = diffWindows(before, after, (id) => rows.get(id));
+			if (grouped) for (const op of gops) (op as { group?: string }).group = key;
+			ops.push(...gops);
+		}
+		return ops;
+	}
+
+	#viewCounts(grouped: boolean, oldW: WindowSet, newW: WindowSet): DiffOp[] {
+		const ops: DiffOp[] = [];
+		for (const key of newW.keys) {
+			const before = oldW.lists.get(key)?.all.length ?? 0;
+			const after = newW.lists.get(key)?.all.length ?? 0;
+			if (before !== after) ops.push({ op: 'count', total: after, ...(grouped ? { group: key } : {}) });
+		}
+		if (grouped && oldW.distinct !== newW.distinct) ops.push({ op: 'count', total: newW.distinct });
+		return ops;
+	}
+
 	// ───────────────────────── snapshots ─────────────────────────
 
-	snapshot(socketId: string, subId: string, actor: Actor, seq: number): ServerMessage | null {
+	async snapshot(socketId: string, subId: string, actor: Actor, seq: number): Promise<ServerMessage | null> {
 		const row = this.#loadSub(socketId, subId);
 		if (!row) return null;
 		const view = this.#host.view(actor);
+		if (row.kind === 'view') {
+			const state = this.#viewState(row.unitKeys[0]);
+			const registry = await loadEavRegistry(this.#host.db);
+			const set = this.#windows(state, row, (n) => view.has(n), registry);
+			const sub = row.sub as Extract<Subscription, { kind: 'view' }>;
+			if (!state.groupBy) {
+				const window = set.lists.get(FLAT)?.window ?? [];
+				const rows = await this.#reader.viewRows(window, view.level, sub.props);
+				return { t: 'snapshot', id: subId, total: set.distinct, seq, kind: 'view', rows: window.map((id) => rows.get(id)).filter((r): r is ViewRow => !!r) };
+			}
+			const everything = this.#windowIds(set);
+			const rows = await this.#reader.viewRows([...everything], view.level, sub.props);
+			const groups = set.keys.map((key) => {
+				const list = set.lists.get(key) ?? { all: [], window: [] };
+				return { key, total: list.all.length, rows: list.window.map((id) => rows.get(id)).filter((r): r is ViewRow => !!r) };
+			});
+			return { t: 'snapshot', id: subId, total: set.distinct, seq, kind: 'view', rows: [], groups };
+		}
 		const all = this.#visible(this.#concat(row.unitKeys), (n) => view.has(n));
 		const window = row.lim === null ? all : all.slice(0, row.lim);
-		const rows = this.#rowsFor(row.sub, window, view.level);
+		const rows = await this.#rowsFor(row.sub, window, view.level);
 		const list = window.map((id) => rows.get(id)).filter((r): r is AnyRow => !!r);
 		const base = { t: 'snapshot' as const, id: subId, total: all.length, seq };
 		switch (row.kind) {
@@ -506,59 +756,102 @@ export class LiveHub {
 				return { ...base, kind: 'tree', rows: list as TreeRow[] };
 			case 'page':
 				return { ...base, kind: 'page', rows: list as PageRow[] };
-			case 'view':
-				return { ...base, kind: 'view', rows: list as ViewRow[] };
 			case 'backlinks':
 				return { ...base, kind: 'backlinks', rows: list as BacklinkRow[] };
 		}
+		return null;
 	}
 
-	#concat(unitKeys: readonly string[], overrides?: ReadonlyMap<string, string[]>): string[] {
+	/** Ids of the non-view units of a subscription, concatenated. */
+	#concat(unitKeys: readonly string[], overrides?: ReadonlyMap<string, UnitValue>): string[] {
 		const out: string[] = [];
-		for (const key of unitKeys) out.push(...(overrides?.get(key) ?? this.#unitIds(key)));
+		for (const key of unitKeys) out.push(...((overrides?.get(key) as string[] | undefined) ?? this.#unitIds(key)));
 		return out;
 	}
 
 	// ───────────────────────── window ─────────────────────────
 
-	/** Resizes a view/backlinks window; returns the diff to send (null when nothing changes). */
-	resizeWindow(socketId: string, subId: string, limit: number, actor: Actor): DiffOp[] | null {
+	/**
+	 * Resizes a view/backlinks window; returns the diff to send (null when nothing changes). `group` resizes one
+	 * group of a grouped view; without it every group gets the new size.
+	 */
+	async resizeWindow(socketId: string, subId: string, limit: number, actor: Actor, group?: string): Promise<DiffOp[] | null> {
 		const row = this.#loadSub(socketId, subId);
 		if (!row || (row.kind !== 'view' && row.kind !== 'backlinks')) return null;
+		const view = this.#host.view(actor);
+		if (row.kind === 'view') {
+			const state = this.#viewState(row.unitKeys[0]);
+			const registry = await loadEavRegistry(this.#host.db);
+			const next = { lim: row.lim, glim: { ...row.glim } };
+			if (group !== undefined && state.groupBy) next.glim[group] = limit;
+			else {
+				next.lim = limit;
+				next.glim = {};
+			}
+			const sub = { ...row.sub, ...(group === undefined ? { limit } : {}) } as Subscription;
+			this.#run('UPDATE socket_sub SET spec = ?, lim = ?, glim = ? WHERE socket_id = ? AND sub_id = ?', JSON.stringify(sub), next.lim, JSON.stringify(next.glim), socketId, subId);
+			const oldW = this.#windows(state, row, (n) => view.has(n), registry);
+			const newW = this.#windows(state, next, (n) => view.has(n), registry);
+			const updated: SubRow = { ...row, sub, lim: next.lim, glim: next.glim };
+			const ops = await this.#viewWindowOps(updated, !!state.groupBy, oldW, newW, view, false);
+			return ops.length ? ops : null;
+		}
 		const sub = { ...row.sub, limit } as Subscription;
 		this.#run('UPDATE socket_sub SET spec = ?, lim = ? WHERE socket_id = ? AND sub_id = ?', JSON.stringify(sub), limit, socketId, subId);
-		const view = this.#host.view(actor);
 		const all = this.#visible(this.#concat(row.unitKeys), (n) => view.has(n));
 		const oldW = row.lim === null ? all : all.slice(0, row.lim);
 		const newW = all.slice(0, limit);
-		const rows = this.#rowsFor(sub, newW, view.level);
+		const rows = await this.#rowsFor(sub, newW, view.level);
 		const ops = diffWindows(oldW, newW, (id) => rows.get(id));
 		return ops.length ? ops : null;
 	}
 
 	// ───────────────────────── commits ─────────────────────────
 
-	/** Fans one commit out: diffs to the sockets it touches, `head` to the rest. Synchronous. */
-	fanOut(commit: CommitInfo): void {
+	/** Fans one commit out: diffs to the sockets it touches, `head` to the rest. */
+	async fanOut(commit: CommitInfo): Promise<void> {
 		const touch = analyze(commit.rows);
 		for (const id of commit.backlinkTargets ?? []) touch.backlinkTargets.add(id);
 		for (const id of commit.hasChildrenFlips?.keys() ?? []) addTo(touch.fields, id, '$hasChildren');
+		if (touch.definition) {
+			this.#resolved.clear();
+			this.#reader.invalidate();
+		}
 		if (touch.subtreeRoots.length > 0 || touch.teamspaceRoots.length > 0) {
 			const sub = this.#reader.subtree([...touch.subtreeRoots, ...touch.teamspaceRoots]);
 			for (const id of sub) touch.structPages.add(id);
 			// Descendants of a page that moved teamspace carry the new teamspace.
 			for (const id of this.#reader.subtree(touch.teamspaceRoots)) {
-				if (!touch.teamspaceRoots.includes(id)) addTo(touch.fields, id, '$teamspace');
+				if (!touch.teamspaceRoots.includes(id)) {
+					addTo(touch.fields, id, '$teamspace');
+					touch.teamspaceDescendants.add(id);
+				}
 			}
 			if (touch.subtreeRoots.length) {
-				for (const id of this.#reader.linkTargetsOf(this.#reader.subtree(touch.subtreeRoots))) touch.backlinkTargets.add(id);
+				const trashed = this.#reader.subtree(touch.subtreeRoots);
+				for (const id of trashed) touch.lifecycle.add(id);
+				for (const id of this.#reader.linkTargetsOf(trashed)) touch.backlinkTargets.add(id);
+				// A to-one relation to a trashed (or restored) page reads null (or the page again).
+				for (const [holder, prop] of this.#reader.relationHolders(trashed)) addTo(touch.valueProps, holder, prop);
 			}
 		}
 
-		const units = this.#all<{ unit_key: string; kind: UnitKind; spec: string }>('SELECT unit_key, kind, spec FROM sub_unit');
+		// A two-way relation edit changes the cell of the pages it points at (their reverse side).
+		const reverseOf = new Map<string, string>();
+		for (const r of this.#reader.forwardRelations()) if (r.reverse) reverseOf.set(r.id, r.reverse);
+		if (reverseOf.size > 0) {
+			for (const row of commit.rows) {
+				const reverse = row.kind === 'setProp' && row.prop ? reverseOf.get(row.prop) : undefined;
+				if (!reverse) continue;
+				for (const side of [row.old, row.new]) if (Array.isArray(side)) for (const id of side) if (typeof id === 'string') addTo(touch.valueProps, id, reverse);
+			}
+		}
+
+		const units = this.#all<{ unit_key: string; kind: UnitKind; spec: string; flags: number }>('SELECT unit_key, kind, spec, flags FROM sub_unit');
 		const streams = this.streamSockets();
 		const streaming = new Set(streams);
 		const diffs = new Map<string, { id: string; ops: DiffOp[] }[]>();
+		const resets = new Map<string, string[]>();
 
 		// Sockets whose actor's visibility changed in this commit: every window of theirs is re-derived.
 		const visibilityHit: { socketId: string; subId: string }[] = [];
@@ -570,9 +863,11 @@ export class LiveHub {
 		}
 
 		if ((units.length > 0 && streams.length > 0) || visibilityHit.length > 0) {
+			const registry = await loadEavRegistry(this.#host.db);
 			// 1. Re-evaluate the units the commit can touch and keep the ones whose ids changed.
-			const changed = new Map<string, { old: string[]; next: string[] }>();
+			const changed = new Map<string, { old: UnitValue; next: UnitValue }>();
 			for (const u of units) {
+				if (u.kind === 'view') continue;
 				const spec = JSON.parse(u.spec) as Record<string, unknown>;
 				if (!this.#touches(u.kind, spec, touch)) continue;
 				const old = this.#unitIds(u.unit_key);
@@ -582,18 +877,37 @@ export class LiveHub {
 					this.#run('UPDATE sub_unit SET ids = ? WHERE unit_key = ?', JSON.stringify(next), u.unit_key);
 				}
 			}
+			const rescope = new Set<string>();
+			if (streams.length > 0) await this.#maintainViews(units, touch, changed, rescope);
+			// Subscriptions whose unit changed hands: registered again (the right unit for their user), fresh snapshot.
+			const rescoped = new Set<string>();
+			if (rescope.size > 0) {
+				for (const link of this.#subsOfUnits([...rescope])) {
+					const row = this.#loadSub(link.socketId, link.subId);
+					const actor = this.#host.actorOf(link.socketId);
+					if (!row || !actor) continue;
+					await this.register(link.socketId, link.subId, row.sub, actor);
+					rescoped.add(`${link.socketId}\u0000${link.subId}`);
+					const list = resets.get(link.socketId) ?? [];
+					list.push(link.subId);
+					resets.set(link.socketId, list);
+				}
+				this.#gcUnits();
+			}
 
 			// 2. Units holding a page whose values or fields changed, for `update` ops.
 			const updated = new Set<string>([...touch.valueProps.keys(), ...touch.fields.keys()]);
 			const holding = this.#unitsHolding([...updated]);
 			const affected = new Set<string>([...changed.keys(), ...holding]);
+			// A definition change (options edited...) can reorder or drop groups without moving any page.
+			if (touch.definition) for (const u of units) if (u.kind === 'view') affected.add(u.unit_key);
 
 			const subs = this.#subsOfUnits([...affected]);
 			const seen = new Set(subs.map((l) => `${l.socketId}\u0000${l.subId}`));
 			for (const hit of visibilityHit) if (!seen.has(`${hit.socketId}\u0000${hit.subId}`)) subs.push(hit);
 
 			if (subs.length > 0) {
-				const cache = new CommitCache(this.#reader, updated);
+				const cache = await CommitCache.create(this.#reader, updated);
 				const ids = new Map<string, string[]>();
 				const currentOf = (key: string) => {
 					let v = ids.get(key);
@@ -603,33 +917,46 @@ export class LiveHub {
 				for (const link of subs) {
 					const row = this.#loadSub(link.socketId, link.subId);
 					const actor = this.#host.actorOf(link.socketId);
-					if (!row || !actor || !streaming.has(link.socketId)) continue;
+					if (!row || !actor || !streaming.has(link.socketId) || rescoped.has(`${link.socketId}\u0000${link.subId}`)) continue;
 					const view = this.#host.view(actor);
-					const oldMap = new Map<string, string[]>();
-					for (const key of row.unitKeys) oldMap.set(key, changed.get(key)?.old ?? currentOf(key));
-					// ANDed with the actor's visibility: before the commit for the old window, after it for the new.
-					const newAll = this.#visible(this.#concat(row.unitKeys), (n) => view.has(n));
-					const oldAll = this.#visible(this.#concat(row.unitKeys, oldMap), (n) => view.hadBefore(n));
-					const lim = row.lim;
-					const oldW = lim === null ? oldAll : oldAll.slice(0, lim);
-					const newW = lim === null ? newAll : newAll.slice(0, lim);
-					const oldSet = new Set(oldW);
-					const added = newW.filter((id) => !oldSet.has(id));
-					const rows = added.length ? this.#rowsFor(row.sub, added, view.level) : new Map<string, AnyRow>();
-					const ops = diffWindows(oldW, newW, (id) => rows.get(id));
-					const inBoth = newW.filter((id) => oldSet.has(id));
-					ops.push(...cache.updatesFor(row.sub, row.kind, inBoth, touch));
-					if (row.kind === 'tree' || row.kind === 'page' || row.kind === 'view') {
-						// A level that changed on a page the actor keeps seeing.
-						for (const id of inBoth) {
-							const num = this.#numOf(id);
-							const d = num === undefined ? undefined : view.delta.get(num);
-							if (d && d.before >= 0 && d.after >= 0 && d.before !== d.after) {
-								ops.push({ op: 'update', id, prop: '$access', value: view.level(num as number) });
-							}
+					let ops: DiffOp[];
+					if (row.kind === 'view') {
+						const key = row.unitKeys[0];
+						const next = this.#viewState(key);
+						const old = (changed.get(key)?.old as ViewState | undefined) ?? next;
+						if (old.grouped !== next.grouped) {
+							// Ungrouped to grouped (or back): the windows have another shape, a fresh snapshot replaces them.
+							const list = resets.get(link.socketId) ?? [];
+							list.push(link.subId);
+							resets.set(link.socketId, list);
+							continue;
 						}
+						const oldW = this.#windows(old, row, (n) => view.hadBefore(n), registry);
+						const newW = this.#windows(next, row, (n) => view.has(n), registry);
+						ops = await this.#viewWindowOps(row, next.grouped, oldW, newW, view, touch.definition);
+						const oldIds = this.#windowIds(oldW);
+						const inBoth = [...this.#windowIds(newW)].filter((id) => oldIds.has(id));
+						ops.push(...cache.updatesFor(row.sub, row.kind, inBoth, touch));
+						ops.push(...this.#accessUpdates(inBoth, view));
+						ops.push(...this.#viewCounts(next.grouped, oldW, newW));
+					} else {
+						const oldMap = new Map<string, UnitValue>();
+						for (const key of row.unitKeys) oldMap.set(key, changed.get(key)?.old ?? currentOf(key));
+						// ANDed with the actor's visibility: before the commit for the old window, after it for the new.
+						const newAll = this.#visible(this.#concat(row.unitKeys), (n) => view.has(n));
+						const oldAll = this.#visible(this.#concat(row.unitKeys, oldMap), (n) => view.hadBefore(n));
+						const lim = row.lim;
+						const oldW = lim === null ? oldAll : oldAll.slice(0, lim);
+						const newW = lim === null ? newAll : newAll.slice(0, lim);
+						const oldSet = new Set(oldW);
+						const added = newW.filter((id) => !oldSet.has(id));
+						const rows = added.length ? await this.#rowsFor(row.sub, added, view.level) : new Map<string, AnyRow>();
+						ops = diffWindows(oldW, newW, (id) => rows.get(id));
+						const inBoth = newW.filter((id) => oldSet.has(id));
+						ops.push(...cache.updatesFor(row.sub, row.kind, inBoth, touch));
+						if (row.kind === 'tree' || row.kind === 'page') ops.push(...this.#accessUpdates(inBoth, view));
+						if (oldAll.length !== newAll.length) ops.push({ op: 'count', total: newAll.length });
 					}
-					if (oldAll.length !== newAll.length) ops.push({ op: 'count', total: newAll.length });
 					if (ops.length) {
 						const list = diffs.get(link.socketId) ?? [];
 						list.push({ id: link.subId, ops });
@@ -639,14 +966,117 @@ export class LiveHub {
 			}
 		}
 
-		// 3. One frame per socket: its diff, or a head.
+		// 3. One frame per socket: its diff, or a head (and a fresh snapshot where a window changed shape).
 		for (const socketId of streams) {
 			const subsOf = diffs.get(socketId);
-			const message: ServerMessage = subsOf
-				? { t: 'diff', seq: commit.seq, subs: subsOf }
-				: { t: 'head', seq: commit.seq };
-			if (!this.#host.send(socketId, message)) this.dropSocket(socketId);
+			const message: ServerMessage = subsOf ? { t: 'diff', seq: commit.seq, subs: subsOf } : { t: 'head', seq: commit.seq };
+			if (!this.#host.send(socketId, message)) {
+				this.dropSocket(socketId);
+				continue;
+			}
+			const actor = this.#host.actorOf(socketId);
+			for (const subId of resets.get(socketId) ?? []) {
+				const snap = actor ? await this.snapshot(socketId, subId, actor, commit.seq) : null;
+				if (snap) this.#host.send(socketId, snap);
+			}
 		}
+	}
+
+	/** A level that changed on a page the actor keeps seeing. */
+	#accessUpdates(ids: readonly string[], view: VisibilityView): DiffOp[] {
+		const ops: DiffOp[] = [];
+		for (const id of ids) {
+			const num = this.#numOf(id);
+			const d = num === undefined ? undefined : view.delta.get(num);
+			if (d && d.before >= 0 && d.after >= 0 && d.before !== d.after) {
+				ops.push({ op: 'update', id, prop: '$access', value: view.level(num as number) });
+			}
+		}
+		return ops;
+	}
+
+	/**
+	 * Brings every view unit up to date with a commit. Units the commit cannot touch are skipped without a
+	 * query (the `sub_prop` index finds the ones that read a property it wrote); the rest are maintained
+	 * incrementally for the commit's candidate pages, or evaluated in full (see `view-unit.ts`).
+	 */
+	async #maintainViews(
+		units: readonly { unit_key: string; kind: UnitKind; spec: string; flags: number }[],
+		touch: Touch,
+		changed: Map<string, { old: UnitValue; next: UnitValue }>,
+		rescope: Set<string>
+	): Promise<void> {
+		const viewUnits = units.filter((u) => u.kind === 'view');
+		if (viewUnits.length === 0) return;
+		const db = this.#host.db;
+		const now = this.#host.now();
+		const full = touch.definition || touch.all;
+		const pageLevel = touch.lifecycle.size > 0 || touch.moved.size > 0;
+
+		const writtenProps = new Set<string>();
+		for (const props of touch.valueProps.values()) for (const p of props) writtenProps.add(p);
+		const editedPages = new Set<string>([...touch.edited, ...touch.valueProps.keys(), ...touch.fields.keys()]);
+		if (editedPages.size > 0) writtenProps.add(EDITED);
+		const indexed = this.#unitsReading([...writtenProps]);
+
+		const tuples = new TupleCache(db, now);
+		for (const u of viewUnits) {
+			const key = u.unit_key;
+			const timed = touch.clock && (u.flags & 1) !== 0;
+			if (!full && !timed && !pageLevel && !indexed.has(key)) continue;
+			const spec = JSON.parse(u.spec) as unknown as ViewUnitSpec;
+			const resolved = await this.#resolve(key, spec, full);
+			// A saved view now reads "is me" (or no longer does): its unit is shared by the wrong people.
+			if (resolved && resolved.usesMe !== (spec.me !== undefined)) {
+				rescope.add(key);
+				continue;
+			}
+			const old = this.#viewState(key);
+			let next: ViewState;
+			if (!resolved) {
+				next = EMPTY_STATE;
+			} else if (full || timed || resolved.manual) {
+				next = await evaluateView(db, resolved, spec, { now });
+			} else {
+				const candidates = this.#viewCandidates(resolved, touch, old, editedPages);
+				if (candidates.size === 0) continue;
+				const list = [...candidates];
+				const liveCount = this.#reader.liveIds(list).size;
+				const incremental =
+					liveCount > MAX_INCREMENTAL ? null : await maintainView({ db, resolved, spec, state: old, candidates: list, reader: this.#reader, tuples, now });
+				next = incremental ?? (await evaluateView(db, resolved, spec, { now }));
+			}
+			this.evaluations++;
+			countEvaluations.value++;
+			if (!old.equals(next)) {
+				changed.set(key, { old, next });
+				this.#writeView(key, next);
+			}
+		}
+	}
+
+	/** The pages whose membership, group or position in a view unit may change in this commit. */
+	#viewCandidates(resolved: ResolvedView, touch: Touch, old: ViewState, editedPages: ReadonlySet<string>): Set<string> {
+		const out = new Set<string>();
+		for (const [page, props] of touch.valueProps) if (unitReads(resolved.props, props)) out.add(page);
+		if (resolved.props.includes(EDITED)) for (const id of editedPages) out.add(id);
+		for (const id of touch.lifecycle) out.add(id);
+		if (touch.moved.size > 0) {
+			const readsPlace = resolved.props.includes('$parent') || resolved.props.includes('$teamspace');
+			const held = readsPlace ? null : new Set(old.ids());
+			for (const id of touch.moved) if (readsPlace || held!.has(id)) out.add(id);
+		}
+		if (resolved.props.includes('$teamspace')) for (const id of touch.teamspaceDescendants) out.add(id);
+		return out;
+	}
+
+	/** Units of the index that read one of `props`. */
+	#unitsReading(props: readonly string[]): Set<string> {
+		const out = new Set<string>();
+		for (const part of chunks(props, MAX_PARAMS)) {
+			for (const r of this.#all<{ unit_key: string }>(`SELECT DISTINCT unit_key FROM sub_prop WHERE prop IN (${qmarks(part.length)})`, ...part)) out.add(r.unit_key);
+		}
+		return out;
 	}
 
 	#touches(kind: UnitKind, spec: Record<string, unknown>, t: Touch): boolean {
@@ -661,7 +1091,7 @@ export class LiveHub {
 			case 'backlinks':
 				return t.backlinkTargets.has(spec.pageId as string) || t.structPages.has(spec.pageId as string);
 			case 'view':
-				return t.structural;
+				return false;
 		}
 	}
 
@@ -676,8 +1106,9 @@ export class LiveHub {
 			}
 		} else {
 			const wanted = new Set(pageIds);
-			for (const r of this.#all<{ unit_key: string; ids: string }>('SELECT unit_key, ids FROM sub_unit')) {
-				if ((JSON.parse(r.ids) as string[]).some((id) => wanted.has(id))) keys.add(r.unit_key);
+			for (const r of this.#all<{ unit_key: string; kind: UnitKind }>('SELECT unit_key, kind FROM sub_unit')) {
+				const ids = r.kind === 'view' ? this.#viewState(r.unit_key).ids() : this.#unitIds(r.unit_key);
+				if (ids.some((id) => wanted.has(id))) keys.add(r.unit_key);
 			}
 		}
 		return [...keys];
@@ -722,15 +1153,21 @@ export class LiveHub {
 	}
 
 	/** The replay of one subscription: a diff, a snapshot, or nothing. */
-	replaySub(socketId: string, subId: string, actor: Actor, touch: Touch, seq: number): ServerMessage | null {
+	async replaySub(socketId: string, subId: string, actor: Actor, touch: Touch, seq: number): Promise<ServerMessage | null> {
 		const row = this.#loadSub(socketId, subId);
 		if (!row) return null;
 		const touched = new Set<string>([...touch.structPages, ...touch.valueProps.keys(), ...touch.fields.keys()]);
 		for (const parent of touch.parents) if (parent) touched.add(parent);
 		const view = this.#host.view(actor);
+		if (row.kind === 'view') {
+			// Any value, field or page-level change can move a page into or out of a view: fresh snapshot. So does
+			// a grouped view, whatever changed: the client may have grown a group's window, which `hello` cannot say.
+			const hit = touch.structural || touch.clock || touch.backlinkTargets.size > 0 || touched.size > 0 || this.#viewState(row.unitKeys[0]).grouped;
+			return hit ? this.snapshot(socketId, subId, actor, seq) : null;
+		}
 		const all = this.#visible(this.#concat(row.unitKeys), (n) => view.has(n));
 		const window = row.lim === null ? all : all.slice(0, row.lim);
-		if (row.kind === 'view' || row.kind === 'backlinks') {
+		if (row.kind === 'backlinks') {
 			const hit = touch.structural || touch.backlinkTargets.size > 0 || window.some((id) => touched.has(id));
 			return hit ? this.snapshot(socketId, subId, actor, seq) : null;
 		}
@@ -741,7 +1178,7 @@ export class LiveHub {
 					window.some((id) => touched.has(id))
 				: row.sub.kind === 'page' && row.sub.pageIds.some((id) => touched.has(id));
 		if (!relevant) return null;
-		const rows = this.#rowsFor(row.sub, window.filter((id) => touched.has(id)), view.level);
+		const rows = await this.#rowsFor(row.sub, window.filter((id) => touched.has(id)), view.level);
 		const ops: DiffOp[] = [...touched].map((id) => ({ op: 'remove' as const, id }));
 		window.forEach((id, index) => {
 			const r = rows.get(id);
@@ -749,6 +1186,11 @@ export class LiveHub {
 		});
 		ops.push({ op: 'count', total: all.length });
 		return { t: 'diff', seq, subs: [{ id: subId, ops }] };
+	}
+
+	/** Whether any live view unit reads the clock (relative dates): the alarm then commits a `clock` record. */
+	hasClockUnits(): boolean {
+		return this.#all<{ n: number }>('SELECT COUNT(*) AS n FROM sub_unit WHERE kind = ? AND (flags & 1) = 1', 'view')[0].n > 0;
 	}
 }
 
@@ -761,13 +1203,17 @@ export const MAX_REPLAY_ROWS = 2000;
 
 /** Fresh page data for the `update` ops of one commit, read once. */
 class CommitCache {
-	readonly #values: ReturnType<RowReader['currentValues']>;
+	readonly #values: Awaited<ReturnType<RowReader['currentValues']>>;
 	readonly #structure: ReturnType<RowReader['structure']>;
 
-	constructor(reader: RowReader, pages: ReadonlySet<string>) {
+	private constructor(values: Awaited<ReturnType<RowReader['currentValues']>>, structure: ReturnType<RowReader['structure']>) {
+		this.#values = values;
+		this.#structure = structure;
+	}
+
+	static async create(reader: RowReader, pages: ReadonlySet<string>): Promise<CommitCache> {
 		const ids = [...pages];
-		this.#values = reader.currentValues(ids);
-		this.#structure = reader.structure(ids);
+		return new CommitCache(await reader.currentValues(ids), reader.structure(ids));
 	}
 
 	updatesFor(sub: Subscription, kind: RowKind, ids: readonly string[], touch: Touch): DiffOp[] {
@@ -811,4 +1257,3 @@ class CommitCache {
 		return ops;
 	}
 }
-

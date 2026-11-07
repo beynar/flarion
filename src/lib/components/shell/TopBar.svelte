@@ -6,6 +6,8 @@
 	import { dotsThreeIcon } from 'entasis/icons/dotsThree';
 	import { lockIcon } from 'entasis/icons/lock';
 	import { lockKeyOpenIcon } from 'entasis/icons/lockKeyOpen';
+	import { clockCounterClockwiseIcon } from 'entasis/icons/clockCounterClockwise';
+	import { historyPanel } from '#lib/components/history/panel-state.svelte.ts';
 	import { PopupMenu } from 'entasis/popup-menu';
 	import type { MenuItem } from 'entasis/menu';
 	import { toast } from 'entasis/toast';
@@ -82,6 +84,13 @@
 						disabled: !canLock,
 						onclick: () => void toggleLock(),
 						'data-testid': 'lock-page'
+					} as MenuItem,
+					{
+						type: 'option',
+						title: 'Version history',
+						prefix: clockCounterClockwiseIcon,
+						onclick: () => historyPanel.show(pageId),
+						'data-testid': 'page-history'
 					} as MenuItem
 				]
 			: []

@@ -6,10 +6,25 @@
 import * as v from 'valibot';
 import { viewColumnsSchema, type CollectionDef, type ViewDef } from '../../../../lib/shared/definitions';
 import { validateQuerySpec, type QuerySpec } from '../../../../lib/shared/filter-ast';
+import {
+	analyzeFormula,
+	envFromProperties,
+	formatError,
+	parseFormula,
+	printFormula,
+	rollupResultType,
+	rollupTargetKind,
+	targetKindOf,
+	walk as walkFormula,
+	type FormulaNode
+} from '../../../../lib/shared/formula';
 import type { Op } from '../../../../lib/shared/ops';
 import {
+	MAX_TWO_WAY_ID_LENGTH,
 	TITLE_PROP_ID,
 	defaultStatusConfig,
+	isReverseId,
+	reverseIdOf,
 	isReadOnlyProperty,
 	parsePropertyConfig,
 	storageTable,
@@ -20,7 +35,10 @@ import {
 import { issue, type Issue, type Result } from '../../../../lib/shared/result';
 import { isRank } from '../../../../lib/shared/sort-keys';
 import type { WorkspaceDb } from '../../../db/workspace.client';
-import { throwIssues } from './errors';
+import { deleteEdgesOf, describeCycle, edgesOfProperty, ensureDependencyTx, findCycle, readEdges, replaceEdgesOf, type Edge } from './dependency';
+import { EavError, throwIssues } from './errors';
+import { usesNow } from './now';
+import { hasComputed, recomputeProperty } from './propagate';
 import type { ChangeRecord, EavOpContext } from './index';
 import { EAV_TABLES } from './layout';
 import {
@@ -77,42 +95,164 @@ function checkShownAndDefaults(
 
 // ───────────────────────────── properties ─────────────────────────────
 
+/** Relation-only rules shared by create and update: the reverse side is the server's, and its id must stay valid. */
+function checkRelationConfig(id: string, config: Record<string, unknown>, base: string): void {
+	if (config.reverseOf !== undefined) fail('invalid_config', `${base}/reverseOf`, '"reverseOf" is set by the server');
+	if (config.twoWay === true && id.length > MAX_TWO_WAY_ID_LENGTH)
+		fail('invalid_config', `${base}/twoWay`, `A two-way relation's id is at most ${MAX_TWO_WAY_ID_LENGTH} characters`);
+}
+
 export async function createProperty(db: WorkspaceDb, op: OpOf<'createProperty'>, ctx: EavOpContext): Promise<ChangeRecord[]> {
-	void ctx;
 	const input = op.property;
 	const registry = await loadEavRegistry(db);
 	if (input.id === TITLE_PROP_ID || (await exists(db, 'property', input.id)))
 		fail('exists', '/property/id', `Property "${input.id}" already exists`);
+	if (isReverseId(input.id)) fail('reserved_id', '/property/id', `Ids ending in "${reverseIdOf('')}" are reserved for two-way relations`);
 	if (input.type === 'title') fail('title_reserved', '/property/type', 'The workspace has exactly one title property');
 	const parsed = parsePropertyConfig(input.type, input.config);
 	if (!parsed.ok) return throwIssues('invalid_config', parsed.issues, '/property');
 	let config: Record<string, unknown> = parsed.value as Record<string, unknown>;
 	if (input.type === 'status' && !(config.options as unknown[]).length && !(config.groups as unknown[]).length)
 		config = defaultStatusConfig() as unknown as Record<string, unknown>;
-	await checkConfigRefs(db, registry, input.type, config, '/property/config');
+	if (input.type === 'relation') checkRelationConfig(input.id, config, '/property/config');
+	await checkConfigRefs(db, input.type, config, '/property/config');
 
-	const def = { id: input.id, name: input.name, type: input.type, config } as PropertyDef;
+	let def = { id: input.id, name: input.name, type: input.type, config } as PropertyDef;
+	let edges: Edge[] | null = null;
+	if (def.type === 'formula' || def.type === 'rollup') {
+		const prepared = await prepareComputed(db, registry, def, '/property/config');
+		config = prepared.config;
+		edges = prepared.edges;
+		def = { ...def, config } as PropertyDef;
+	}
 	const num = await nextPropertyNum(db);
 	await run(db, 'INSERT INTO property (id, num, name, type, config_json) VALUES (?,?,?,?,?)', def.id, num, def.name, def.type, JSON.stringify(config));
 	invalidateRegistry();
-	return [{ kind: 'createProperty', page: null, prop: def.id, old: null, new: def }];
+	const changes: ChangeRecord[] = [{ kind: 'createProperty', page: null, prop: def.id, old: null, new: def }];
+	if (edges) {
+		await replaceEdgesOf(db, def.id, edges);
+		// The value of every page, as computed rows.
+		changes.push(...(await recomputeProperty(db, ctx, def.id)));
+	}
+	return changes;
 }
 
-/** References inside a config: relation target collection, rollup source properties. */
-async function checkConfigRefs(
-	db: WorkspaceDb,
-	registry: EavRegistry,
-	type: string,
-	config: Record<string, unknown>,
-	base: string
-): Promise<void> {
+// ───────────────────────────── rollups and formulas ─────────────────────────────
+
+/**
+ * Checks the definition of a rollup or formula against the registry and completes it: the formula is parsed and
+ * type-checked and its inferred result type picks the storage table, a rollup's result type follows from its
+ * function, the property it reads must exist and fit, and the edges it adds to the dependency graph must not close
+ * a cycle. Returns the stored config and the edges.
+ */
+async function prepareComputed(db: WorkspaceDb, registry: EavRegistry, def: PropertyDef, base: string): Promise<{ config: Record<string, unknown>; edges: Edge[] }> {
+	let config = def.config as Record<string, unknown>;
+	if (def.type === 'formula') {
+		const source = def.config.expression;
+		const analysis = analyzeFormula(source, envFromProperties(registry.all()));
+		if (!analysis.ok)
+			throwIssues(
+				'invalid_formula',
+				analysis.errors.map((e) => issue(`${base}/expression`, 'invalid_formula', formatError(source, e)))
+			);
+		else config = { expression: source, resultType: analysis.resultType };
+	} else if (def.type === 'rollup') {
+		const { relationProp, targetProp, fn } = def.config;
+		const rel = registry.get(relationProp);
+		if (!rel || rel.type !== 'relation') fail('invalid_config', `${base}/relationProp`, 'A rollup needs a relation property');
+		const target = registry.get(targetProp);
+		if (!target) fail('unknown_property', `${base}/targetProp`, `Unknown property "${targetProp}"`);
+		else if (registry.reverseOf(target.id) || target.type === 'relation')
+			fail('invalid_config', `${base}/targetProp`, 'A rollup reads a property of the related pages, not a relation');
+		else {
+			const wants = rollupTargetKind(fn);
+			if (wants !== 'any' && targetKindOf(target) !== wants)
+				fail('invalid_config', `${base}/fn`, `"${fn}" needs a ${wants} property; "${target.name}" is ${target.type}`);
+		}
+		config = { ...def.config, resultType: rollupResultType(fn) };
+	}
+	const edges = edgesOfProperty({ ...def, config } as PropertyDef, registry);
+	await ensureDependencyTx(db);
+	const cycle = findCycle(await readEdges(db), def.id, edges.map((e) => e.source));
+	if (cycle) fail('cycle', base, `Circular dependency: ${describeCycle(cycle, registry)}`);
+	return { config, edges };
+}
+
+/** Relation targets: a collection that exists. (Rollups and formulas are checked by {@link prepareComputed}.) */
+async function checkConfigRefs(db: WorkspaceDb, type: string, config: Record<string, unknown>, base: string): Promise<void> {
 	if (type === 'relation' && typeof config.collectionId === 'string' && !(await loadCollectionRow(db, config.collectionId)))
 		fail('unknown_collection', `${base}/collectionId`, `Unknown collection "${config.collectionId}"`);
-	if (type === 'rollup') {
-		const rel = registry.get(config.relationProp as string);
-		if (!rel || rel.type !== 'relation') fail('invalid_config', `${base}/relationProp`, 'A rollup needs a relation property');
-		if (!registry.get(config.targetProp as string)) fail('unknown_property', `${base}/targetProp`, `Unknown property "${config.targetProp as string}"`);
+}
+
+/** The ids of the properties that read `id` (through the dependency graph). */
+async function dependentsOf(db: WorkspaceDb, registry: EavRegistry, id: string): Promise<string[]> {
+	if (!hasComputed(registry)) return [];
+	const edges = await readEdges(db);
+	return [...new Set(edges.filter((e) => e.source === id && e.target !== id).map((e) => e.target))];
+}
+
+/**
+ * A property was renamed: formulas that read it by name follow (`prop("Old")` becomes `prop("New")`; the
+ * expression is re-printed in canonical form).
+ */
+async function renameInFormulas(db: WorkspaceDb, before: EavRegistry, id: string, renames: Map<string, string>): Promise<ChangeRecord[]> {
+	const out: ChangeRecord[] = [];
+	for (const fid of await dependentsOf(db, before, id)) {
+		const def = before.get(fid);
+		if (!def || def.type !== 'formula') continue;
+		const parsed = parseFormula(def.config.expression);
+		if (!parsed.ok) continue;
+		let changed = false;
+		walkFormula(parsed.ast, (n: FormulaNode) => {
+			if (n.type === 'prop' && renames.has(n.name)) {
+				n.name = renames.get(n.name) as string;
+				changed = true;
+			}
+		});
+		if (!changed) continue;
+		const next = { ...def, config: { ...def.config, expression: printFormula(parsed.ast) } } as PropertyDef;
+		await run(db, 'UPDATE property SET config_json = ? WHERE id = ?', JSON.stringify(next.config), fid);
+		out.push({ kind: 'updateProperty', page: null, prop: fid, old: def, new: next });
 	}
+	if (out.length) invalidateRegistry();
+	return out;
+}
+
+/**
+ * A formula or rollup changed its result type: the formulas and rollups that read it are checked again against
+ * the new type (an error refuses the whole change) and, when their own result type moves, updated and recomputed,
+ * all the way down the graph.
+ */
+async function revalidateDependents(db: WorkspaceDb, ctx: EavOpContext, root: string): Promise<ChangeRecord[]> {
+	const out: ChangeRecord[] = [];
+	const queue = [root];
+	const seen = new Set<string>();
+	while (queue.length) {
+		const id = queue.shift() as string;
+		if (seen.has(id)) continue;
+		seen.add(id);
+		const registry = await loadEavRegistry(db);
+		for (const depId of await dependentsOf(db, registry, id)) {
+			const dep = registry.get(depId);
+			if (!dep || (dep.type !== 'formula' && dep.type !== 'rollup')) continue;
+			let prepared;
+			try {
+				prepared = await prepareComputed(db, registry, dep, '/config');
+			} catch (e) {
+				if (e instanceof EavError) fail(e.code, '/config', `"${dep.name}" would stop working: ${e.issues.map((i) => i.message).join('; ')}`);
+				throw e;
+			}
+			const next = { ...dep, config: prepared.config } as PropertyDef;
+			if (JSON.stringify(next.config) === JSON.stringify(dep.config)) continue;
+			await run(db, 'UPDATE property SET config_json = ? WHERE id = ?', JSON.stringify(next.config), depId);
+			invalidateRegistry();
+			if (storageTable(dep) !== storageTable(next)) await dropPropertyRows(db, registry.num(depId) as number, depId);
+			out.push({ kind: 'updateProperty', page: null, prop: depId, old: dep, new: next });
+			out.push(...(await recomputeProperty(db, ctx, depId)));
+			queue.push(depId);
+		}
+	}
+	return out;
 }
 
 const optionIds = (def: PropertyDef): Set<string> =>
@@ -124,18 +264,30 @@ export async function updateProperty(db: WorkspaceDb, op: OpOf<'updateProperty'>
 	const registry = await loadEavRegistry(db);
 	const old = registry.get(op.id);
 	if (!old) return fail('unknown_property', '/id', `Unknown property "${op.id}"`);
+	if (registry.reverseOf(op.id)) fail('read_only', '/id', 'The reverse side of a two-way relation follows its relation: update the relation');
 	const isTitle = op.id === TITLE_PROP_ID;
 	if (isTitle && op.config && Object.keys(op.config).length) fail('title_reserved', '/config', 'The title has no config');
 
 	let config = old.config as Record<string, unknown>;
+	let edges: Edge[] | null = null;
 	if (op.config && !isTitle) {
 		const parsed = parsePropertyConfig(old.type, op.config);
 		if (!parsed.ok) return throwIssues('invalid_config', parsed.issues);
 		config = parsed.value as Record<string, unknown>;
-		await checkConfigRefs(db, registry, old.type, config, '/config');
+		if (old.type === 'relation') checkRelationConfig(op.id, config, '/config');
+		await checkConfigRefs(db, old.type, config, '/config');
+		if (old.type === 'formula' || old.type === 'rollup') {
+			const prepared = await prepareComputed(db, registry, { ...old, config } as PropertyDef, '/config');
+			config = prepared.config;
+			edges = prepared.edges;
+		}
 	}
 	const next = { ...old, name: op.name ?? old.name, config } as PropertyDef;
 	if (JSON.stringify(next) === JSON.stringify(old)) return [];
+	if (old.type === 'relation' && old.config.twoWay && !(next as typeof old).config.twoWay) {
+		const users = (hasComputed(registry) ? await readEdges(db) : []).filter((e) => e.via === reverseIdOf(op.id)).map((e) => registry.get(e.target)?.name ?? e.target);
+		if (users.length) fail('in_use', '/config/twoWay', `The reverse side is read by ${[...new Set(users)].join(', ')}`);
+	}
 
 	if (isTitle) {
 		await run(
@@ -150,6 +302,17 @@ export async function updateProperty(db: WorkspaceDb, op: OpOf<'updateProperty'>
 	invalidateRegistry();
 	const changes: ChangeRecord[] = [{ kind: 'updateProperty', page: null, prop: op.id, old, new: next }];
 
+	if (next.name !== old.name || (old.type === 'relation' && old.config.reverseName !== (next as typeof old).config.reverseName)) {
+		const renames = new Map<string, string>();
+		if (next.name !== old.name) renames.set(old.name, next.name);
+		if (old.type === 'relation' && old.config.twoWay) {
+			const was = old.config.reverseName ?? `${old.name} (reverse)`;
+			const now = (next as typeof old).config.reverseName ?? `${next.name} (reverse)`;
+			if (was !== now) renames.set(was, now);
+		}
+		if (renames.size) changes.push(...(await renameInFormulas(db, registry, op.id, renames)));
+	}
+
 	const num = registry.num(op.id)!;
 	if (storageTable(old) !== storageTable(next)) {
 		// A computed result type moved to another table: the old rows are meaningless, the engine recomputes.
@@ -158,6 +321,11 @@ export async function updateProperty(db: WorkspaceDb, op: OpOf<'updateProperty'>
 		const kept = optionIds(next);
 		const removed = [...optionIds(old)].filter((id) => !kept.has(id));
 		if (removed.length) changes.push(...(await stripOptions(db, next, num, removed, ctx)));
+	}
+	if (edges) {
+		await replaceEdgesOf(db, op.id, edges);
+		changes.push(...(await recomputeProperty(db, ctx, op.id)));
+		if (storageTable(old) !== storageTable(next)) changes.push(...(await revalidateDependents(db, ctx, op.id)));
 	}
 	return changes;
 }
@@ -201,6 +369,10 @@ export async function deleteProperty(db: WorkspaceDb, op: OpOf<'deleteProperty'>
 	const registry = await loadEavRegistry(db);
 	const old = registry.get(op.id);
 	if (!old) return fail('unknown_property', '/id', `Unknown property "${op.id}"`);
+	if (registry.reverseOf(op.id)) fail('read_only', '/id', 'The reverse side of a two-way relation goes with its relation');
+	const users = await dependentsOf(db, registry, op.id);
+	if (users.length) fail('in_use', '/id', `"${old.name}" is read by ${users.map((u) => `"${registry.get(u)?.name ?? u}"`).join(', ')}: delete or change those first`);
+	if (old.type === 'formula' || old.type === 'rollup') await deleteEdgesOf(db, op.id);
 	await run(db, 'UPDATE property SET deleted_at = ?, deleted_by = ? WHERE id = ? AND deleted_at IS NULL', iso(ctx.now), ctx.actorId, op.id);
 	invalidateRegistry();
 	return [{ kind: 'deleteProperty', page: null, prop: op.id, old, new: null }];
@@ -337,6 +509,13 @@ function checkColumns(registry: PropertyRegistry, columns: ViewDef['columns']): 
 	}
 }
 
+/** A formula that reads `now()` changes without any write, so a view cannot order by it first (docs/PLAN.md). */
+async function checkPrimarySort(db: WorkspaceDb, sorts: readonly { prop: string }[] | undefined): Promise<void> {
+	const first = sorts?.[0];
+	if (first && (await usesNow(db, first.prop)))
+		fail('now_sort', '/sorts/0/prop', 'A formula that reads now() cannot be the primary sort of a view');
+}
+
 const viewParams = (d: ViewDef): unknown[] => [
 	d.type,
 	d.name,
@@ -360,6 +539,7 @@ export async function createView(db: WorkspaceDb, op: OpOf<'createView'>, ctx: E
 		...(op.groupBy ? { groupBy: op.groupBy } : {})
 	};
 	checkSpec(spec, registry, '');
+	await checkPrimarySort(db, op.sorts);
 	const columns = v.parse(viewColumnsSchema, op.columns ?? { columns: [] });
 	checkColumns(registry, columns);
 	const def: ViewDef = {
@@ -395,6 +575,7 @@ export async function updateView(db: WorkspaceDb, op: OpOf<'updateView'>, ctx: E
 		...(op.groupBy ? { groupBy: op.groupBy } : {})
 	};
 	checkSpec(spec, registry, '');
+	await checkPrimarySort(db, op.sorts);
 	const columns = op.columns ? v.parse(viewColumnsSchema, op.columns) : old.columns;
 	if (op.columns) checkColumns(registry, columns);
 	const next: ViewDef = {

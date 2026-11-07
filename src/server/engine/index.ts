@@ -24,14 +24,15 @@ import {
 import type { WorkspaceDb } from '../db/workspace.client';
 import { loadEavRegistry } from '../objects/workspace/eav/registry';
 import { CompileEnv, compileFilter, type PlanNode } from './compile';
-import { Ctx, toSet } from './context';
+import { Ctx, IN_CHUNK, toSet } from './context';
+import { chunks, qmarks } from '../objects/workspace/eav/sql';
 import { evalNode } from './execute';
-import { runGroups } from './group';
+import { groupKeysOfPages, orderGroups, groupOptionKeys, runGroups } from './group';
 import { compileSorts, loadTuples, selectTop, sortWindow, tupleComparator, type SortCol, type SortStrategy } from './sort';
 import type { QueryOptions, QueryResult, QueryStats, ReferencedProps, SortTuple, VisibleSet } from './types';
 
 export type * from './types';
-export { selectTop, tupleComparator as compareSortTuples };
+export { selectTop, tupleComparator as compareSortTuples, orderGroups, groupOptionKeys };
 export type { PlanNode } from './compile';
 
 export interface CompiledQuery {
@@ -266,4 +267,56 @@ export async function sortKeyOf(
 	const { ctx } = await makeCtx(db, { now: opts.now, visible: null });
 	const tuples = await loadTuples(ctx, pageNums, compileSorts(ctx.registry, sorts));
 	return new Map(tuples.map((t) => [t.num, t]));
+}
+
+/**
+ * {@link matchesFilter} for many pages at once (same rules): the numbers of `pageNums` that are live, in the
+ * collection and satisfy the filter. The live loop's membership check for a commit's candidate pages.
+ */
+export async function matchesFilterMany(db: WorkspaceDb, spec: FilterNode | QuerySpec | null | undefined, pageNums: readonly number[], opts: MatchOptions): Promise<Set<number>> {
+	if (pageNums.length === 0) return new Set();
+	const { ctx } = await makeCtx(db, { ...opts, visible: opts.visible ?? null });
+	const env = new CompileEnv(db, ctx.registry, { me: opts.me, now: opts.now, weekStartsOn: opts.weekStartsOn, estimate: false });
+	const cands = await ctx.restrict(pageNums);
+	if (cands.size === 0) return cands;
+	if (opts.collectionId) {
+		const source = await loadCollection(ctx, opts.collectionId);
+		if (source === undefined) return new Set();
+		const member = new Set<number>();
+		if (source) for (const n of await evalNode(await compileFilter(env, source), new Set(cands), ctx)) member.add(n);
+		for (const part of chunks([...cands], IN_CHUNK)) {
+			const picked = await ctx.q<{ num: number }>(
+				`SELECT p.num AS num FROM collection_member m JOIN page p ON p.id = m.page_id WHERE m.collection_id = ? AND p.num IN (${qmarks(part.length)})`,
+				opts.collectionId,
+				...part
+			);
+			for (const r of picked) member.add(r.num);
+		}
+		for (const n of [...cands]) if (!member.has(n)) cands.delete(n);
+		if (cands.size === 0) return cands;
+	}
+	const plan = await compileFilter(env, filterOf(spec));
+	return evalNode(plan, cands, ctx);
+}
+
+/**
+ * The groups pages belong to under a group-by spec, for the live loop: one key per value of a multi-valued
+ * property (a multi-select page is in several groups), `$empty` for no value, a status group id with `by: 'group'`,
+ * a bucket start (`YYYY-MM-DD`) for a date. Every group the page is in is listed, hidden ones included (apply
+ * `orderGroups` for what a view shows). The page's own state decides, visibility aside; a relation to a tombstone
+ * reads as gone. One page number gives its keys, a list gives a map by page number.
+ */
+export async function groupKeysOf(db: WorkspaceDb, groupBy: GroupBySpec, pageNum: number, opts?: Pick<MatchOptions, 'now' | 'weekStartsOn'>): Promise<string[]>;
+export async function groupKeysOf(db: WorkspaceDb, groupBy: GroupBySpec, pageNums: readonly number[], opts?: Pick<MatchOptions, 'now' | 'weekStartsOn'>): Promise<Map<number, string[]>>;
+export async function groupKeysOf(
+	db: WorkspaceDb,
+	groupBy: GroupBySpec,
+	pageNums: number | readonly number[],
+	opts: Pick<MatchOptions, 'now' | 'weekStartsOn'> = { now: Date.now() }
+): Promise<string[] | Map<number, string[]>> {
+	const { ctx } = await makeCtx(db, { now: opts.now, weekStartsOn: opts.weekStartsOn, visible: null });
+	const nums = typeof pageNums === 'number' ? [pageNums] : pageNums;
+	const keys = await groupKeysOfPages(ctx, nums, groupBy);
+	if (typeof pageNums === 'number') return keys.get(pageNums) ?? [];
+	return keys;
 }

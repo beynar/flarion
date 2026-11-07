@@ -16,7 +16,8 @@ import {
 } from '../../../src/lib/shared/filter-ast';
 import type { PropValue } from '../../../src/lib/shared/property-types';
 import { runQuery, type QueryOptions, type QueryResult } from '../../../src/server/engine';
-import type { PageRow, World } from './world';
+import { naiveValues } from './naive';
+import { NOW, type PageRow, type World } from './world';
 
 export interface OracleResult {
 	total: number;
@@ -24,8 +25,20 @@ export interface OracleResult {
 	groups?: { key: string; total: number; rows: string[] }[];
 }
 
+const naiveCache = new WeakMap<World, Map<string, Record<string, PropValue | null>>>();
+
+/** Relations (tombstones dropped, reverse sides), formulas and rollups of every page, recomputed from scratch. */
+export function naiveOf(w: World, now = NOW): Map<string, Record<string, PropValue | null>> {
+	let m = naiveCache.get(w);
+	if (!m) {
+		m = naiveValues({ registry: w.registry, now, pages: w.pages.map((p) => ({ ...p, updatedAt: p.updatedAt, updatedBy: p.updatedBy })) });
+		naiveCache.set(w, m);
+	}
+	return m;
+}
+
 export function valuesOf(w: World, p: PageRow): PageValues {
-	const v: Record<string, PropValue | null> = { ...p.props, $parent: p.parentId, $teamspace: p.teamspaceId };
+	const v: Record<string, PropValue | null> = { ...p.props, ...naiveOf(w).get(p.id), $parent: p.parentId, $teamspace: p.teamspaceId };
 	for (const def of w.registry.all()) {
 		if (def.type === 'created_time') v[def.id] = p.createdAt;
 		else if (def.type === 'last_edited_time') v[def.id] = p.updatedAt ?? p.createdAt;

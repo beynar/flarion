@@ -43,6 +43,7 @@ import {
 } from './dates.js';
 import {
 	FILTER_OPS,
+	GROUPABLE_TYPES,
 	SYSTEM_FIELDS,
 	filterOpsOf,
 	isDateValue,
@@ -133,13 +134,34 @@ export const sortSpecSchema = v.object({
 export type SortSpec = v.InferOutput<typeof sortSpecSchema>;
 export const sortsSchema = v.pipe(v.array(sortSpecSchema), v.maxLength(MAX_SORTS));
 
+const groupKey = v.pipe(v.string(), v.minLength(1), v.maxLength(64));
+const groupKeys = v.pipe(v.array(groupKey), v.maxLength(500));
+
+/**
+ * How a view groups its pages (board columns, grouped lists).
+ *
+ * - `prop`: select, status, multi-select (a page appears in each of its groups), person, checkbox, relation,
+ *   created/edited by, or a date.
+ * - `sort`: the order of the groups. `manual` (default): `order`, then option order for select-like
+ *   properties, then ascending; `asc` / `desc`: by label (option name, status group name, the key itself).
+ * - `order`: group keys in the order the user dragged them (`manual` only). Keys it does not list follow in
+ *   the default order; keys that are not groups right now are ignored. It may list {@link GROUP_EMPTY}: that
+ *   is where the "No value" group sits (default: last, whatever the sort).
+ * - `hidden`: group keys that are not shown (pages that belong only to hidden groups are not listed).
+ * - `hideEmpty`: drop the groups that hold no page, and the "No value" group with them. (Without it the "No value"
+ *   group is still only listed when it holds pages; hide it for good with `hidden: ['$empty']`.)
+ * - `bucket`: date properties only, the bucket size (default `day`). Keys are `YYYY-MM-DD` bucket starts.
+ * - `by`: status properties only: `option` (default) one group per status option, `group` one per status
+ *   group (To-do, In progress, Complete); options outside every group land in "No value".
+ */
 export const groupBySpecSchema = v.object({
 	prop: propRef,
-	/** `manual`: option order for select-like properties, ascending otherwise. */
 	sort: v.optional(v.picklist(['manual', 'asc', 'desc'])),
 	hideEmpty: v.optional(v.boolean()),
-	/** Date properties only: the bucket size, default `day`. */
-	bucket: v.optional(v.picklist(DATE_UNITS))
+	bucket: v.optional(v.picklist(DATE_UNITS)),
+	by: v.optional(v.picklist(['option', 'group'])),
+	hidden: v.optional(groupKeys),
+	order: v.optional(groupKeys)
 });
 export type GroupBySpec = v.InferOutput<typeof groupBySpecSchema>;
 
@@ -151,18 +173,7 @@ export const querySpecSchema = v.object({
 });
 export type QuerySpec = v.InferOutput<typeof querySpecSchema>;
 
-/** Property types a view may group by. */
-export const GROUPABLE_TYPES: ReadonlySet<PropertyType> = new Set([
-	'select',
-	'status',
-	'multi_select',
-	'person',
-	'checkbox',
-	'date',
-	'relation',
-	'created_by',
-	'last_edited_by'
-]);
+export { GROUPABLE_TYPES } from './property-types.js';
 
 // ───────────────────────────── fields ─────────────────────────────
 
@@ -315,6 +326,16 @@ export function validateGroupBy(spec: unknown, registry: PropertyRegistry): Resu
 	if (!GROUPABLE_TYPES.has(def.type)) return fail([issue('/prop', 'not_groupable', `${def.type} properties cannot be grouped`)]);
 	if (parsed.output.bucket && def.type !== 'date')
 		return fail([issue('/bucket', 'bucket_not_allowed', 'Only date properties group in buckets')]);
+	if (parsed.output.by && def.type !== 'status')
+		return fail([issue('/by', 'by_not_allowed', 'Only status properties group by status group')]);
+	if (parsed.output.by === 'group' && def.type === 'status' && def.config.groups.length === 0)
+		return fail([issue('/by', 'no_status_groups', 'This status property has no groups')]);
+	const issues: Issue[] = [];
+	for (const key of ['hidden', 'order'] as const) {
+		const list = parsed.output[key];
+		if (list && new Set(list).size !== list.length) issues.push(issue(`/${key}`, 'duplicate_group', `"${key}" lists a group twice`));
+	}
+	if (issues.length) return fail(issues);
 	return ok(parsed.output);
 }
 
@@ -625,11 +646,107 @@ function bucketKey(unit: DateUnit, dateStart: string, ctx: DateCtx): string | nu
 	return anchored ? new Date(anchored.start).toISOString().slice(0, 10) : null;
 }
 
+/** Groups the property lists as groups even when no page is in them yet (a board's empty columns), in this order. */
+function knownGroupKeys(def: PropertyDef, spec: GroupBySpec): string[] {
+	switch (def.type) {
+		case 'select':
+		case 'multi_select':
+			return def.config.options.map((o) => o.id);
+		case 'status':
+			return spec.by === 'group' ? def.config.groups.map((g) => g.id) : def.config.options.map((o) => o.id);
+		case 'checkbox':
+			return ['false', 'true'];
+		default:
+			return [];
+	}
+}
+
+/** What `asc` / `desc` sort a group by: its option or status group name, else its key. */
+function groupLabel(def: PropertyDef, spec: GroupBySpec, key: string): string {
+	switch (def.type) {
+		case 'select':
+		case 'multi_select':
+			return def.config.options.find((o) => o.id === key)?.name ?? key;
+		case 'status':
+			return spec.by === 'group'
+				? (def.config.groups.find((g) => g.id === key)?.name ?? key)
+				: (def.config.options.find((o) => o.id === key)?.name ?? key);
+		default:
+			return key;
+	}
+}
+
 /**
- * Splits already-sorted rows into groups. Select, status and multi-select list every option as a
- * group (a board's empty columns) in option order, then the empty group; other types list the
- * groups that occur. A multi-valued row appears in each of its groups. `hideEmpty` drops groups
- * with no rows (and the empty group).
+ * The group keys of one value of the group-by property (several for a multi-valued one, `GROUP_EMPTY` for no
+ * value). The value must already hold only live relation targets. Pure: the oracle and `groupKeysOf` use it.
+ */
+export function groupKeysOfValue(def: PropertyDef, spec: GroupBySpec, val: PropValue | null | undefined, ctx: DateCtx): string[] {
+	switch (def.type) {
+		case 'checkbox':
+			return [val === true ? 'true' : 'false'];
+		case 'date': {
+			const start = isDateValue(val) ? val.start : typeof val === 'string' ? val : null;
+			const k = start ? bucketKey(spec.bucket ?? 'day', start, ctx) : null;
+			return [k ?? GROUP_EMPTY];
+		}
+		case 'status': {
+			const list = refList(val);
+			if (spec.by === 'group') {
+				const g = list.length ? def.config.groups.find((x) => x.optionIds.includes(list[0])) : undefined;
+				return [g ? g.id : GROUP_EMPTY];
+			}
+			return list.length ? list : [GROUP_EMPTY];
+		}
+		default: {
+			const list = refList(val);
+			return list.length ? list : [GROUP_EMPTY];
+		}
+	}
+}
+
+/**
+ * The groups to list, in order: the known groups (select options, status groups, checkbox false/true) and every
+ * group that has pages (`counts`), arranged by `sort` and `order`, with the "No value" group where `order` puts it
+ * (default last) and only when it has pages, minus `hidden` and, with `hideEmpty`, the groups without pages and
+ * the "No value" group.
+ * See {@link groupBySpecSchema}.
+ */
+export function orderGroupKeys(def: PropertyDef, spec: GroupBySpec, counts: ReadonlyMap<string, number>): string[] {
+	const known = knownGroupKeys(def, spec);
+	const all = new Set<string>(known);
+	for (const k of counts.keys()) if (k !== GROUP_EMPTY) all.add(k);
+	const mode = spec.sort ?? 'manual';
+	let base = [...all];
+	if (mode === 'manual') {
+		const rank = new Map(known.map((k, i) => [k, i]));
+		base.sort((a, b) => (rank.get(a) ?? Infinity) - (rank.get(b) ?? Infinity) || compareText(a, b));
+		if (spec.order?.length) {
+			const pinned = [...new Set(spec.order.filter((k) => k !== GROUP_EMPTY && all.has(k)))];
+			const pin = new Set(pinned);
+			base = [...pinned, ...base.filter((k) => !pin.has(k))];
+		}
+	} else {
+		base.sort((a, b) => compareText(groupLabel(def, spec, a), groupLabel(def, spec, b)) || compareText(a, b));
+		if (mode === 'desc') base.reverse();
+	}
+	let at = base.length;
+	if (mode === 'manual' && spec.order) {
+		const i = spec.order.indexOf(GROUP_EMPTY);
+		if (i >= 0) at = new Set(spec.order.slice(0, i).filter((k) => k !== GROUP_EMPTY && all.has(k))).size;
+	}
+	base.splice(at, 0, GROUP_EMPTY);
+	const hidden = new Set(spec.hidden ?? []);
+	return base.filter((k) => {
+		if (hidden.has(k)) return false;
+		const n = counts.get(k) ?? 0;
+		return k === GROUP_EMPTY ? n > 0 && !spec.hideEmpty : !(spec.hideEmpty && n === 0);
+	});
+}
+
+/**
+ * Splits already-sorted rows into groups (see {@link groupBySpecSchema} for the spec and {@link orderGroupKeys}
+ * for the order). A multi-valued row appears in each of its groups; a row whose groups are all hidden appears in
+ * none.
  */
 export function groupRows<R extends Row>(
 	rows: readonly R[],
@@ -639,42 +756,8 @@ export function groupRows<R extends Row>(
 	const def = ctx.registry.get(spec.prop);
 	if (!def) return [{ key: GROUP_EMPTY, rows: [...rows] }];
 	const groups = new Map<string, R[]>();
-	const keysOf = (row: R): string[] => {
-		const val = row.values[spec.prop] ?? null;
-		switch (def.type) {
-			case 'checkbox':
-				return [val === true ? 'true' : 'false'];
-			case 'date': {
-				const start = isDateValue(val) ? val.start : typeof val === 'string' ? val : null;
-				const k = start ? bucketKey(spec.bucket ?? 'day', start, ctx) : null;
-				return [k ?? GROUP_EMPTY];
-			}
-			default: {
-				const list = refList(val);
-				return list.length ? list : [GROUP_EMPTY];
-			}
-		}
-	};
-	const optionOrder: string[] =
-		def.type === 'select' || def.type === 'status' || def.type === 'multi_select'
-			? def.config.options.map((o) => o.id)
-			: def.type === 'checkbox'
-				? ['false', 'true']
-				: [];
-	for (const k of optionOrder) groups.set(k, []);
-	for (const row of rows) for (const k of keysOf(row)) (groups.get(k) ?? groups.set(k, []).get(k)!).push(row);
-
-	const sortMode = spec.sort ?? 'manual';
-	let keys = [...groups.keys()].filter((k) => k !== GROUP_EMPTY);
-	if (sortMode === 'manual' && optionOrder.length) {
-		const rank = new Map(optionOrder.map((k, i) => [k, i]));
-		keys.sort((a, b) => (rank.get(a) ?? Infinity) - (rank.get(b) ?? Infinity) || compareText(a, b));
-	} else {
-		keys.sort(compareText);
-		if (sortMode === 'desc') keys.reverse();
-	}
-	keys = [...keys, GROUP_EMPTY];
-	return keys
-		.map((key) => ({ key, rows: groups.get(key) ?? [] }))
-		.filter((g) => (g.key === GROUP_EMPTY ? !spec.hideEmpty && g.rows.length > 0 : !(spec.hideEmpty && g.rows.length === 0)));
+	for (const row of rows)
+		for (const k of groupKeysOfValue(def, spec, row.values[spec.prop] ?? null, ctx)) (groups.get(k) ?? groups.set(k, []).get(k)!).push(row);
+	const counts = new Map([...groups].map(([k, list]) => [k, list.length]));
+	return orderGroupKeys(def, spec, counts).map((key) => ({ key, rows: groups.get(key) ?? [] }));
 }

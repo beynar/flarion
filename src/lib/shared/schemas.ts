@@ -168,7 +168,16 @@ export const historyEntrySchema = v.object({
 	createdAt: isoSchema,
 	authorIds: v.array(idSchema),
 	/** Size of the stored snapshot, bytes. */
-	size: nonNegativeInt
+	size: nonNegativeInt,
+	/** One line about it: "12 blocks". Filled by the page room (optional: older callers never sent it). */
+	summary: v.optional(v.string()),
+	/** Visible blocks in the version. */
+	blocks: v.optional(nonNegativeInt),
+	/** The local date of the version's half-day slot, `YYYY-MM-DD`, and which half. */
+	date: v.optional(v.string()),
+	slot: v.optional(v.picklist(['am', 'pm'])),
+	/** Authors left out of `authorIds` to keep the stored metadata small. */
+	moreAuthors: v.optional(nonNegativeInt)
 });
 export type HistoryEntry = v.InferOutput<typeof historyEntrySchema>;
 export const historyListInputSchema = v.object({

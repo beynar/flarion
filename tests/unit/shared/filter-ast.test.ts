@@ -11,6 +11,7 @@ import {
 	filterDepth,
 	filterGroupSchema,
 	filterKey,
+	groupKeysOfValue,
 	groupRows,
 	normalizeFilter,
 	queryRows,
@@ -460,5 +461,104 @@ describe('sort, query and group (reference)', () => {
 			ctx
 		);
 		expect(byMonth.map((g) => [g.key, ids(g.rows)])).toEqual([['2026-12-01', ['m3']], ['2026-11-01', ['m1', 'm2']], [GROUP_EMPTY, ['m4']]]);
+	});
+});
+
+describe('group-by spec: groups of a board', () => {
+	const STATUS = mk('stage', 'status', {
+		options: [
+			{ id: 'new', name: 'New' },
+			{ id: 'wip', name: 'Working' },
+			{ id: 'ship', name: 'Shipped' },
+			{ id: 'lost', name: 'Orphan' }
+		],
+		groups: [
+			{ id: 'todo', name: 'To do', optionIds: ['new'] },
+			{ id: 'prog', name: 'In progress', optionIds: ['wip'] },
+			{ id: 'comp', name: 'Complete', optionIds: ['ship'] }
+		]
+	});
+	const reg = createRegistry([mk('title', 'title'), STATUS, mk('tags', 'multi_select', { options: OPTS }), mk('owner', 'person'), mk('due', 'date'), mk('done', 'checkbox'), mk('project', 'relation')]);
+	const gctx: EvalCtx = { registry: reg, now: NOW, meId: 'me' };
+	const rs: Row[] = [
+		{ id: 'a', values: { stage: 'new' } },
+		{ id: 'b', values: { stage: 'wip' } },
+		{ id: 'c', values: { stage: 'ship' } },
+		{ id: 'd', values: { stage: 'lost' } },
+		{ id: 'e', values: {} },
+		{ id: 'f', values: { stage: 'new' } }
+	];
+	const keys = (spec: Parameters<typeof groupRows>[1], list: Row[] = rs) => groupRows(list, spec, gctx).map((g) => g.key);
+	const members = (spec: Parameters<typeof groupRows>[1], list: Row[] = rs) => groupRows(list, spec, gctx).map((g) => [g.key, g.rows.map((r) => r.id)]);
+
+	it('groups a status by option, or by status group (To do, In progress, Complete)', () => {
+		expect(members({ prop: 'stage' })).toEqual([['new', ['a', 'f']], ['wip', ['b']], ['ship', ['c']], ['lost', ['d']], [GROUP_EMPTY, ['e']]]);
+		// An option that no group lists lands in "No value", with the pages that have no status.
+		expect(members({ prop: 'stage', by: 'group' })).toEqual([['todo', ['a', 'f']], ['prog', ['b']], ['comp', ['c']], [GROUP_EMPTY, ['d', 'e']]]);
+		// Every status group is a column, even an empty one.
+		expect(keys({ prop: 'stage', by: 'group' }, [])).toEqual(['todo', 'prog', 'comp']);
+	});
+
+	it('hides groups and keeps the others in order; hiding a group of a multi-select leaves the page in its other groups', () => {
+		expect(keys({ prop: 'stage', hidden: ['wip', GROUP_EMPTY] })).toEqual(['new', 'ship', 'lost']);
+		const tagged: Row[] = [{ id: 'x', values: { tags: ['todo', 'done'] } }, { id: 'y', values: { tags: ['todo'] } }];
+		expect(members({ prop: 'tags', hidden: ['todo'] }, tagged)).toEqual([['doing', []], ['done', ['x']]]);
+		// A page that belongs only to hidden groups is listed nowhere.
+		expect(members({ prop: 'tags', hidden: ['todo', 'done'] }, tagged).flatMap(([, ids]) => ids)).toEqual([]);
+	});
+
+	it('orders groups: manual order first, the rest as usual, "No value" where order puts it (default last)', () => {
+		expect(keys({ prop: 'stage', order: ['lost', 'ship'] })).toEqual(['lost', 'ship', 'new', 'wip', GROUP_EMPTY]);
+		expect(keys({ prop: 'stage', order: [GROUP_EMPTY, 'ship'] })).toEqual([GROUP_EMPTY, 'ship', 'new', 'wip', 'lost']);
+		expect(keys({ prop: 'stage', order: ['ship', GROUP_EMPTY, 'new'] })).toEqual(['ship', GROUP_EMPTY, 'new', 'wip', 'lost']);
+		// Keys that are not groups, and repeats, are ignored.
+		expect(keys({ prop: 'stage', order: ['nope', 'wip', 'wip'] })).toEqual(['wip', 'new', 'ship', 'lost', GROUP_EMPTY]);
+		// An empty "No value" group is not listed whatever the order says.
+		expect(keys({ prop: 'stage', order: [GROUP_EMPTY, 'ship'] }, rs.filter((r) => r.id !== 'e'))).toEqual(['ship', 'new', 'wip', 'lost']);
+		// asc / desc sort by label (option name), ignore `order`, and put "No value" last.
+		expect(keys({ prop: 'stage', sort: 'asc', order: ['ship'] })).toEqual(['new', 'lost', 'ship', 'wip', GROUP_EMPTY]);
+		expect(keys({ prop: 'stage', sort: 'desc' })).toEqual(['wip', 'ship', 'lost', 'new', GROUP_EMPTY]);
+		expect(keys({ prop: 'stage', by: 'group', sort: 'asc' })).toEqual(['comp', 'prog', 'todo', GROUP_EMPTY]);
+	});
+
+	it('hideEmpty drops the groups without pages and the "No value" group', () => {
+		expect(keys({ prop: 'stage', hideEmpty: true }, rs.filter((r) => r.id !== 'b'))).toEqual(['new', 'ship', 'lost']);
+		expect(keys({ prop: 'stage', hideEmpty: true, hidden: ['new'] }, rs.filter((r) => r.id !== 'b'))).toEqual(['ship', 'lost']);
+	});
+
+	it('groups people, checkboxes, relations and dates', () => {
+		expect(members({ prop: 'owner', sort: 'desc' }, [{ id: 'p', values: { owner: ['u1', 'u2'] } }, { id: 'q', values: { owner: ['u2'] } }, { id: 'r', values: {} }])).toEqual([['u2', ['p', 'q']], ['u1', ['p']], [GROUP_EMPTY, ['r']]]);
+		expect(members({ prop: 'done', order: ['true'] }, [{ id: 'p', values: { done: true } }, { id: 'q', values: {} }])).toEqual([['true', ['p']], ['false', ['q']]]);
+		expect(members({ prop: 'project', order: ['b'] }, [{ id: 'p', values: { project: ['a', 'b'] } }, { id: 'q', values: { project: ['b'] } }])).toEqual([['b', ['p', 'q']], ['a', ['p']]]);
+		// Dates bucket by day, week (Monday), month and year.
+		const dated: Row[] = ['2026-11-02', '2026-11-08', '2026-11-09', '2027-01-01'].map((d, i) => ({ id: `d${i}`, values: { due: { start: d } } }));
+		expect(keys({ prop: 'due', bucket: 'week' }, dated)).toEqual(['2026-11-02', '2026-11-09', '2026-12-28']);
+		expect(keys({ prop: 'due', bucket: 'month', sort: 'desc' }, dated)).toEqual(['2027-01-01', '2026-11-01']);
+		expect(keys({ prop: 'due', bucket: 'year' }, dated)).toEqual(['2026-01-01', '2027-01-01']);
+		expect(keys({ prop: 'due' }, dated)).toEqual(['2026-11-02', '2026-11-08', '2026-11-09', '2027-01-01']);
+		expect(keys({ prop: 'due', order: ['2027-01-01'], hidden: ['2026-11-08'] }, dated)).toEqual(['2027-01-01', '2026-11-02', '2026-11-09']);
+	});
+
+	it('groupKeysOfValue is the key set of one page', () => {
+		const dctx = { now: NOW, weekStartsOn: 1 as const };
+		expect(groupKeysOfValue(STATUS, { prop: 'stage', by: 'group' }, 'wip', dctx)).toEqual(['prog']);
+		expect(groupKeysOfValue(STATUS, { prop: 'stage' }, null, dctx)).toEqual([GROUP_EMPTY]);
+		expect(groupKeysOfValue(reg.get('tags') as PropertyDef, { prop: 'tags' }, ['todo', 'done'], dctx)).toEqual(['todo', 'done']);
+		expect(groupKeysOfValue(reg.get('due') as PropertyDef, { prop: 'due', bucket: 'month' }, { start: '2026-11-20' }, dctx)).toEqual(['2026-11-01']);
+		expect(groupKeysOfValue(reg.get('done') as PropertyDef, { prop: 'done' }, undefined, dctx)).toEqual(['false']);
+	});
+
+	it('validates the new fields', () => {
+		expect(validateGroupBy({ prop: 'stage', by: 'group', hidden: ['todo'], order: ['prog', GROUP_EMPTY], sort: 'manual', hideEmpty: false }, reg).ok).toBe(true);
+		expect(validateGroupBy({ prop: 'tags', by: 'group' }, reg).ok).toBe(false);
+		expect(validateGroupBy({ prop: 'stage', hidden: ['a', 'a'] }, reg)).toMatchObject({ ok: false, issues: [{ path: '/hidden', code: 'duplicate_group' }] });
+		expect(validateGroupBy({ prop: 'stage', order: ['a', 'b', 'a'] }, reg).ok).toBe(false);
+		expect(validateGroupBy({ prop: 'stage', hidden: [''] }, reg).ok).toBe(false);
+		expect(validateGroupBy({ prop: 'stage', hidden: 'todo' }, reg).ok).toBe(false);
+		const noGroups = createRegistry([mk('s', 'status', { options: OPTS, groups: [] })]);
+		expect(validateGroupBy({ prop: 's', by: 'group' }, noGroups)).toMatchObject({ ok: false, issues: [{ code: 'no_status_groups' }] });
+		expect(validateGroupBy({ prop: 's', by: 'option' }, noGroups).ok).toBe(true);
+		// Through a whole query spec, with its path.
+		expect(validateQuerySpec({ groupBy: { prop: 'stage', hidden: ['x', 'x'] } }, reg)).toMatchObject({ ok: false, issues: [{ path: '/groupBy/hidden' }] });
 	});
 });

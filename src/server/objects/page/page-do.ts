@@ -14,7 +14,12 @@
  *   returns the pending seed, else nothing.
  * - Page lock: `setLocked` / `lockState` keep the lock in the room's KV, `validate` denies edits of a locked page
  *   unless the sender has full access (`noteBypass`, called by the route at each dial); see `validate.ts`.
- * - History (`r2History`) arrives in P3.
+ * - History (P3): `history: { store: r2History over the page's R2 prefix, retentionDays: 30 }` (`history-store.ts`): one
+ *   version per half-day slot that changed, `ws/{ws}/pages/{page}/history/...`. `listHistory`, `readHistory`,
+ *   `restoreHistory` (a forward edit, collaborative) and `undoRestore` are forwarded for the RPC layer.
+ * - Cross-document moves (`exportBlocks`, `importBlocks`, `commitMove`, ...) are forwarded too; `rooms` names the PAGE
+ *   namespace, so the room forwards a moved block's late edits to its new page by itself.
+ * - `purge()` wipes the room for good (trash purge): sockets, R2 snapshot and versions, then all its storage.
  */
 import { DurableObject } from 'cloudflare:workers';
 import type { JSONDoc } from 'edytor/crdt/edytor';
@@ -22,15 +27,24 @@ import {
 	SOCKET_TAG,
 	attachRoom,
 	type AttachedDocument,
+	type CommitResult,
 	type DocumentAccessLevel,
+	type ExportedBlocks,
+	type HistoryEntry,
+	type ImportReceipt,
+	type ImportRequest,
+	type LateEditBatch,
 	type LoadedDocument,
+	type MoveNamespace,
+	type RestoreResult,
 	type SavedDocument
 } from 'edytor/cloudflare';
 import { roomSemantics } from '../../../lib/shared/blocks/kinds.js';
 import type { IndexPageJob } from '../../queues/types';
+import { deletePrefix, pageHistoryStore } from './history-store';
 import { enqueueIndexJob } from './index-job';
 import { ensurePageMetaTable, recordPageMeta, resolvePageIdentity, type PageIdentity } from './page-meta';
-import { loadSnapshot, saveSnapshot } from './snapshot-store';
+import { loadSnapshot, pageKeyPrefix, saveSnapshot } from './snapshot-store';
 import {
 	canBypassLock,
 	createFrameValidator,
@@ -47,6 +61,18 @@ export const MAX_DOCUMENT_BYTES = 16 * 1024 * 1024;
 export const PURGE_AFTER_DAYS = 30;
 
 const SEED_KEY = 'seed:json';
+/** Hours the room's clock jumps in `closeHistorySlot`: past the next local noon or midnight, whichever is first. */
+const SLOT_JUMP_MS = 13 * 60 * 60 * 1000;
+
+const isMovableClock = (env: Env) => (env.ENVIRONMENT as string) === 'development' || (env.ENVIRONMENT as string) === 'test';
+
+/** What `purge()` removed. */
+export interface PurgeReport {
+	/** R2 objects deleted (the snapshot, the replica owners and every version). */
+	r2Deleted: number;
+	/** Sockets closed. */
+	sockets: number;
+}
 
 /**
  * What a page object asks of its Workspace DO. The Sync core implements both on `WorkspaceDO`; they
@@ -76,6 +102,10 @@ export interface PageLockState {
 
 export class PageDO extends DurableObject<Env> {
 	readonly document: AttachedDocument;
+	/** `purge()` ran: nothing this instance holds may be written again. */
+	private purged = false;
+	private identityCache: PageIdentity | undefined;
+	private clockOffset = 0;
 
 	constructor(ctx: DurableObjectState, env: Env) {
 		super(ctx, env);
@@ -83,6 +113,9 @@ export class PageDO extends DurableObject<Env> {
 		this.document = attachRoom(this, {
 			maxDocumentBytes: MAX_DOCUMENT_BYTES,
 			purgeAfterDays: PURGE_AFTER_DAYS,
+			history: { store: pageHistoryStore(env.FILES, () => this.identity()), retentionDays: PURGE_AFTER_DAYS },
+			rooms: () => env.PAGE as unknown as MoveNamespace,
+			now: () => Date.now() + this.clockOffset,
 			semantics: roomSemantics,
 			onLoad: () => this.restore(),
 			onSave: (saved) => this.persist(saved),
@@ -96,13 +129,21 @@ export class PageDO extends DurableObject<Env> {
 	 * The room route tells the object who it is before the room loads (see `recordPageMeta`): not every stub
 	 * carries the object's name. Idempotent; a contradicting identity throws.
 	 */
-	recordIdentity(workspaceId: string, pageId: string): void {
+	async recordIdentity(workspaceId: string, pageId: string): Promise<void> {
 		recordPageMeta(this.ctx.storage.sql, this.ctx.id.name, { workspaceId, pageId });
+		// A fresh object whose name is unknown (the dev server's platform proxy) failed its first start for want of an identity
+		// (`restore` needs it to read R2); it starts again at the next dial. Calls that are not dials (a history read, a block
+		// move) would meet that stale failure, so start again now that the identity is known. A no-op once the room is live.
+		try {
+			await (this.document as unknown as { room: { storage: { retryStart(): Promise<void> } } }).room.storage.retryStart();
+		} catch (error) {
+			console.warn('page room: could not restart after recording its identity', String(error));
+		}
 	}
 
 	/** This object's page, from its name (recorded in `page_meta` on first use). */
 	identity(): PageIdentity {
-		return resolvePageIdentity(this.ctx.storage.sql, this.ctx.id.name);
+		return (this.identityCache ??= resolvePageIdentity(this.ctx.storage.sql, this.ctx.id.name));
 	}
 
 	/** R2 first (a page survives the loss of its object), else a seed `seedFrom` left, else an empty room. */
@@ -114,6 +155,8 @@ export class PageDO extends DurableObject<Env> {
 	}
 
 	private async persist(saved: SavedDocument): Promise<void> {
+		// A purged room must not write its snapshot back to R2 (an alarm or a save already in flight).
+		if (this.purged) return;
 		const identity = this.identity();
 		await saveSnapshot(this.env.FILES, identity, saved);
 		const version = this.document.lastUpdated() ?? Date.now();
@@ -125,6 +168,7 @@ export class PageDO extends DurableObject<Env> {
 	// object watches its sockets, and each one delegates to the room.
 
 	override async fetch(request: Request): Promise<Response> {
+		if (this.purged) return new Response('This page was deleted', { status: 410 });
 		const response = await this.document.fetch(request);
 		if (response.status === 101 && this.ctx.getWebSockets(SOCKET_TAG).length === 1) this.announce('openRoom');
 		return response;
@@ -173,6 +217,7 @@ export class PageDO extends DurableObject<Env> {
 	 * that restarts before anyone writes still starts from it.
 	 */
 	seedFrom(json: JSONDoc): { seeded: boolean } {
+		if (this.purged) return { seeded: false };
 		if (this.document.lastUpdated() !== null) return { seeded: false };
 		this.ctx.storage.kv.put(SEED_KEY, JSON.stringify(json));
 		const blocks = json.children ?? [];
@@ -270,6 +315,120 @@ export class PageDO extends DurableObject<Env> {
 	/** The route tells the room, at each dial, whether the dialing user has full access (they edit through a lock). */
 	noteBypass(userId: string, bypass: boolean): void {
 		recordBypass(this.ctx.storage.kv, userId, bypass);
+	}
+
+	// ───────────── version history (docs/PLAN.md "Pages and blocks": History) ─────────────
+
+	/** The page's versions, newest first: one per half-day slot that changed, for 30 days. */
+	listHistory(): Promise<HistoryEntry[]> {
+		return this.document.listHistory();
+	}
+
+	/** One version as JSON (the preview), or `null` when this room holds no such version. */
+	readHistory(key: string): Promise<JSONDoc | null> {
+		return this.document.readHistory(key);
+	}
+
+	/**
+	 * Restore a version as one forward edit: relayed to every socket (so collaborators see it at once) and undone by
+	 * `undoRestore`. `user` is recorded as the editor of the slot. `refused`: no such version.
+	 */
+	restoreHistory(key: string, user?: string): Promise<RestoreResult> {
+		return this.document.restoreHistory(key, user ? { user } : undefined);
+	}
+
+	/** Undo the last restore (one level, edits made since stay). */
+	undoRestore(user?: string): Promise<{ status: 'applied' | 'noop' }> {
+		return this.document.undoRestore(user ? { user } : undefined);
+	}
+
+	/** Resolves once the version writes in flight are stored. */
+	historyWritten(): Promise<void> {
+		return this.document.historyWritten();
+	}
+
+	/**
+	 * Development and tests only: ends the open half-day history slot now. Real versions appear at local noon and
+	 * midnight; this moves the room's clock past the slot's end, lets the room's own alarm close it into a version,
+	 * waits for the write, and puts the clock back. Sockets whose credentials the jump outlives are closed (4401) by
+	 * the room, as they would be at that time of day, and redial. Refused in production.
+	 */
+	async closeHistorySlot(): Promise<void> {
+		if (!isMovableClock(this.env)) throw new Error('closeHistorySlot is for development and tests');
+		this.clockOffset += SLOT_JUMP_MS;
+		try {
+			await (this as unknown as { alarm(): Promise<void> }).alarm();
+			await this.document.historyWritten();
+		} finally {
+			this.clockOffset -= SLOT_JUMP_MS;
+		}
+	}
+
+	// ───────────── moving blocks between pages (edytor's room.move) ─────────────
+	// Run by `moveBlocksBetweenRooms(PAGE, { from, to, ... })` from the Worker; each step is a room transaction.
+
+	exportBlocks(ids: string[]): ExportedBlocks {
+		return this.document.exportBlocks(ids);
+	}
+
+	importBlocks(request: ImportRequest): ImportReceipt {
+		return this.document.importBlocks(request);
+	}
+
+	commitMove(moveId: string, receipt: { to: string; ids: Record<string, string> }): CommitResult {
+		return this.document.commitMove(moveId, receipt);
+	}
+
+	abortMove(moveId: string) {
+		return this.document.abortMove(moveId);
+	}
+
+	applyLateEdits(batch: LateEditBatch) {
+		return this.document.applyLateEdits(batch);
+	}
+
+	lateEdits(): LateEditBatch[] {
+		return this.document.lateEdits();
+	}
+
+	ackLateEdits(moveId: string, seq: number): void {
+		this.document.ackLateEdits(moveId, seq);
+	}
+
+	// ───────────── purge ─────────────
+
+	/**
+	 * Wipe this room completely (docs/PLAN.md "Soft delete and trash": the purge Workflow calls it for a page whose 30
+	 * days are over): sockets closed, every R2 object under the page's prefix deleted (the snapshot, the replica owners
+	 * and every history version), then all the object's storage and its alarm.
+	 *
+	 * Idempotent, and safe to retry: R2 goes first, while the page's identity is still known, so a failure leaves the
+	 * storage in place for the retry; a second call finds nothing to delete. Afterwards the instance refuses sockets
+	 * (410) and never writes its snapshot again.
+	 */
+	async purge(): Promise<PurgeReport> {
+		this.purged = true;
+		let sockets = 0;
+		for (const ws of this.ctx.getWebSockets(SOCKET_TAG)) {
+			try {
+				ws.close(4403, 'page purged');
+			} catch {
+				// Already closing.
+			}
+			sockets++;
+		}
+		// No save may land between the listing below and the wipe.
+		await this.ctx.storage.deleteAlarm();
+		let identity: PageIdentity | undefined;
+		try {
+			identity = this.identity();
+		} catch {
+			// Never addressed, or already wiped: there is no prefix to delete.
+		}
+		const r2Deleted = identity ? await deletePrefix(this.env.FILES, pageKeyPrefix(identity)) : 0;
+		await this.ctx.storage.deleteAll();
+		await this.ctx.storage.deleteAlarm();
+		return { r2Deleted, sockets };
 	}
 
 	/** Close every socket of a user; 4401 makes the provider refresh its token and redial. */

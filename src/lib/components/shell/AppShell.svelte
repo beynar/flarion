@@ -11,12 +11,15 @@
 	import { userPlusIcon } from 'entasis/icons/userPlus';
 	import { signOutIcon } from 'entasis/icons/signOut';
 	import { notePencilIcon } from 'entasis/icons/notePencil';
+	import { databaseIcon } from 'entasis/icons/database';
 	import { checkIcon } from 'entasis/icons/check';
+	import { Confirmation } from 'entasis/confirmation';
 	import { notion } from '#lib/design/notion.tokens.ts';
 	import { signOut, type SessionUser } from '#lib/client/session.ts';
 	import type { WorkspaceStore } from '#lib/client/workspace.svelte.ts';
 	import type { Workspace } from '#lib/shared/schemas.ts';
 	import ShareDialog from '#lib/components/share/ShareDialog.svelte';
+	import TrashPopover from '#lib/components/trash/TrashPopover.svelte';
 	import CommandPalette from './CommandPalette.svelte';
 	import ReloadBanner from './ReloadBanner.svelte';
 	import SidebarTree from './SidebarTree.svelte';
@@ -52,6 +55,8 @@
 	let paletteOpen = $state(false);
 	let sidebarOpen = $state(true);
 	let shareOpen = $state(false);
+	let trashOpen = $state(false);
+	let trashAnchor = $state<HTMLElement | null>(null);
 
 	const { sidebar: width } = notion.metrics;
 
@@ -68,6 +73,15 @@
 		}
 	}
 
+	async function newDatabase() {
+		try {
+			const id = await store.createDatabase({ parentId: null, teamspaceId: null });
+			await goto(`/${ws}/${id}`);
+		} catch {
+			// the store has raised the toast
+		}
+	}
+
 	const headerMenu: SidebarMenuEntry[] = $derived([
 		{ label: 'Search', icon: magnifyingGlassIcon, badge: '⌘K', onclick: () => (paletteOpen = true) },
 		{ label: 'Home', icon: houseIcon, href: `/${ws}`, isActive: section === 'home' },
@@ -76,12 +90,31 @@
 			icon: notePencilIcon,
 			disabled: !store.canEdit,
 			onclick: () => void newPage()
+		},
+		{
+			label: 'New database',
+			icon: databaseIcon,
+			disabled: !store.canEdit,
+			onclick: () => void newDatabase()
 		}
 	]);
 
 	const footerMenu: SidebarMenuEntry[] = $derived([
 		{ label: 'Settings', icon: gearIcon, href: `/${ws}/settings`, isActive: section === 'settings' },
-		{ label: 'Trash', icon: trashIcon, href: `/${ws}/trash`, isActive: section === 'trash' },
+		{
+			label: 'Trash',
+			icon: trashIcon,
+			href: `/${ws}/trash`,
+			isActive: section === 'trash',
+			// Notion's Trash opens a popover; a modified click still follows the link to the full screen.
+			onclick: (event) => {
+				if (event.metaKey || event.ctrlKey || event.shiftKey || event.button !== 0) return;
+				event.preventDefault();
+				trashAnchor = event.currentTarget as HTMLElement;
+				trashOpen = !trashOpen;
+			},
+			class: 'sidebar-trash'
+		},
 		{ label: 'Invite members', icon: userPlusIcon, href: `/${ws}/settings/members` }
 	]);
 
@@ -111,6 +144,7 @@
 
 	function onAction(value: string) {
 		if (value === 'action:new-page') void newPage();
+		else if (value === 'action:new-database') void newDatabase();
 		else if (value === 'action:toggle-dark') toggleDark();
 		else if (value === 'action:toggle-sidebar') sidebarOpen = !sidebarOpen;
 		else if (value.startsWith('page:')) void goto(`/${ws}/${value.slice(5)}`);
@@ -206,6 +240,11 @@
 </Sidebar>
 
 <CommandPalette bind:open={paletteOpen} {store} {ws} {onAction} />
+
+<TrashPopover {store} {ws} bind:open={trashOpen} anchor={trashAnchor} />
+
+<!-- The host of every `confirmation()` call (delete forever). -->
+<Confirmation />
 
 {#if activePageId && section === 'page'}
 	<ShareDialog {store} pageId={activePageId} bind:open={shareOpen} />

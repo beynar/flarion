@@ -13,10 +13,14 @@ import { compare, oracle, shrink, valuesOf } from './oracle';
 import { randomFilter, randomScenario, randomSorts, randomSource, randomVisible, sampledDate } from './queries';
 import type { Condition } from '../../../src/lib/shared/filter-ast';
 import type { FilterOp } from '../../../src/lib/shared/property-types';
-import { NOW, buildWorld, type World } from './world';
+import { NOW, buildWorld, readPages, type World } from './world';
+import { afterWrite, applyEavOp, invalidateRegistry, recomputeNowFormulas, type ChangeRecord, type EavOp } from '../../../src/server/objects/workspace/eav';
+import { formatDate } from '../../../src/lib/shared/dates';
+import { naiveOf } from './oracle';
+import { ctx as eavCtx } from '../eav/helpers';
 
 const describeOptions = (o: QueryOptions): string =>
-	JSON.stringify({ ...o, visible: `${'size' in o.visible ? o.visible.size : o.visible.length} page numbers` });
+	JSON.stringify({ ...o, visible: o.visible === null ? 'unrestricted' : `${'size' in o.visible ? o.visible.size : o.visible.length} page numbers` });
 
 interface Stats {
 	ran: number;
@@ -177,6 +181,116 @@ describe('helpers for the live loop', () => {
 				expect(res.total).toBe(0);
 			}
 			void world;
+		});
+	});
+});
+
+
+describe('relations, rollups and formulas against the oracle', () => {
+	test('the random world exercises them: filled computed values, tombstoned targets, reverse sides', { timeout: 120_000 }, async () => {
+		await inWorkspace(async (_state, db) => {
+			const world = await buildWorld(db, rng(2024), { pages: 400, density: 0.6 });
+			const naive = naiveOf(world);
+			const filled = (prop: string) => world.pages.filter((p) => naive.get(p.id)?.[prop] != null).length;
+			for (const prop of ['ftext', 'fnum', 'fbool', 'fdue', 'ftitles', 'rnum', 'rcount', 'rdue', 'rtags', 'rback', 'rchain', 'fchain', 'rel:reverse'])
+				expect(filled(prop), prop).toBeGreaterThan(20);
+			const dead = new Set(world.pages.filter((p) => p.deletedAt).map((p) => p.id));
+			const pointsAtDead = world.pages.filter((p) => ['rel', 'rel1'].some((r) => ((p.props[r] as string[] | undefined) ?? []).some((id) => dead.has(id))));
+			expect(pointsAtDead.length).toBeGreaterThan(5);
+			// What the oracle computes is what the engine stored: no drift after the initial fill.
+			for (const p of world.pages)
+				for (const prop of ['ftext', 'fnum', 'fbool', 'fdue', 'ftitles', 'rnum', 'rcount', 'rdue', 'rtags', 'rback', 'rchain', 'fchain'])
+					expect(p.props[prop] ?? null, `${p.id}.${prop}`).toEqual(naive.get(p.id)?.[prop] ?? null);
+		});
+	});
+
+	test('after random writes, relation edits, trash and restore the engine still matches the oracle', { timeout: 240_000 }, async () => {
+		await inWorkspace(async (_state, db) => {
+			const r = rng(31);
+			const world = await buildWorld(db, r, { pages: 300, density: 0.6, randomSource: (w) => randomSource(r, w, 2) });
+			const ids = world.pages.map((p) => p.id);
+			const live = new Set(world.pages.filter((p) => !p.deletedAt).map((p) => p.id));
+			const day = () => `2026-0${r.int(1, 9)}-${String(r.int(10, 28))}`;
+			const ops = (): EavOp[] =>
+				Array.from({ length: r.int(1, 4) }, (): EavOp => {
+					const page = r.pick([...live]);
+					switch (r.int(0, 8)) {
+						case 0:
+							return { op: 'setProp', page, prop: 'amount', value: r.pick([0, 1, 5, 12, -3, null]) } as EavOp;
+						case 1:
+							return { op: 'setProp', page, prop: 'score', value: r.pick([0, 2, 11, null]) } as EavOp;
+						case 2:
+							return { op: 'setProp', page, prop: 'done', value: r.bool() } as EavOp;
+						case 3:
+							return { op: 'setProp', page, prop: 'due', value: r.bool(0.8) ? { start: day() } : null } as EavOp;
+						case 4:
+							return { op: 'setProp', page, prop: 'tags', value: ['t1', 't2', 't3'].filter(() => r.bool(0.4)) } as EavOp;
+						case 5:
+							return { op: 'setProp', page, prop: 'rel', value: Array.from({ length: r.int(0, 3) }, () => r.pick(ids)).filter((x, i, a) => a.indexOf(x) === i) } as EavOp;
+						case 6:
+							return { op: 'setProp', page, prop: 'rel1', value: r.bool(0.7) ? [r.pick(ids)] : null } as EavOp;
+						case 7:
+							return { op: 'setProp', page, prop: 'title', value: r.pick(['Alpha', 'Zed', 'Été', null]) } as EavOp;
+						default:
+							return { op: 'setProp', page, prop: 'prio', value: r.pick(['p1', 'p2', 'p3', null]) } as EavOp;
+					}
+				});
+			for (let step = 0; step < 40; step++) {
+				const records: ChangeRecord[] = [];
+				await db.$transaction(async (tx) => {
+					if (step % 5 === 4) {
+						const id = r.pick(ids);
+						if (live.has(id)) {
+							await tx.$executeRawUnsafe("UPDATE page SET deleted_at = '2026-02-01T00:00:00Z', trash_root = ? WHERE id = ?", id, id);
+							live.delete(id);
+							records.push({ kind: 'trash', page: id, prop: null, old: null, new: null });
+						} else {
+							await tx.$executeRawUnsafe('UPDATE page SET deleted_at = NULL, trash_root = NULL WHERE id = ?', id);
+							live.add(id);
+							records.push({ kind: 'restore', page: id, prop: null, old: null, new: null });
+						}
+					} else for (const op of ops()) records.push(...(await applyEavOp(tx, op, eavCtx)));
+					await afterWrite(tx, records, eavCtx);
+				});
+				invalidateRegistry();
+			}
+			const w2: World = { ...world, pages: await readPages(db) };
+			const naive = naiveOf(w2);
+			for (const p of w2.pages) for (const prop of ['ftext', 'fnum', 'fbool', 'fdue', 'ftitles', 'rnum', 'rcount', 'rdue', 'rtags', 'rback', 'rchain', 'fchain'])
+				expect(p.props[prop] ?? null, `${p.id}.${prop}`).toEqual(naive.get(p.id)?.[prop] ?? null);
+			for (let i = 0; i < 80; i++) {
+				const { spec, opts } = randomScenario(r, w2);
+				const failure = await compare(w2, spec, opts);
+				if (failure !== null) {
+					const small = await shrink(w2, spec, opts);
+					throw new Error(`engine differs from the oracle after writes (scenario #${i})\n  first difference: ${failure}\n  shrunk (${small.message}): ${JSON.stringify(small.spec)}`);
+				}
+			}
+		});
+	});
+
+	test('the hourly recompute rewrites now() formulas, and the engine reads the new values', { timeout: 120_000 }, async () => {
+		await inWorkspace(async (_state, db) => {
+			const world = await buildWorld(db, rng(9), { pages: 120 });
+			const before = world.pages.filter((p) => !p.deletedAt);
+			expect(before.every((p) => (p.props.fdate as { start: string }).start === formatDate(NOW, false))).toBe(true);
+			const later = { actorId: 'cron', now: NOW + 3 * 3_600_000 };
+			const changes = await recomputeNowFormulas(db, later);
+			expect(changes.filter((c) => c.prop === 'fdate').length).toBe(before.length);
+			const after = await readPages(db);
+			for (const p of after) {
+				const expected = p.deletedAt ? undefined : { start: formatDate(later.now, false) };
+				if (expected) expect(p.props.fdate).toEqual(expected);
+			}
+			// The oracle recomputes everything at the later time and agrees with every stored value.
+			const naive = naiveOf({ ...world, pages: after }, later.now);
+			for (const p of after.filter((x) => !x.deletedAt)) expect(p.props.fdate ?? null, p.id).toEqual(naive.get(p.id)?.fdate ?? null);
+			// A second recompute at the same instant changes nothing.
+			expect(await recomputeNowFormulas(db, later)).toEqual([]);
+			// The engine filters on the stored value: pages whose now() formula is on or after the later instant.
+			const visible = new Set(after.map((p) => p.num));
+			const res = await runQuery(db, { filter: { and: [{ prop: 'fdate', op: 'on_or_after', value: { kind: 'exact', date: formatDate(later.now, false) } }] } }, { visible, now: later.now });
+			expect(res.total).toBe(before.length);
 		});
 	});
 });

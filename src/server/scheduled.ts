@@ -3,6 +3,7 @@ import { drainOutbox, pruneOutbox, reconcileMemberships } from './auth/outbox';
 import { SWEEP_CRON, sweepUncommittedUploads } from './files/sweep';
 import { reconcileGuests } from './share/guests';
 import { reconcilePublicShares } from './share/public-links';
+import { startPurgeWorkflows } from './workflows/purge';
 
 /** "0 3 * * *": daily purge + nightly reconcile/backups. "0 4 * * SUN": weekly upload sweep. */
 export const NIGHTLY_CRON = '0 3 * * *';
@@ -32,6 +33,14 @@ export async function runNightlyIdentityJobs(env: Env): Promise<void> {
 }
 
 export const scheduled: WorkerScheduled<Env> = async (controller, env, ctx) => {
-	if (controller.cron === NIGHTLY_CRON) ctx.waitUntil(runNightlyIdentityJobs(env));
+	if (controller.cron === NIGHTLY_CRON) {
+		ctx.waitUntil(runNightlyIdentityJobs(env));
+		// Trash older than 30 days, and workspaces deleted more than 30 days ago: the PURGE Workflow per workspace.
+		ctx.waitUntil(
+			startPurgeWorkflows(env)
+				.then((r) => console.log('[cron] purge:', JSON.stringify(r)))
+				.catch((error) => console.error('[cron] purge failed:', error instanceof Error ? (error.stack ?? error.message) : error))
+		);
+	}
 	if (controller.cron === SWEEP_CRON) ctx.waitUntil(sweepUncommittedUploads(env).then((r) => console.log('[cron] upload sweep:', JSON.stringify(r))));
 };

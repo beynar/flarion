@@ -1,8 +1,11 @@
-/** `search` procedures of the private contract. Owner: Accounts, AI, API (P3/P4). Replace stubs with real handlers. */
-import { notImplemented, os } from './base';
+/** `search` procedures of the private contract (Accounts, AI, API, P3). The Workspace DO does the work. */
+import { os, requireWorkspace } from './base';
 
 export const searchHandlers = {
-	query: os.search.query.handler(() => notImplemented('search.query')),
-	quick: os.search.quick.handler(() => notImplemented('search.quick')),
-	visit: os.search.visit.handler(() => notImplemented('search.visit')),
+	query: os.search.query.use(requireWorkspace).handler(({ input, context }) => context.workspace.searchQuery(context.actor, input)),
+	quick: os.search.quick.use(requireWorkspace).handler(({ input, context }) => context.workspace.searchQuick(context.actor, input)),
+	visit: os.search.visit.use(requireWorkspace).handler(async ({ input, context }) => {
+		await context.workspace.searchVisit(context.actor, input.id);
+		return {};
+	})
 };

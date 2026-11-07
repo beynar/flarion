@@ -2,6 +2,8 @@
 	import { goto } from '$app/navigation';
 	import { page as route } from '$app/state';
 	import Editor from '#lib/components/editor/Editor.svelte';
+	import HistoryPanel from '#lib/components/history/HistoryPanel.svelte';
+	import type { EdytorInstance } from 'edytor';
 	import { createCoverUploader } from '#lib/components/editor/uploads.ts';
 	import PageHeader from '#lib/components/page-header/PageHeader.svelte';
 	import type { PageHeaderAccess } from '#lib/components/page-header/types.ts';
@@ -10,6 +12,8 @@
 	import { useWorkspace } from '#lib/client/workspace.svelte.ts';
 	import DocumentPlaceholder from '#lib/components/shell/DocumentPlaceholder.svelte';
 	import PropertiesPanel from '#lib/components/properties/PropertiesPanel.svelte';
+	import PageUnavailable from '#lib/components/trash/PageUnavailable.svelte';
+	import ViewHost from '#lib/components/views/ViewHost.svelte';
 
 	const store = useWorkspace();
 	const ws = $derived(route.params.ws ?? store.workspace.slug);
@@ -37,12 +41,25 @@
 		if (pageId) store.reveal(pageId);
 	});
 
+	// A database's own page: its views fill the page (the view in `?v=`, so a link keeps it).
+	const isDatabase = $derived(!!entity?.isDatabase);
+	const viewParam = $derived(route.url.searchParams.get('v'));
+	const pickView = (id: string) => {
+		const url = new URL(route.url.href);
+		url.searchParams.set('v', id);
+		void goto(url, { replace: true, reset: false });
+	};
+
 	// The header calls the protocol's `update` level "write".
 	const headerAccess = $derived<PageHeaderAccess>(entity?.access === 'update' ? 'write' : (entity?.access ?? 'read'));
 	const readonly = $derived(!entity || entity.access === 'read' || entity.access === 'comment');
 	const me = $derived({ id: store.user.id, name: store.user.name, color: userColor(store.user.id) });
 	// Mock mode has no page rooms: the static document stands in for the editor.
 	const mock = isMock();
+
+	// The open editor: the history panel compares versions with the page as it is now.
+	let edytor = $state<EdytorInstance>();
+	const canRestore = $derived(entity?.access === 'update' || entity?.access === 'full');
 
 	const guard = <T,>(p: Promise<T>) => p.catch(() => undefined);
 	// Covers and inline images go through the files flow (R2); databases are what a linked view can point at.
@@ -67,13 +84,27 @@
 			onIcon={(icon) => guard(store.setPage(pageId, { icon }))}
 			onCover={(cover) => guard(store.setPage(pageId, { cover }))}
 			{uploadCover}
+			wide={isDatabase}
 		>
 			{#snippet properties()}
-				<PropertiesPanel {store} page={entity} />
+				{#if !isDatabase}<PropertiesPanel {store} page={entity} />{/if}
 			{/snippet}
 		</PageHeader>
 
-		{#if mock}
+		{#if isDatabase}
+			<div class="mx-auto w-full px-[var(--app-page-padding-x-narrow)] pb-24 md:px-[var(--app-page-padding-x)]" data-testid="database-page">
+				<ViewHost
+					workspaceId={store.workspace.id}
+					collectionId={pageId}
+					viewId={viewParam}
+					localFilter={null}
+					{readonly}
+					href={(id) => `/${ws}/${id}`}
+					onViewChange={pickView}
+					fullPage
+				/>
+			</div>
+		{:else if mock}
 			<DocumentPlaceholder />
 		{:else}
 			<Editor
@@ -94,18 +125,13 @@
 				searchPeople={async (q) => store.searchPeople(q).map((m) => ({ id: m.id, name: m.name }))}
 				resolvePerson={(id) => store.members.find((m) => m.userId === id)}
 				onNavigate={(id) => goto(`/${ws}/${id}`)}
+				bind:edytor
 			/>
+			<HistoryPanel {pageId} {edytor} {canRestore} resolvePerson={(id) => store.members.find((m) => m.userId === id)} />
 		{/if}
 	{/key}
 {:else if unavailable}
-	<div class="mx-auto mt-24 flex max-w-[420px] flex-col items-center gap-2 px-6 text-center" role="alert" data-testid="page-unavailable">
-		<div class="text-5xl">🔎</div>
-		<h1 class="text-xl font-semibold">This page doesn't exist</h1>
-		<p class="text-sm text-[color:var(--app-text-secondary)]">
-			It may have been moved to the trash, or you may not have access.
-		</p>
-		<a href={`/${ws}`} class="text-sm text-[color:var(--app-accent)]">Back to home</a>
-	</div>
+	<PageUnavailable {store} {pageId} {ws} />
 {:else}
 	<div class="mx-auto w-full max-w-[var(--app-page-width)] px-[var(--app-page-padding-x-narrow)] pt-24 md:px-[var(--app-page-padding-x)]" aria-busy="true">
 		<div class="mb-4 h-12 w-2/3 animate-pulse rounded bg-[color:var(--app-hover)]"></div>

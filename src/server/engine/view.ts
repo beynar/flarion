@@ -17,7 +17,7 @@ import type { Values, ViewRow } from '../../lib/shared/protocol';
 import { MAX_WINDOW } from '../../lib/shared/protocol';
 import type { AccessLevel } from '../db/workspace.schema';
 import type { WorkspaceDb } from '../db/workspace.client';
-import { readCollection } from '../objects/workspace/eav';
+import { decorateValues, readCollection, usesNow } from '../objects/workspace/eav';
 import { loadEavRegistry } from '../objects/workspace/eav/registry';
 import { all, chunks, qmarks } from '../objects/workspace/eav/sql';
 import { WorkspaceError, notFound } from '../objects/workspace/errors';
@@ -95,11 +95,16 @@ async function viewRows(db: WorkspaceDb, refs: readonly RowRef[], props: readonl
 		for (const r of rows) byNum.set(r.num, r);
 	}
 	const want = props ? new Set(props) : null;
-	const out: ViewRow[] = [];
-	for (const ref of refs) {
+	// Display values: relations to tombstones read as gone, two-way relations show their reverse side.
+	const registry = await loadEavRegistry(db);
+	const entries = refs.flatMap((ref) => {
 		const r = byNum.get(ref.num);
-		if (!r) continue;
-		let values = parseValues(r.props_json);
+		return r ? [{ ref, r, row: { id: r.id, num: ref.num, values: parseValues(r.props_json) } }] : [];
+	});
+	await decorateValues(db, registry, entries.map((e) => e.row), want);
+	const out: ViewRow[] = [];
+	for (const { ref, r, row } of entries) {
+		let values = row.values;
 		if (want) values = Object.fromEntries(Object.entries(values).filter(([k]) => want.has(k))) as Values;
 		const access = ctx.levels?.get(ref.num) ?? ctx.fallbackLevel;
 		out.push({ id: r.id, title: r.title, icon: r.icon, cover: r.cover, values, ...(access ? { access } : {}) });
@@ -119,6 +124,11 @@ export async function queryViewRows(db: WorkspaceDb, input: QueryViewInput, ctx:
 	const client = { ...(input.spec ?? {}), ...(input.spec?.groupBy === null ? { groupBy: undefined } : {}) } as QuerySpec;
 	const checked = validateQuerySpec(client, registry);
 	if (!checked.ok) throw new WorkspaceError('VALIDATION_FAILED', 'Validation failed', checked.issues.map((i) => ({ ...i, path: `/spec${i.path}` })));
+	const primary = client.sorts?.[0];
+	if (primary && (await usesNow(db, primary.prop)))
+		throw new WorkspaceError('VALIDATION_FAILED', 'Validation failed', [
+			{ path: '/spec/sorts/0/prop', code: 'now_sort', message: 'A formula that reads now() cannot be the primary sort of a view' }
+		]);
 	if (input.localFilter) {
 		const f = validateFilter(input.localFilter, registry);
 		if (!f.ok) throw new WorkspaceError('VALIDATION_FAILED', 'Validation failed', f.issues.map((i) => ({ ...i, path: `/localFilter${i.path}` })));

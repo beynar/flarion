@@ -2,7 +2,7 @@ import { runInDurableObject } from 'cloudflare:test';
 import { createMigrationClient } from 'viborm/migrations';
 import { createWorkspaceClient, type WorkspaceClient } from '../../../src/server/db/workspace.client';
 import { WORKSPACE_TABLES } from '../../../src/server/db/workspace.schema';
-import { applyEavOp, invalidateRegistry, type ChangeRecord, type EavOp, type EavOpContext } from '../../../src/server/objects/workspace/eav';
+import { afterWrite, applyEavOp, invalidateRegistry, type ChangeRecord, type EavOp, type EavOpContext } from '../../../src/server/objects/workspace/eav';
 import { ensureEavLayout } from '../../../src/server/objects/workspace/eav/layout';
 import type { PropertyDef } from '../../../src/lib/shared/property-types';
 import { testEnv } from '../helpers';
@@ -35,12 +35,16 @@ export async function seedPage(db: WorkspaceClient, id: string, num: number, ext
 	);
 }
 
-/** Applies ops in one transaction (all or nothing), like the Sync core's mutation path. */
+/**
+ * Applies ops in one transaction (all or nothing), like the Sync core's mutation path: every op, then
+ * `afterWrite` with the records they produced. The returned list includes the computed records.
+ */
 export async function apply(db: WorkspaceClient, ops: EavOp[], context: EavOpContext = ctx): Promise<ChangeRecord[]> {
 	try {
 		return await db.$transaction(async (tx) => {
 			const out: ChangeRecord[] = [];
 			for (const op of ops) out.push(...(await applyEavOp(tx, op, context)));
+			out.push(...(await afterWrite(tx, out, context)));
 			return out;
 		});
 	} finally {

@@ -23,6 +23,9 @@ import {
 	updateProperty,
 	updateView
 } from './definitions';
+import { afterWriteImpl } from './propagate';
+import { recomputeNowFormulasImpl } from './now';
+import { decorateValues } from './relations';
 import { loadEavRegistry, invalidateRegistry as invalidate } from './registry';
 import { MAX_PARAMS, all, chunks, qmarks } from './sql';
 import { applyValueOpTx, writeInitialValuesTx } from './values';
@@ -150,18 +153,24 @@ export function writeInitialValues(
 	return writeInitialValuesTx(tx, pageId, values, ctx);
 }
 
-/** Read display values (from `props_json`, live properties only) for pages. Unknown pages are absent. */
+/**
+ * Read display values (from `props_json`, live properties only) for pages. Unknown pages are absent. Relations
+ * to tombstones read as gone (the dead ids are dropped; a relation left with no live target is `null`, a to-one
+ * relation to a deleted page: "Deleted page"), and a two-way relation's synthetic reverse property is filled in
+ * by a range scan of `p_ref` on `(prop, v)`.
+ */
 export async function readValues(db: WorkspaceDb, pageIds: string[]): Promise<Map<string, Values>> {
 	const out = new Map<string, Values>();
 	if (pageIds.length === 0) return out;
 	const registry = await loadEavRegistry(db);
+	const rows: { id: string; num: number; values: Values }[] = [];
 	for (const part of chunks([...new Set(pageIds)], MAX_PARAMS)) {
-		const rows = await all<{ id: string; props_json: string }>(
+		const found = await all<{ id: string; num: number; props_json: string }>(
 			db,
-			`SELECT id, props_json FROM page WHERE id IN (${qmarks(part.length)})`,
+			`SELECT id, num, props_json FROM page WHERE id IN (${qmarks(part.length)})`,
 			...part
 		);
-		for (const r of rows) {
+		for (const r of found) {
 			let props: Values = {};
 			try {
 				props = JSON.parse(r.props_json) as Values;
@@ -170,9 +179,11 @@ export async function readValues(db: WorkspaceDb, pageIds: string[]): Promise<Ma
 			}
 			const live: Values = {};
 			for (const [k, val] of Object.entries(props)) if (registry.get(k)) live[k] = val;
-			out.set(r.id, live);
+			rows.push({ id: r.id, num: r.num, values: live });
 		}
 	}
+	await decorateValues(db, registry, rows);
+	for (const r of rows) out.set(r.id, r.values);
 	return out;
 }
 
@@ -181,6 +192,9 @@ export { TITLE_NUM, loadEavRegistry, type EavRegistry } from './registry';
 export { selectivity, valueCountOf, totalCountOf } from './counts';
 export { defaultsForView, defaultsForCollection, deriveDefaults, type ViewDefaults } from './defaults';
 export { ensureEavLayout } from './layout';
+export { usesNow } from './now';
+export { decorateValues, liveIds } from './relations';
+export { ensureDependencyTable } from './dependency';
 export { reverseRelation, purgePageEav, writeComputedValue } from './values';
 export {
 	readProperties,
@@ -194,22 +208,26 @@ export {
 
 /**
  * Called by the Sync core inside `apply()`'s transaction after all ops of a batch ran, with every
- * record they produced. Recomputes rollups/formulas (and AI-property invalidation markers) of pages
- * that depend on the written properties via the `dependency` graph and the reverse relation scan,
- * writes computed rows, and returns the extra records so they flow through the same live loop.
+ * record they produced. Recomputes rollups and formulas of the pages that depend on the written properties and
+ * returns the extra records, so they flow through the same live loop (`seq`, subscriptions, search).
+ *
+ * Algorithm (`propagate.ts`): each record marks (property, page) pairs dirty through the `dependency` graph (the
+ * same page for formulas; the pages the reverse relation scan leads to for rollups), then the computed
+ * properties are visited by topological rank: recompute the dirty pages, write computed rows where the value
+ * changed, and mark the dependents of the pages that changed. A chain settles in one pass and an unchanged value
+ * stops it. Handled records: `setProp` (relation edits included, with the former targets), `create`, `trash` and
+ * `restore` (rollups skip tombstones), `updateProperty` (option renames). Definition ops compute their own
+ * property when they run. AI-property invalidation markers are not part of this phase.
  */
-export async function afterWrite(
-	_tx: WorkspaceTx,
-	_records: ChangeRecord[],
-	_ctx: EavOpContext
-): Promise<ChangeRecord[]> {
-	return [];
+export async function afterWrite(tx: WorkspaceTx, records: ChangeRecord[], ctx: EavOpContext): Promise<ChangeRecord[]> {
+	return afterWriteImpl(tx, records, ctx);
 }
 
 /**
  * Called hourly by the Workspace DO alarm (Sync core) outside any open transaction: recompute
- * formulas that read `now()` and return the change records to publish.
+ * formulas that read `now()` (and what depends on them) on the live pages, in one transaction, and return the
+ * change records to publish.
  */
-export async function recomputeNowFormulas(_db: WorkspaceDb, _ctx: EavOpContext): Promise<ChangeRecord[]> {
-	return [];
+export async function recomputeNowFormulas(db: WorkspaceDb, ctx: EavOpContext): Promise<ChangeRecord[]> {
+	return recomputeNowFormulasImpl(db, ctx);
 }

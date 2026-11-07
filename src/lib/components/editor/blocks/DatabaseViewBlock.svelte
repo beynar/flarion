@@ -7,8 +7,6 @@
 	import { untrack } from 'svelte';
 	import type { BlockView } from 'edytor';
 	import ViewHost from '#lib/components/views/ViewHost.svelte';
-	import { createRpc } from '#lib/client/rpc.ts';
-	import type { ViewDef } from '#lib/shared/definitions.ts';
 	import type { FilterGroup } from '#lib/shared/filter-ast.ts';
 	import { getEditorContext, type DatabaseRef } from '../context.ts';
 
@@ -58,20 +56,7 @@
 		]);
 	}
 
-	// ───────────── the view switcher ─────────────
-	let views = $state<ViewDef[]>([]);
-	$effect(() => {
-		const id = collectionId;
-		const workspaceId = ctx?.workspaceId;
-		if (!id || !workspaceId) return void (views = []);
-		let current = true;
-		createRpc({ getWorkspaceId: () => workspaceId })
-			.view.list({ collectionId: id })
-			.then((list) => current && (views = list))
-			.catch(() => current && (views = []));
-		return () => (current = false);
-	});
-
+	// ───────────── the view switcher (the host's tab bar) ─────────────
 	const pickView = (id: string) => {
 		if (readonly) return;
 		edytorOf()?.patchData(block.id, [{ path: ['viewId'], value: id }]);
@@ -92,20 +77,6 @@
 				{#if page?.icon}<span aria-hidden="true">{page.icon}</span>{:else}<span aria-hidden="true">▦</span>{/if}
 				<span>{page ? page.title || 'Untitled' : 'Database'}</span>
 			</a>
-			{#if views.length > 1}
-				<div class="views" role="tablist" aria-label="Views">
-					{#each views as view (view.id)}
-						<button
-							type="button"
-							role="tab"
-							class="tab"
-							aria-selected={(viewId ?? views[0]?.id) === view.id}
-							disabled={readonly}
-							onclick={() => pickView(view.id)}>{view.name}</button
-						>
-					{/each}
-				</div>
-			{/if}
 			<span class="spacer"></span>
 			{#if !readonly}
 				<button type="button" class="link" onclick={unlink} data-testid="database-unlink" title="Show a different database">Change</button>
@@ -118,6 +89,7 @@
 			localFilter={data.localFilter ?? null}
 			{readonly}
 			href={ctx.href}
+			onViewChange={pickView}
 		/>
 	</div>
 {:else}
@@ -172,21 +144,6 @@
 	}
 	.name:hover {
 		text-decoration: underline;
-	}
-	.views {
-		display: inline-flex;
-		gap: 2px;
-	}
-	.tab {
-		padding: 2px 8px;
-		border-radius: var(--app-radius-control);
-		color: var(--app-text-secondary);
-		font-size: 13px;
-		cursor: pointer;
-	}
-	.tab[aria-selected='true'] {
-		background: var(--app-hover);
-		color: var(--app-text);
 	}
 	.spacer {
 		flex: 1;

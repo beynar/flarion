@@ -11,6 +11,9 @@ import type {
 	ViewRow,
 	Values
 } from '../../../lib/shared/protocol';
+import type { WorkspaceDb } from '../../db/workspace.client';
+import { decorateValues } from './eav/relations';
+import { loadEavRegistry } from './eav/registry';
 import { chunks, MAX_PARAMS, qmarks } from './util';
 
 interface PageSqlRow extends Record<string, SqlStorageValue> {
@@ -51,12 +54,90 @@ export type AccessOf = (num: number) => Access;
 
 export class RowReader {
 	readonly #sql: SqlStorage;
-	constructor(sql: SqlStorage) {
+	readonly #db: WorkspaceDb;
+	constructor(sql: SqlStorage, db: WorkspaceDb) {
 		this.#sql = sql;
+		this.#db = db;
 	}
 
 	#all<T extends Record<string, SqlStorageValue>>(query: string, ...params: unknown[]): T[] {
 		return this.#sql.exec<T>(query, ...params).toArray();
+	}
+
+	// ───────────────────────── relations to trashed pages ─────────────────────────
+
+	#forward: { id: string; num: number; reverse: string | null }[] | null = null;
+
+	/** Forget the cached property list (a definition changed). */
+	invalidate(): void {
+		this.#forward = null;
+	}
+
+	/**
+	 * The live forward relation properties and the id of their reverse side, when the relation is two-way.
+	 * The registry decides what a relation cell shows (`decorateValues`): tombstoned targets drop out of it.
+	 */
+	forwardRelations(): readonly { id: string; num: number; reverse: string | null }[] {
+		if (!this.#forward) {
+			const rows = this.#all<{ id: string; num: number; config_json: string }>(
+				"SELECT id, num, config_json FROM property WHERE type = 'relation' AND deleted_at IS NULL"
+			);
+			const cfg = (json: string): { reverseOf?: string } => {
+				try {
+					return JSON.parse(json) as { reverseOf?: string };
+				} catch {
+					return {};
+				}
+			};
+			const reverseOf = new Map<string, string>();
+			for (const r of rows) {
+				const of = cfg(r.config_json).reverseOf;
+				if (of) reverseOf.set(of, r.id);
+			}
+			this.#forward = rows.filter((r) => !cfg(r.config_json).reverseOf).map((r) => ({ id: r.id, num: r.num, reverse: reverseOf.get(r.id) ?? null }));
+		}
+		return this.#forward;
+	}
+
+	/** Relation cells and reverse sides of `rows`, as the registry reads them (tombstoned targets dropped). */
+	async #decorate(rows: { id: string; num: number; values: Values }[], want?: ReadonlySet<string> | null): Promise<void> {
+		if (rows.length === 0) return;
+		await decorateValues(this.#db, await loadEavRegistry(this.#db), rows, want);
+	}
+
+	/**
+	 * Pages whose relation cells change when `targets` (the pages of a trashed or restored subtree) change state,
+	 * as `[page id, property id]`: the pages that point at them, and (for two-way relations) the pages they
+	 * point at, whose reverse side lists them.
+	 */
+	relationHolders(targets: readonly string[]): [string, string][] {
+		const props = this.forwardRelations();
+		if (props.length === 0 || targets.length === 0) return [];
+		const out: [string, string][] = [];
+		const byId = this.nums(targets);
+		const nums = [...byId.values()];
+		for (const p of props) {
+			for (const part of chunks(nums.map(String), MAX_PARAMS - 1)) {
+				for (const r of this.#all<{ id: string }>(
+					`SELECT h.id AS id FROM p_ref r JOIN page h ON h.num = r.page WHERE r.prop = ? AND r.v IN (${qmarks(part.length)})`,
+					p.num,
+					...part
+				)) {
+					out.push([r.id, p.id]);
+				}
+			}
+			if (!p.reverse) continue;
+			for (const part of chunks(nums, MAX_PARAMS - 1)) {
+				for (const r of this.#all<{ id: string }>(
+					`SELECT DISTINCT t.id AS id FROM p_ref r JOIN page t ON t.num = CAST(r.v AS INTEGER) WHERE r.prop = ? AND r.page IN (${qmarks(part.length)})`,
+					p.num,
+					...part
+				)) {
+					out.push([r.id, p.reverse]);
+				}
+			}
+		}
+		return out;
 	}
 
 	// ───────────────────────── unit evaluation (ordered ids) ─────────────────────────
@@ -91,26 +172,6 @@ export class RowReader {
 		).map((r) => r.id);
 	}
 
-	/**
-	 * P1 stub of a view: the collection's hand-picked members in their manual order, then the child pages
-	 * of the database page (the classic child database). No filter, no sort: the P2/P3 engine replaces it.
-	 */
-	viewIds(collectionId: string): string[] {
-		const collection = this.#all<{ page_id: string; deleted_at: string | null }>(
-			'SELECT page_id, deleted_at FROM collection WHERE id = ?',
-			collectionId
-		)[0];
-		if (!collection || collection.deleted_at) return [];
-		const members = this.#all<{ id: string }>(
-			`SELECT p.id AS id FROM collection_member m JOIN page p ON p.id = m.page_id
-			 WHERE m.collection_id = ? AND p.deleted_at IS NULL ORDER BY m.rank, p.id`,
-			collectionId
-		).map((r) => r.id);
-		const seen = new Set(members);
-		const children = this.treeIds(collection.page_id).filter((id) => !seen.has(id));
-		return [...members, ...children];
-	}
-
 	collectionExists(collectionId: string): boolean {
 		return (
 			this.#all<{ n: number }>('SELECT COUNT(*) AS n FROM collection WHERE id = ? AND deleted_at IS NULL', collectionId)[0]
@@ -143,27 +204,34 @@ export class RowReader {
 		return out;
 	}
 
-	pageRows(ids: readonly string[], access: AccessOf): Map<string, PageRow> {
+	async pageRows(ids: readonly string[], access: AccessOf): Promise<Map<string, PageRow>> {
 		const out = new Map<string, PageRow>();
+		const decorated: { id: string; num: number; values: Values }[] = [];
 		for (const [id, r] of this.#pageRows(ids)) {
+			const values = parseValues(r.props_json);
+			decorated.push({ id, num: r.num, values });
 			out.set(id, {
 				...toTreeRow(r, access),
 				cover: r.cover,
-				values: parseValues(r.props_json),
+				values,
 				createdAt: r.created_at ?? '',
 				updatedBy: r.updated_by ?? r.created_by,
 				updatedAt: r.updated_at ?? r.created_at ?? ''
 			});
 		}
+		await this.#decorate(decorated);
 		return out;
 	}
 
-	viewRows(ids: readonly string[], access: AccessOf, props?: readonly string[]): Map<string, ViewRow> {
+	async viewRows(ids: readonly string[], access: AccessOf, props?: readonly string[]): Promise<Map<string, ViewRow>> {
+		const rows = this.#pageRows(ids);
+		const decorated = [...rows].map(([id, r]) => ({ id, num: r.num, values: parseValues(r.props_json) }));
+		await this.#decorate(decorated, props ? new Set(props) : null);
 		const out = new Map<string, ViewRow>();
-		for (const [id, r] of this.#pageRows(ids)) {
-			let values = parseValues(r.props_json);
-			if (props) values = Object.fromEntries(Object.entries(values).filter(([k]) => props.includes(k)));
-			out.set(id, { id, title: r.title, icon: r.icon, cover: r.cover, values, access: access(r.num) });
+		for (const d of decorated) {
+			const r = rows.get(d.id) as PageSqlRow;
+			const values = props ? Object.fromEntries(Object.entries(d.values).filter(([k]) => props.includes(k))) : d.values;
+			out.set(d.id, { id: d.id, title: r.title, icon: r.icon, cover: r.cover, values, access: access(r.num) });
 		}
 		return out;
 	}
@@ -189,12 +257,16 @@ export class RowReader {
 		return out;
 	}
 
-	/** Current display value of one property of several pages, for `update` ops (title included). */
-	currentValues(ids: readonly string[]): Map<string, { title: string; icon: string | null; cover: string | null; values: Values }> {
+	/** Current display values of several pages, for `update` ops (title included). */
+	async currentValues(ids: readonly string[]): Promise<Map<string, { title: string; icon: string | null; cover: string | null; values: Values }>> {
 		const out = new Map<string, { title: string; icon: string | null; cover: string | null; values: Values }>();
+		const decorated: { id: string; num: number; values: Values }[] = [];
 		for (const [id, r] of this.#pageRows(ids)) {
-			out.set(id, { title: r.title, icon: r.icon, cover: r.cover, values: parseValues(r.props_json) });
+			const values = parseValues(r.props_json);
+			decorated.push({ id, num: r.num, values });
+			out.set(id, { title: r.title, icon: r.icon, cover: r.cover, values });
 		}
+		await this.#decorate(decorated);
 		return out;
 	}
 

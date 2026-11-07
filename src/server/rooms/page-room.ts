@@ -1,0 +1,38 @@
+/**
+ * A typed handle on a page's room (its Page Durable Object) for the RPC layer. Durable Object RPC reaches only
+ * `PageDO`'s own methods, and edytor's generated RPC types are too deep for tsc, so the surface the Worker uses is
+ * written down here once.
+ */
+import type { JSONDoc } from 'edytor/crdt/edytor';
+import type { CommitResult, ExportedBlocks, HistoryEntry, ImportReceipt, ImportRequest, RestoreResult } from 'edytor/cloudflare';
+import type { PageLockState } from '../objects/page/page-do';
+import { roomName } from './names';
+
+export interface PageRoomApi {
+	recordIdentity(workspaceId: string, pageId: string): Promise<void>;
+	read(): Promise<JSONDoc>;
+	seedFrom(json: JSONDoc): Promise<{ seeded: boolean }>;
+	lockState(userId?: string): Promise<PageLockState>;
+	listHistory(): Promise<HistoryEntry[]>;
+	readHistory(key: string): Promise<JSONDoc | null>;
+	restoreHistory(key: string, user?: string): Promise<RestoreResult>;
+	undoRestore(user?: string): Promise<{ status: 'applied' | 'noop' }>;
+	historyWritten(): Promise<void>;
+	closeHistorySlot(): Promise<void>;
+	exportBlocks(ids: string[]): Promise<ExportedBlocks>;
+	importBlocks(request: ImportRequest): Promise<ImportReceipt>;
+	commitMove(moveId: string, receipt: { to: string; ids: Record<string, string> }): Promise<CommitResult>;
+	abortMove(moveId: string): Promise<{ moveId: string; status: 'applied' | 'noop' }>;
+	purge(): Promise<{ r2Deleted: number; sockets: number }>;
+}
+
+/**
+ * The room of `workspaceId`/`pageId`, told who it is first (a stub does not always carry the object's name, see
+ * `recordPageMeta`). Idempotent. The stub comes back inside an object, never as the awaited value itself: a stub is
+ * thenable over RPC, and the dev server's platform proxy cannot carry one across a promise.
+ */
+export async function openPageRoom(env: Pick<Env, 'PAGE'>, workspaceId: string, pageId: string): Promise<{ room: PageRoomApi }> {
+	const room = env.PAGE.getByName(roomName(workspaceId, pageId)) as unknown as PageRoomApi;
+	await room.recordIdentity(workspaceId, pageId);
+	return { room };
+}

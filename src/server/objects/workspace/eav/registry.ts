@@ -2,6 +2,7 @@ import * as v from 'valibot';
 import {
 	TITLE_PROP_ID,
 	createRegistry,
+	reverseIdOf,
 	propertyDefSchema,
 	type PropertyDef,
 	type PropertyRegistry
@@ -17,6 +18,11 @@ export interface EavRegistry extends PropertyRegistry {
 	/** The EAV `prop` number of a property id. */
 	num(id: string): number | undefined;
 	idOfNum(num: number): string | undefined;
+	/**
+	 * For the id of a two-way relation's synthetic reverse property (`<id>:reverse`): the relation it mirrors.
+	 * The reverse side has no EAV rows of its own (`num` of it is undefined): it is a scan of the relation's.
+	 */
+	reverseOf(id: string): PropertyDef | undefined;
 }
 
 export const TITLE_DEF: PropertyDef = { id: TITLE_PROP_ID, name: 'Title', type: 'title', config: {} };
@@ -59,8 +65,21 @@ export async function readRegistry(db: WorkspaceDb): Promise<EavRegistry> {
 		nums.set(row.id, row.num);
 		ids.set(row.num, row.id);
 	}
+	// A two-way relation shows its reverse side on the target pages as a synthetic property, after the real ones.
+	const reverses = new Map<string, PropertyDef>();
+	for (const def of [...defs]) {
+		if (def.type !== 'relation' || !def.config.twoWay) continue;
+		const id = reverseIdOf(def.id);
+		reverses.set(id, def);
+		defs.push({
+			id,
+			name: def.config.reverseName ?? `${def.name} (reverse)`,
+			type: 'relation',
+			config: { collectionId: null, limit: 'many', reverseOf: def.id }
+		});
+	}
 	const base = createRegistry(defs);
-	return { get: base.get, all: base.all, num: (id) => nums.get(id), idOfNum: (n) => ids.get(n) };
+	return { get: base.get, all: base.all, num: (id) => nums.get(id), idOfNum: (n) => ids.get(n), reverseOf: (id) => reverses.get(id) };
 }
 
 // Cache: one registry per db object (a transaction object lives for one transaction; the client lives for

@@ -7,11 +7,25 @@
 	import { iconOf, linkIcon } from './icons.js';
 	import type { ToolbarController } from 'edytor';
 	import { PALETTE } from './palette.js';
+	import { AI_ACTIONS, type AiSpec } from '../ai/actions.ts';
+	import { aiOffered, aiRuntime } from '../ai/state.svelte.ts';
 
 	/** Notion's selection toolbar, drawn for `createToolbarPlugin({ toolbar })`. */
 	let { controller }: { controller: ToolbarController } = $props();
 
 	const labels = $derived(words.toolbar);
+
+	// Write with AI: the selection toolbar's panel (the same actions as `/ai`), shown while AI is offered (docs/PLAN.md "AI features").
+	let aiOpen = $state(false);
+	const aiRows = AI_ACTIONS.filter((spec) => spec.toolbar);
+	const keep = (event: MouseEvent) => event.preventDefault();
+	$effect(() => {
+		if (controller.panel) aiOpen = false;
+	});
+	function runAi(spec: AiSpec) {
+		aiOpen = false;
+		void aiRuntime.current?.run(spec);
+	}
 </script>
 
 <!--
@@ -75,7 +89,38 @@
 			onclick={() => controller.togglePanel('color')}
 			>A<span class="toolbar-chevron" aria-hidden="true"></span></Button
 		>
+		{#if aiOffered()}
+			<span class="toolbar-divider" aria-hidden="true"></span>
+			<Button
+				variant="ghost"
+				class="toolbar-ai"
+				data-stop="ai"
+				data-testid="toolbar-ai"
+				aria-haspopup="menu"
+				aria-expanded={aiOpen}
+				title="Write with AI"
+				onmousedown={keep}
+				onclick={() => (aiOpen = !aiOpen)}
+				>✨ AI<span class="toolbar-chevron" aria-hidden="true"></span></Button
+			>
+		{/if}
 	</div>
+
+	{#if aiOpen && aiOffered() && !controller.panel}
+		<div class="toolbar-panel" role="menu" aria-label="Write with AI" data-testid="toolbar-ai-panel" tabindex="-1" onmousedown={keep}>
+			<div class="toolbar-heading">Write with AI</div>
+			{#each aiRows as spec (spec.id)}
+				<Button
+					variant="ghost"
+					role="menuitem"
+					class="toolbar-row"
+					data-testid={`toolbar-ai-${spec.id}`}
+					style={css({ '--toolbar-icon': iconOf('action.ai') })}
+					onclick={() => runAi(spec)}>{spec.label}</Button
+				>
+			{/each}
+		</div>
+	{/if}
 
 	{#if controller.panel === 'turn'}
 		<div class="toolbar-panel" role="menu" aria-label={labels.turnInto}>
@@ -251,6 +296,11 @@
 	.selection-toolbar-frame :global(.mark-code) {
 		font-family: 'SFMono-Regular', Menlo, Consolas, monospace;
 		font-size: 12px;
+	}
+	.selection-toolbar-frame :global(.toolbar-ai) {
+		padding: 0 6px 0 8px;
+		font-weight: 500;
+		color: var(--app-accent);
 	}
 	.selection-toolbar-frame :global(.toolbar-color) {
 		font-weight: 500;

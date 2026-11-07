@@ -324,7 +324,7 @@ describe('reconnect', () => {
 			ws.owner,
 			batch([
 				createOp('db', null, r2, { teamspaceId: ws.generalId, isDatabase: true }),
-				{ op: 'createCollection', id: 'c1', pageId: 'db' },
+				{ op: 'createCollection', id: 'c1', pageId: 'db', sourceAst: { and: [{ prop: '$parent', op: 'is', value: 'db' }] } },
 				createOp('m1', 'db', r1),
 				createOp('quiet', null, r3)
 			])

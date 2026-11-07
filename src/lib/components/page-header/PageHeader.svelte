@@ -28,7 +28,8 @@
 		onIcon,
 		onCover,
 		onEnter,
-		uploadCover
+		uploadCover,
+		wide = false
 	}: {
 		page: PageHeaderPage;
 		access: PageHeaderAccess;
@@ -47,6 +48,8 @@
 		uploadCover?: (file: File) => Promise<string>;
 		/** Enter in the title. Default: focus the editor below (`[data-flarion-editor]`). */
 		onEnter?: () => void;
+		/** The column takes the whole width (a database's own page: its views are as wide as the window). */
+		wide?: boolean;
 	} = $props();
 
 	const editable = $derived(canEditHeader(access));
@@ -255,7 +258,7 @@
 {/if}
 
 <div class="header">
-	<div class="column">
+	<div class="column" class:wide>
 		<div class="top" class:covered={!!cover}>
 			{#if page.icon}
 				{#if editable}
@@ -458,6 +461,10 @@
 		.column {
 			padding-inline: var(--app-page-padding-x);
 		}
+	}
+	.column.wide {
+		max-width: none;
+		box-sizing: border-box;
 	}
 	.top {
 		position: relative;

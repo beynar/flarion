@@ -34,7 +34,7 @@ async function failure(promise: Promise<unknown>) {
 const diffsSince = (log: StreamLog, from: number) =>
 	log.messages.slice(from).filter((m): m is Extract<ServerMessage, { t: 'diff' }> => m.t === 'diff');
 const opsOf = (log: StreamLog, from: number, id: string): DiffOp[] => diffsSince(log, from).flatMap((d) => d.subs.filter((s) => s.id === id).flatMap((s) => s.ops));
-const kinds = (ops: DiffOp[]) => ops.map((o) => (o.op === 'add' || o.op === 'remove' || o.op === 'move' ? `${o.op}:${o.op === 'add' ? o.row.id : o.id}` : o.op === 'update' ? `update:${o.id}:${o.prop}=${String(o.value)}` : `${o.op}:${o.total}`));
+const kinds = (ops: DiffOp[]) => ops.map((o) => (o.op === 'add' || o.op === 'remove' || o.op === 'move' ? `${o.op}:${o.op === 'add' ? o.row.id : o.id}` : o.op === 'update' ? `update:${o.id}:${o.prop}=${String(o.value)}` : o.op === 'groups' ? `groups:${o.keys.join(',')}` : `${o.op}:${o.total}`));
 const settled = async (log: StreamLog) => {
 	const n = await log.settle();
 	return n;

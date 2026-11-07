@@ -9,6 +9,7 @@ import { roomName } from '../rooms/names';
 import type { PageIdentity } from '../objects/page/page-meta';
 import type { PageIndexSource } from '../objects/page/page-do';
 import type { IndexPageJob, PageIndexItem } from './types';
+import { embedPages } from '../search/embed';
 
 export { PAGE_MENTION_PREFIX };
 
@@ -207,6 +208,8 @@ export async function indexPages(
 			try {
 				const workspace = env.WORKSPACE.getByName(workspaceId) as unknown as WorkspaceIngestApi;
 				await workspace.ingestPages(ready.map(({ item }) => item));
+				// Vectorize chunks: never throws, quiet without AI/Vectorize (full-text search is already fresh).
+				await embedPages(env as Env, workspaceId, ready.map(({ item }) => item));
 			} catch (error) {
 				console.warn(`index: ingestPages failed for ${workspaceId}`, String(error));
 				for (const { message } of ready) {

@@ -4,7 +4,9 @@ import { describe, expect, it } from 'vitest';
 import { DAY_MS, formatDate } from '../../../src/lib/shared/dates';
 import {
 	CodecError,
+	MAX_TWO_WAY_ID_LENGTH,
 	PROPERTY_TYPES,
+	ROLLUP_FUNCTIONS,
 	createRegistry,
 	decodeValue,
 	defaultConfig,
@@ -12,11 +14,15 @@ import {
 	encodeValue,
 	filterOpsOf,
 	formatUniqueId,
+	idSchema,
 	isReadOnlyProperty,
+	isReverseId,
 	normalizeValue,
 	parsePropertyConfig,
 	propertyDefSchema,
 	propertyTypes,
+	relationOfReverse,
+	reverseIdOf,
 	sortKeyOf,
 	storageTable,
 	validateValue,
@@ -388,5 +394,31 @@ describe('values', () => {
 		expect(reg.get('p_title')?.type).toBe('title');
 		expect(reg.get('missing')).toBeUndefined();
 		expect(reg.all()).toHaveLength(2);
+	});
+});
+
+describe('two-way relations and rollup functions', () => {
+	it('a relation config carries the two-way flag and the reverse name', () => {
+		const ok = parsePropertyConfig('relation', { collectionId: 'tasks', limit: 'one', twoWay: true, reverseName: 'Projects' });
+		expect(ok).toEqual({ ok: true, value: { collectionId: 'tasks', limit: 'one', twoWay: true, reverseName: 'Projects' } });
+		expect(parsePropertyConfig('relation', { twoWay: 'yes' }).ok).toBe(false);
+		expect(parsePropertyConfig('relation', { reverseName: '' }).ok).toBe(false);
+	});
+
+	it('the synthetic reverse property has an id that is a valid property id', () => {
+		expect(reverseIdOf('rel')).toBe('rel:reverse');
+		expect(isReverseId('rel:reverse')).toBe(true);
+		expect(isReverseId('rel')).toBe(false);
+		expect(isReverseId(':reverse')).toBe(false);
+		expect(relationOfReverse('rel:reverse')).toBe('rel');
+		expect(v.is(idSchema, reverseIdOf('r'.repeat(MAX_TWO_WAY_ID_LENGTH)))).toBe(true);
+		expect(v.is(idSchema, reverseIdOf('r'.repeat(MAX_TWO_WAY_ID_LENGTH + 1)))).toBe(false);
+		const synthetic = v.parse(propertyDefSchema, { id: 'rel:reverse', name: 'Back', type: 'relation', config: { collectionId: null, limit: 'many', reverseOf: 'rel' } });
+		expect(synthetic.type === 'relation' && synthetic.config.reverseOf).toBe('rel');
+	});
+
+	it('rollups can show the original values', () => {
+		expect(ROLLUP_FUNCTIONS).toContain('show_original');
+		expect(parsePropertyConfig('rollup', { relationProp: 'r', targetProp: 't', fn: 'show_original', resultType: 'text' }).ok).toBe(true);
 	});
 });

@@ -22,6 +22,7 @@
 	import type { PageEntity, WorkspaceStore } from '#lib/client/workspace.svelte.ts';
 	import CreateTeamspaceDialog from '#lib/components/teamspaces/CreateTeamspaceDialog.svelte';
 	import TeamspaceSettingsDialog from '#lib/components/teamspaces/TeamspaceSettingsDialog.svelte';
+	import { trashWithUndo } from '#lib/components/trash/trash-actions.ts';
 	import MovePageDialog from './MovePageDialog.svelte';
 	import PresenceAvatars from './PresenceAvatars.svelte';
 	import {
@@ -228,10 +229,7 @@
 
 	async function trash(id: string) {
 		const inside = !!activeId && store.isInside(activeId, id);
-		if (await store.trashPage(id)) {
-			toast.info({ title: 'Moved to Trash', description: 'Restore it from Trash within 30 days.' });
-			if (inside) await goto(`/${ws}`);
-		}
+		await trashWithUndo(store, id, { onTrashed: () => (inside ? goto(`/${ws}`) : undefined) });
 	}
 
 	async function leave(teamspaceId: string) {

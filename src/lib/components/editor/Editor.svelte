@@ -15,6 +15,7 @@
 	import { CLOSE } from '#lib/shared/protocol.ts';
 	import EditorView from './EditorView.svelte';
 	import type { AncestorRef, DatabaseRef } from './context.ts';
+	import { aiState } from './ai/state.svelte.ts';
 	import { pageLocks, rpcLockFetcher, type LockFetcher } from './page-lock.svelte.ts';
 	import type { Unfurl } from './unfurl.ts';
 	import type { PagesSearch, PeopleSearch } from './mentions.ts';
@@ -137,6 +138,13 @@
 		<div class="flarion-editor-banner flarion-editor-lock" role="status" data-testid="editor-locked">
 			<span aria-hidden="true">🔒</span>
 			{lockedOut ? 'This page is locked. Only people with full access can edit it.' : 'This page is locked. You can still edit it because you have full access.'}
+		</div>
+	{/if}
+	{#if aiState.unavailable}
+		<div class="flarion-editor-banner" role="status" data-testid="ai-unavailable">
+			<span aria-hidden="true">✨</span>
+			AI writing is unavailable right now, so it is turned off. Everything else works.
+			<button type="button" data-testid="ai-retry" onclick={() => aiState.reset()}>Try again</button>
 		</div>
 	{/if}
 	{#if failure === 'reload'}

@@ -43,10 +43,10 @@ export type WorkspaceSocket = SocketHandle<WorkspaceSocketActor>;
 
 /** What the router needs from the Workspace DO (implemented by `WorkspaceSocketApi`). */
 export interface SocketApi {
-	hello(socket: WorkspaceSocket, requestId: string, input: HelloInput): void;
-	subscribe(socket: WorkspaceSocket, input: SubscribeInput): void;
+	hello(socket: WorkspaceSocket, requestId: string, input: HelloInput): void | Promise<void>;
+	subscribe(socket: WorkspaceSocket, input: SubscribeInput): void | Promise<void>;
 	unsubscribe(socket: WorkspaceSocket, id: string): void;
-	window(socket: WorkspaceSocket, input: WindowInput): void;
+	window(socket: WorkspaceSocket, input: WindowInput): void | Promise<void>;
 	presence(socket: WorkspaceSocket, pageId: string | null): void;
 	notificationsRead(socket: WorkspaceSocket, ids: string[]): void;
 }
@@ -73,18 +73,20 @@ export const socketRouter = {
 		.input(helloInputSchema)
 		.handler(
 			({ input, context }) =>
-				new HibernationEventIterator<ServerMessage>((requestId) => context.api.hello(context.socket, requestId, input))
+				new HibernationEventIterator<ServerMessage>((requestId) => {
+					void Promise.resolve(context.api.hello(context.socket, requestId, input)).catch((error) => console.error('[workspace] hello failed:', error));
+				})
 		),
-	subscribe: base.input(subscribeInputSchema).handler(({ input, context }) => {
-		context.api.subscribe(context.socket, input);
+	subscribe: base.input(subscribeInputSchema).handler(async ({ input, context }) => {
+		await context.api.subscribe(context.socket, input);
 		return ack;
 	}),
 	unsubscribe: base.input(unsubscribeInputSchema).handler(({ input, context }) => {
 		context.api.unsubscribe(context.socket, input.id);
 		return ack;
 	}),
-	window: base.input(windowInputSchema).handler(({ input, context }) => {
-		context.api.window(context.socket, input);
+	window: base.input(windowInputSchema).handler(async ({ input, context }) => {
+		await context.api.window(context.socket, input);
 		return ack;
 	}),
 	presence: base.input(presenceInputSchema).handler(({ input, context }) => {

@@ -202,6 +202,8 @@ export function checkWrite(
 	input: { kind: 'set'; value: unknown } | { kind: 'value-op'; op: ValueOp }
 ): PropValue | null {
 	if (isReadOnlyProperty(def)) throwIssues('read_only', [issue('', 'read_only', `${def.type} properties cannot be written`)], '/prop');
+	if (def.type === 'relation' && def.config.reverseOf)
+		throwIssues('read_only', [issue('', 'read_only', 'The reverse side of a two-way relation is computed: edit the relation')], '/prop');
 	let next: PropValue | null;
 	if (input.kind === 'value-op') {
 		const r = applyValueOp(def, current, input.op);

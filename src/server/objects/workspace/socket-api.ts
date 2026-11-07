@@ -36,6 +36,10 @@ export interface SocketApiDeps {
 	/** Every socket with a stream. */
 	streams(): string[];
 	now(): number;
+	/** Runs `work` in the Workspace DO's queue of commits and socket messages. */
+	serialize?<T>(work: () => Promise<T>): Promise<T>;
+	/** Why a view subscription is refused (a primary sort that reads the clock...), or nothing. */
+	checkView?(sub: Extract<Subscription, { kind: 'view' }>): Promise<string | null | undefined>;
 }
 
 export class WorkspaceSocketApi implements SocketApi {
@@ -53,7 +57,14 @@ export class WorkspaceSocketApi implements SocketApi {
 		return { userId: socket.actor.userId, name: socket.actor.name, color: presenceColor(socket.actor.userId), avatar: null };
 	}
 
-	hello(socket: WorkspaceSocket, requestId: string, input: HelloInput): void {
+	async hello(socket: WorkspaceSocket, requestId: string, input: HelloInput): Promise<void> {
+		// A raw `hello` frame already runs in the commits' queue; the oRPC `hello` hands its stream over to a
+		// callback after the message was handled, so it takes its place in the queue here.
+		if (requestId !== RAW_STREAM && this.#d.serialize) return this.#d.serialize(() => this.#hello(socket, requestId, input));
+		return this.#hello(socket, requestId, input);
+	}
+
+	async #hello(socket: WorkspaceSocket, requestId: string, input: HelloInput): Promise<void> {
 		const { hub } = this.#d;
 		if (checkVersions(this.#d.env, input.appVersion, input.kindsVersion) === 'reload') {
 			try {
@@ -83,11 +94,11 @@ export class WorkspaceSocketApi implements SocketApi {
 			this.#d.send(socket.socketId, { t: 'resumed', mode: resume.mode, fromSeq: input.lastSeq, seq: head });
 		}
 		for (const entry of entries) {
-			if (!this.#register(socket, entry.id, entry.sub)) continue;
+			if (!(await this.#register(socket, entry.id, entry.sub))) continue;
 			const message =
 				resume?.mode === 'replay' && resume.touch
-					? hub.replaySub(socket.socketId, entry.id, socket.actor, resume.touch, head)
-					: hub.snapshot(socket.socketId, entry.id, socket.actor, head);
+					? await hub.replaySub(socket.socketId, entry.id, socket.actor, resume.touch, head)
+					: await hub.snapshot(socket.socketId, entry.id, socket.actor, head);
 			if (message) this.#d.send(socket.socketId, message);
 		}
 		this.#d.send(socket.socketId, { t: 'head', seq: head });
@@ -96,7 +107,7 @@ export class WorkspaceSocketApi implements SocketApi {
 	}
 
 	/** Validates and registers one subscription. Sends an `error` message and returns false when refused. */
-	#register(socket: WorkspaceSocket, id: string, sub: Subscription): boolean {
+	async #register(socket: WorkspaceSocket, id: string, sub: Subscription): Promise<boolean> {
 		const { hub } = this.#d;
 		const holds = hub.subscriptions(socket.socketId).some((s) => s.id === id);
 		if (!holds && hub.subCount(socket.socketId) >= MAX_SUBSCRIPTIONS_PER_SOCKET) {
@@ -107,15 +118,22 @@ export class WorkspaceSocketApi implements SocketApi {
 			this.#error(socket, 'not_found', `Collection "${sub.collectionId}" does not exist`, id);
 			return false;
 		}
-		hub.register(socket.socketId, id, sub, socket.actor);
+		if (sub.kind === 'view') {
+			const refusal = await this.#d.checkView?.(sub);
+			if (refusal) {
+				this.#error(socket, 'bad_subscription', refusal, id);
+				return false;
+			}
+		}
+		await hub.register(socket.socketId, id, sub, socket.actor);
 		return true;
 	}
 
-	subscribe(socket: WorkspaceSocket, input: SubscribeInput): void {
+	async subscribe(socket: WorkspaceSocket, input: SubscribeInput): Promise<void> {
 		const { hub } = this.#d;
 		if (hub.streamOf(socket.socketId) === null) throw new ORPCError('BAD_REQUEST', { message: 'Send hello first' });
-		if (!this.#register(socket, input.id, input.sub)) return;
-		const message = hub.snapshot(socket.socketId, input.id, socket.actor, hub.headSeq());
+		if (!(await this.#register(socket, input.id, input.sub))) return;
+		const message = await hub.snapshot(socket.socketId, input.id, socket.actor, hub.headSeq());
 		if (message) this.#d.send(socket.socketId, message);
 	}
 
@@ -123,14 +141,14 @@ export class WorkspaceSocketApi implements SocketApi {
 		this.#d.hub.unregister(socket.socketId, id);
 	}
 
-	window(socket: WorkspaceSocket, input: WindowInput): void {
+	async window(socket: WorkspaceSocket, input: WindowInput): Promise<void> {
 		const { hub } = this.#d;
 		const known = hub.subscriptions(socket.socketId).find((s) => s.id === input.id);
 		if (!known) return this.#error(socket, 'not_found', `No subscription "${input.id}"`, input.id);
 		if (known.sub.kind !== 'view' && known.sub.kind !== 'backlinks') {
 			return this.#error(socket, 'bad_subscription', `A ${known.sub.kind} subscription has no window`, input.id);
 		}
-		const ops = hub.resizeWindow(socket.socketId, input.id, input.limit, socket.actor);
+		const ops = await hub.resizeWindow(socket.socketId, input.id, input.limit, socket.actor, input.group);
 		if (ops) this.#d.send(socket.socketId, { t: 'diff', seq: hub.headSeq(), subs: [{ id: input.id, ops }] });
 	}
 

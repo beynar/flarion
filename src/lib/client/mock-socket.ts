@@ -23,11 +23,16 @@ import {
 	type ServerMessage,
 	type Subscription,
 	type TreeRow,
-	type Values
+	type Values,
+	type ViewRow,
+	type DiffOp
 } from '#lib/shared/protocol.ts';
 import type { Op } from '#lib/shared/ops.ts';
 import { TITLE_PROP_ID, type PropertyDef } from '#lib/shared/property-types.ts';
 import { evenRanks, rankAfter } from '#lib/shared/sort-keys.ts';
+import { GROUP_EMPTY, andFilters, evaluate, groupRows, queryRows, type FilterGroup } from '#lib/shared/filter-ast.ts';
+import { createRegistry } from '#lib/shared/property-types.ts';
+import type { CollectionDef, ViewDef } from '#lib/shared/definitions.ts';
 import type { Grant, Invite, Member, Me, Teamspace, TeamspaceMember, Workspace } from '#lib/shared/schemas.ts';
 import { installMockRpc, type Rpc } from '#lib/client/rpc.ts';
 import * as mock from '#lib/client/mock.ts';
@@ -178,6 +183,18 @@ export interface MockServerOptions {
 
 type SocketSubs = Map<string, Subscription>;
 
+export interface ViewLimits {
+	limit: number;
+	/** A group's own window (set by `window { group }`). */
+	groups: Map<string, number>;
+}
+
+export interface MockViewState {
+	rows: ViewRow[];
+	total: number;
+	groups?: { key: string; total: number; rows: ViewRow[] }[];
+}
+
 export class MockServer {
 	readonly pages = new Map<string, PageRow>();
 	readonly trashed = new Map<string, PageRow>();
@@ -190,6 +207,8 @@ export class MockServer {
 	teamspaceMembers: TeamspaceMember[] = structuredClone(STORED_TEAMSPACE_MEMBERS);
 	grants: Grant[] = [];
 	properties: PropertyDef[] = structuredClone(PROPERTIES);
+	/** Databases: a collection and its views by collection id. */
+	readonly collections = new Map<string, { collection: CollectionDef; views: ViewDef[] }>();
 	seq = 100;
 	connections = 0;
 	/** Close new connections at once with this code (a rejected upgrade). */
@@ -285,6 +304,37 @@ export class MockServer {
 		}
 	}
 
+	/**
+	 * The window of a `view` subscription as the real object serves it: the collection's members, the view's
+	 * filter ANDed with the subscription's, sorts, optional groups, each cut to its limit.
+	 */
+	viewState(sub: Extract<Subscription, { kind: 'view' }>, limits: ViewLimits = { limit: sub.limit, groups: new Map() }): MockViewState {
+		const found = this.collections.get(sub.collectionId);
+		if (!found) return { rows: [], total: 0 };
+		const view = found.views.find((v) => v.id === sub.viewId) ?? (sub.viewId ? undefined : found.views[0]);
+		const registry = createRegistry(this.properties);
+		const ctx = { registry, now: Date.now(), meId: this.userId };
+		const source = found.collection.sourceAst;
+		const members = [...this.pages.values()]
+			.map((p) => ({ id: p.id, rank: p.rank, page: p, values: { ...p.values, [TITLE_PROP_ID]: p.title, $parent: p.parentId, $teamspace: p.teamspaceId } }))
+			.filter((r) => !source || evaluate(source, r.values, ctx));
+		const filter = andFilters(view?.filter, sub.filter) as FilterGroup;
+		const sorts = sub.sorts ?? view?.sorts ?? [];
+		const rows = queryRows(members, { filter, sorts }, ctx);
+		const toRow = (r: (typeof rows)[number]): ViewRow => {
+			const values: Values = {};
+			for (const [k, val] of Object.entries(r.page.values)) if (k !== TITLE_PROP_ID && (!sub.props || sub.props.includes(k))) values[k] = val ?? null;
+			return { id: r.id, title: r.page.title, icon: r.page.icon, cover: r.page.cover, values };
+		};
+		const groupBy = sub.groupBy !== undefined ? sub.groupBy : (view?.groupBy ?? null);
+		if (!groupBy) return { rows: rows.slice(0, limits.limit).map(toRow), total: rows.length };
+		const hidden = new Set(groupBy.hidden ?? []);
+		const groups = groupRows(rows, groupBy, ctx)
+			.filter((g) => !hidden.has(g.key))
+			.map((g) => ({ key: g.key, total: g.rows.length, rows: g.rows.slice(0, limits.groups.get(g.key) ?? limits.limit).map(toRow) }));
+		return { rows: [], total: rows.length, groups };
+	}
+
 	backlinksOf(pageId: string): BacklinkRow[] {
 		const page = this.pages.get(pageId);
 		if (!page) return [];
@@ -295,7 +345,7 @@ export class MockServer {
 
 	/** Applies ops, appends to the log and delivers diffs. Returns the commit's seq. */
 	commit(ops: Op[], mid?: string): number {
-		const before = new Map<MockSocket, Map<string, Row[]>>();
+		const before = new Map<MockSocket, Map<string, Row[] | MockViewState>>();
 		for (const s of this.sockets) before.set(s, s.snapshotRows());
 		for (const op of ops) this.#apply(op);
 		const seq = ++this.seq;
@@ -396,6 +446,39 @@ export class MockServer {
 				}
 				break;
 			}
+			case 'createCollection':
+				this.collections.set(op.id, {
+					collection: { id: op.id, pageId: op.pageId, sourceAst: op.sourceAst ?? null, shownProps: op.shownProps ?? [], defaults: op.defaults ?? {} },
+					views: []
+				});
+				{
+					const page = this.pages.get(op.pageId);
+					if (page) page.isDatabase = true;
+				}
+				break;
+			case 'updateCollection': {
+				const c = this.collections.get(op.id);
+				if (c) c.collection = { ...c.collection, ...(op.sourceAst !== undefined ? { sourceAst: op.sourceAst } : {}), ...(op.shownProps ? { shownProps: op.shownProps } : {}), ...(op.defaults ? { defaults: op.defaults } : {}) };
+				break;
+			}
+			case 'createView': {
+				const c = this.collections.get(op.collectionId);
+				if (!c) break;
+				c.views = [
+					...c.views,
+					{ id: op.id, collectionId: op.collectionId, type: op.type, name: op.name, filter: op.filter ?? { and: [] }, sorts: op.sorts ?? [], groupBy: op.groupBy ?? null, columns: op.columns ?? { columns: [], options: {} }, rank: op.rank }
+				].sort((a, b) => (a.rank < b.rank ? -1 : a.rank > b.rank ? 1 : 0));
+				break;
+			}
+			case 'updateView': {
+				for (const c of this.collections.values()) {
+					c.views = c.views.map((v) => (v.id === op.id ? { ...v, ...(op.type ? { type: op.type } : {}), ...(op.name ? { name: op.name } : {}), ...(op.filter ? { filter: op.filter } : {}), ...(op.sorts ? { sorts: op.sorts } : {}), ...(op.groupBy !== undefined ? { groupBy: op.groupBy } : {}), ...(op.columns ? { columns: op.columns } : {}) } : v));
+				}
+				break;
+			}
+			case 'deleteView':
+				for (const c of this.collections.values()) c.views = c.views.filter((v) => v.id !== op.id);
+				break;
 			case 'createProperty':
 				if (!this.properties.some((d) => d.id === op.property.id)) this.properties = [...this.properties, structuredClone(op.property) as PropertyDef];
 				break;
@@ -429,6 +512,8 @@ export class MockSocket implements Transport {
 	onclose: ((ev: { code: number; reason?: string }) => void) | null = null;
 	onerror: ((ev?: unknown) => void) | null = null;
 	readonly subs: SocketSubs = new Map();
+	/** The windows of this socket's view subscriptions (resized by `window`). */
+	readonly limits = new Map<string, ViewLimits>();
 	readonly #server: MockServer;
 	#welcomed = false;
 
@@ -481,7 +566,19 @@ export class MockSocket implements Transport {
 		this.#server.schedule(() => this.push(msg), 0);
 	}
 
+	#limitsOf(id: string, sub: Extract<Subscription, { kind: 'view' }>): ViewLimits {
+		let l = this.limits.get(id);
+		if (!l) this.limits.set(id, (l = { limit: sub.limit, groups: new Map() }));
+		return l;
+	}
+
 	#snapshot(id: string, sub: Subscription): void {
+		if (sub.kind === 'view') {
+			this.limits.set(id, { limit: sub.limit, groups: new Map() });
+			const state = this.#server.viewState(sub, this.limits.get(id));
+			this.#answer({ t: 'snapshot', kind: 'view', id, rows: state.rows, total: state.total, seq: this.#server.seq, ...(state.groups ? { groups: state.groups } : {}) });
+			return;
+		}
 		const rows = this.#server.rowsFor(sub);
 		if (sub.kind === 'page' && sub.pageIds.some((p) => !this.#server.pages.has(p)) && rows.length === 0) {
 			this.#answer({ t: 'error', code: 'not_found', message: 'Page not found', id });
@@ -527,7 +624,22 @@ export class MockSocket implements Transport {
 				return;
 			case 'unsubscribe':
 				this.subs.delete(msg.id);
+				this.limits.delete(msg.id);
 				return;
+			case 'window': {
+				const sub = this.subs.get(msg.id);
+				if (!sub || sub.kind !== 'view') return;
+				const limits = this.#limitsOf(msg.id, sub);
+				const before = server.viewState(sub, limits);
+				if (msg.group !== undefined) limits.groups.set(msg.group, msg.limit);
+				else {
+					limits.limit = msg.limit;
+					limits.groups.clear();
+				}
+				const ops = diffViewState(before, server.viewState(sub, limits));
+				if (ops.length) this.#answer({ t: 'diff', seq: server.seq, subs: [{ id: msg.id, ops }] });
+				return;
+			}
 			case 'presence': {
 				const me: PresenceUser = { userId: server.userId, name: MOCK_USER.name };
 				for (const [pageId, users] of [...server.presence]) {
@@ -544,16 +656,21 @@ export class MockSocket implements Transport {
 		}
 	}
 
-	snapshotRows(): Map<string, Row[]> {
-		return new Map([...this.subs].map(([id, sub]) => [id, this.#server.rowsFor(sub)]));
+	snapshotRows(): Map<string, Row[] | MockViewState> {
+		return new Map(
+			[...this.subs].map(([id, sub]) => [id, sub.kind === 'view' ? this.#server.viewState(sub, this.#limitsOf(id, sub)) : this.#server.rowsFor(sub)])
+		);
 	}
 
 	/** Sends the diff of one commit (or a head) given the rows each subscription had before it. */
-	deliverCommit(seq: number, before: Map<string, Row[]>): void {
+	deliverCommit(seq: number, before: Map<string, Row[] | MockViewState>): void {
 		if (this.readyState !== WS_OPEN || !this.#welcomed) return;
 		const subs: { id: string; ops: import('#lib/shared/protocol.ts').DiffOp[] }[] = [];
 		for (const [id, sub] of this.subs) {
-			const ops = diffRows(before.get(id) ?? [], this.#server.rowsFor(sub));
+			const ops =
+				sub.kind === 'view'
+					? diffViewState((before.get(id) as MockViewState | undefined) ?? { rows: [], total: 0 }, this.#server.viewState(sub, this.#limitsOf(id, sub)))
+					: diffRows((before.get(id) as Row[] | undefined) ?? [], this.#server.rowsFor(sub));
 			if (ops.length) subs.push({ id, ops });
 		}
 		this.push(subs.length ? { t: 'diff', seq, subs } : { t: 'head', seq });
@@ -574,7 +691,7 @@ const FIELD_PROP: Record<string, string> = {
 };
 
 /** The ops that turn `before` into `after` (adds and moves at indexes, removes, per-value updates). */
-export function diffRows(before: Row[], after: Row[]): import('#lib/shared/protocol.ts').DiffOp[] {
+export function diffRows(before: (Row | ViewRow)[], after: (Row | ViewRow)[]): import('#lib/shared/protocol.ts').DiffOp[] {
 	const ops: import('#lib/shared/protocol.ts').DiffOp[] = [];
 	const afterIds = new Set(after.map((r) => r.id));
 	const beforeById = new Map(before.map((r) => [r.id, r]));
@@ -611,6 +728,42 @@ export function diffRows(before: Row[], after: Row[]): import('#lib/shared/proto
 	});
 	if (after.length !== before.length) ops.push({ op: 'count', total: after.length });
 	return ops;
+}
+
+/**
+ * The ops that turn one window of a `view` subscription into another, as the real object sends them: in a grouped
+ * view a `groups` op when the key list changed, then per group `remove`, `add`, `move` (each naming its group) and
+ * `count`; `update` ops carry no group and appear once per row.
+ */
+export function diffViewState(before: MockViewState, after: MockViewState): DiffOp[] {
+	const strip = (ops: DiffOp[]): DiffOp[] => ops.filter((o) => o.op !== 'count');
+	if (!after.groups) {
+		const ops: DiffOp[] = strip(diffRows(before.rows, after.rows));
+		if (before.total !== after.total) ops.push({ op: 'count', total: after.total });
+		return ops;
+	}
+	const ops: DiffOp[] = [];
+	const beforeGroups = before.groups ?? [];
+	if (JSON.stringify(beforeGroups.map((g) => g.key)) !== JSON.stringify(after.groups.map((g) => g.key))) {
+		ops.push({ op: 'groups', keys: after.groups.map((g) => g.key) });
+	}
+	const updated = new Set<string>();
+	for (const g of after.groups) {
+		const prev = beforeGroups.find((x) => x.key === g.key);
+		for (const op of strip(diffRows(prev?.rows ?? [], g.rows))) {
+			if (op.op === 'update') {
+				const k = `${op.id}:${op.prop}`;
+				if (updated.has(k)) continue;
+				updated.add(k);
+				ops.push(op);
+			} else ops.push({ ...op, group: g.key } as DiffOp);
+		}
+		if ((prev?.total ?? 0) !== g.total || !prev) ops.push({ op: 'count', total: g.total, group: g.key });
+	}
+	if (before.total !== after.total) ops.push({ op: 'count', total: after.total });
+	// Removes first, as the protocol orders them.
+	const order = (o: DiffOp) => (o.op === 'groups' ? 0 : o.op === 'remove' ? 1 : o.op === 'add' || o.op === 'move' ? 2 : o.op === 'update' ? 3 : 4);
+	return ops.map((o, i) => ({ o, i })).sort((a, b) => order(a.o) - order(b.o) || a.i - b.i).map((x) => x.o);
 }
 
 // ───────────────────────────── the mock RPC ─────────────────────────────
@@ -805,6 +958,29 @@ export function createMockRpc(server: MockServer): Rpc {
 				delay(() => ({ seq: server.commit([{ op: 'updateProperty', ...input }]) })),
 			delete: (input: { id: string }) => delay(() => ({ seq: server.commit([{ op: 'deleteProperty', id: input.id }]) }))
 		},
+		collection: {
+			get: (input: { id: string }) =>
+				delay(() => {
+					const found = server.collections.get(input.id);
+					if (!found) throw mockError('NOT_FOUND', `Unknown collection "${input.id}"`);
+					return structuredClone(found);
+				}),
+			create: (input: { id?: string; pageId: string; sourceAst?: CollectionDef['sourceAst']; shownProps?: string[]; defaults?: CollectionDef['defaults'] }) =>
+				delay(() => {
+					const id = input.id ?? `col_${Date.now().toString(36)}`;
+					return { id, seq: server.commit([{ op: 'createCollection', id, pageId: input.pageId, sourceAst: input.sourceAst, shownProps: input.shownProps, defaults: input.defaults }]) };
+				}),
+			query: () => delay(() => ({ rows: [], total: 0, nextCursor: null, seq: server.seq }))
+		},
+		view: {
+			list: (input: { collectionId: string }) => delay(() => structuredClone(server.collections.get(input.collectionId)?.views ?? [])),
+			create: (input: { id?: string; collectionId: string; type: ViewDef['type']; name: string; rank?: string }) =>
+				delay(() => {
+					const id = input.id ?? `v_${Date.now().toString(36)}`;
+					const last = server.collections.get(input.collectionId)?.views.at(-1)?.rank ?? null;
+					return { id, seq: server.commit([{ op: 'createView', id, collectionId: input.collectionId, type: input.type, name: input.name, rank: input.rank ?? rankAfter(last) }]) };
+				})
+		},
 		page: {
 			create: (input: { id?: string; parentId: string | null; rank?: string; teamspaceId?: string | null; icon?: string | null; values?: Values; isDatabase?: boolean }) =>
 				delay(() => {
@@ -820,7 +996,21 @@ export function createMockRpc(server: MockServer): Rpc {
 			roomToken: () => delay(() => ({ token: 'rt1.mock', expiresAt: Date.now() + 600_000, access: 'write' as const })),
 			trash: (input: { id: string }) => delay(() => ({ seq: server.commit([{ op: 'trash', page: input.id }]) })),
 			restore: (input: { id: string }) => delay(() => ({ seq: server.commit([{ op: 'restore', page: input.id }]) })),
-			trashList: () => delay(() => ({ items: [], nextCursor: null })),
+			trashList: (input: { q?: string; sort?: 'deleted_desc' | 'deleted_asc' | 'title' } = {}) =>
+				delay(() => {
+					const q = (input.q ?? '').trim().toLowerCase();
+					const items = [...server.trashed.values()]
+						.filter((p) => !p.parentId || !server.trashed.has(p.parentId))
+						.filter((p) => !q || p.title.toLowerCase().includes(q))
+						.map((p) => ({ id: p.id, title: p.title, icon: p.icon, deletedAt: p.updatedAt, deletedBy: server.userId, pageCount: 1, parentId: p.parentId }));
+					items.sort((a, b) => (input.sort === 'title' ? a.title.localeCompare(b.title) : input.sort === 'deleted_asc' ? a.deletedAt.localeCompare(b.deletedAt) : b.deletedAt.localeCompare(a.deletedAt)));
+					return { items, nextCursor: null };
+				}),
+			purge: (input: { id: string }) =>
+				delay(() => {
+					server.trashed.delete(input.id);
+					return {};
+				}),
 			grants: grantsRpc(server, delay)
 		},
 		mutate: (input: { mid: string; ops: Op[] }) =>

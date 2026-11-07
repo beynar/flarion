@@ -29,6 +29,41 @@
  * one of the `$`-prefixed row fields `$icon`, `$cover`, `$parent`, `$rank`, `$teamspace`,
  * `$isDatabase`, `$access`, `$hasChildren`.
  *
+ * Live views (P3). A `view` subscription is a live query: the collection's membership and the view's filter
+ * (ANDed with the subscription's `filter`, a `database_view` block's local filter), sorted, optionally grouped,
+ * ANDed with what the actor may see. `snapshot.rows` is the window (the first `limit` rows) and `total` the
+ * number of matching pages. Rows beyond the window are never sent. A commit sends, for each view it touches, one
+ * ordered list of ops inside the single `diff` frame of the socket:
+ *   `remove` first (rows that left, or are pushed out of the window), then `add`/`move` in final position
+ *   order (rows that entered, or whose sort value changed, and rows that slid into the window after a leave:
+ *   the "refill"), then `update` (one cell of a row the window holds), then `count`. A row that changes
+ *   sort position inside the window is a `move`; one that leaves the window and re-enters is `remove` + `add`.
+ *   `index` is the position inside the window (inside the group's window of a grouped view) after the earlier
+ *   ops of the same list. A frame never repeats a row.
+ *   `window { id, limit }` grows (or shrinks) the window and answers with one `diff` (the new rows are `add`s).
+ * A definition change that alters what a view means (its filter, sorts, group-by, the collection's source, a
+ * property's type or options) is applied as an ordinary diff computed against the new definition; the
+ * `registry` frame tells the client to refetch the definitions.
+ *
+ * Grouped views (boards, grouped lists), additive and backward compatible (ungrouped views are unchanged).
+ * When the effective `groupBy` is set, the snapshot carries `groups: [{ key, total, rows }]` in display order
+ * (`rows: []` at the top level; `total` at the top level counts distinct pages, a page with several values of
+ * a multi-select or relation appears in several groups). `limit` is per group, `window { id, limit, group }`
+ * resizes one group (without `group`, all groups; an earlier per-group size is forgotten). Diff ops of a
+ * grouped view name their `group` (`GROUP_EMPTY` for pages with no value): `add`, `remove`, `move` and `count`
+ * carry `group`; a page changing group is a `remove` in one group and an `add` in the other; `update` ops carry
+ * no group (the row is addressed by id, the client updates it in every group that holds it). A `count` with a
+ * `group` is that group's total. The op `{ op: 'groups', keys }` replaces the ordered list of group keys: a
+ * group the client does not hold is created empty, one missing from `keys` is dropped, the rest are reordered;
+ * the server sends it whenever the list changes (a group appears or empties, options were edited) and the
+ * adds and counts of the new groups follow it in the same list. The key of a select, status or multi-select
+ * group is the option id, a person's group their user id, a relation's the target page id, a checkbox's
+ * `true`/`false`, a date's its bucket start (`YYYY-MM-DD`). Option columns are listed even when empty.
+ *
+ * Trash. A trashed page (and its whole subtree) is removed from every window, tree and backlinks list like any
+ * page that stops matching; a restore adds them back. A to-one relation cell to a trashed page reads `null`
+ * (an `update` op carries the change on both trash and restore).
+ *
  * Version skew. Every socket upgrade and every `/rpc` call carries the build in `x-app-version`
  * (sockets may use the `v` query parameter instead, browsers cannot set headers on a WebSocket).
  * A client older than the server's `MIN_APP_VERSION`, or whose block `kindsVersion` the rooms
@@ -236,7 +271,9 @@ export const diffOpSchema = v.variant('op', [
 	v.object({ op: v.literal('remove'), id: idSchema, group }),
 	v.object({ op: v.literal('move'), id: idSchema, index: v.pipe(v.number(), v.integer(), v.minValue(0)), group }),
 	v.object({ op: v.literal('update'), id: idSchema, prop: v.string(), value: v.nullable(propValueSchema) }),
-	v.object({ op: v.literal('count'), total: v.pipe(v.number(), v.integer(), v.minValue(0)), group })
+	v.object({ op: v.literal('count'), total: v.pipe(v.number(), v.integer(), v.minValue(0)), group }),
+	/** Grouped views: the ordered keys of the groups (see the module header). */
+	v.object({ op: v.literal('groups'), keys: v.array(v.string()) })
 ]);
 export type DiffOp = v.InferOutput<typeof diffOpSchema>;
 

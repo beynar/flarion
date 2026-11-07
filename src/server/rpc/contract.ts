@@ -13,6 +13,7 @@
  * Schemas are Standard Schema (Valibot). Nothing here is `any`.
  */
 import { eventIterator, oc } from '@orpc/contract';
+import { historyReadResultSchema, historyUndoResultSchema, moveBlocksInputSchema, moveBlocksResultSchema } from '../../lib/shared/editor-schemas';
 import * as v from 'valibot';
 import { viewDefSchema } from '../../lib/shared/definitions';
 import { mutationBatchSchema, seqSchema } from '../../lib/shared/ops';
@@ -187,8 +188,15 @@ const pageRouter = {
 	},
 	history: {
 		list: priv.input(historyListInputSchema).output(historyListResultSchema),
-		restore: priv.input(historyRestoreInputSchema).output(seqSchema)
+		/** Restores a version as a forward edit every collaborator receives (and `undo` takes back). Needs `update`. */
+		restore: priv.input(historyRestoreInputSchema).output(seqSchema),
+		/** One version's body, for the preview. */
+		read: priv.input(historyRestoreInputSchema).output(historyReadResultSchema),
+		/** Undoes the last restore (one level). Needs `update`. */
+		undo: priv.input(pageIdSchema).output(historyUndoResultSchema)
 	},
+	/** Moves blocks to another page without losing a concurrent edit (edytor's export, import, commit). Needs `update` on both. */
+	moveBlocks: priv.input(moveBlocksInputSchema).output(moveBlocksResultSchema),
 	grants: {
 		list: priv.input(pageIdSchema).output(v.array(grantSchema)),
 		set: priv.input(grantSetSchema).output(grantSchema),

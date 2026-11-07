@@ -145,7 +145,10 @@ const ICONS: Record<string, string> = {
 	'action.color': icon('M6 15.5L10 4.5l4 11M7.4 11.7h5.2'),
 	'action.up': arrow(0),
 	'action.down': arrow(180),
-	'action.link': linkIcon
+	'action.link': linkIcon,
+	'action.moveTo': icon('M3.5 10h10.5l-3-3M14 10l-3 3', rect(3, 3.5, 14, 13, 2)),
+	'action.turnIntoPage': page('M7.5 10.5h5M7.5 13.5h3'),
+	'action.ai': icon('M10 3l1.6 4.4L16 9l-4.4 1.6L10 15l-1.6-4.4L4 9l4.4-1.6zM15.5 14.5l.6 1.4 1.4.6-1.4.6-.6 1.4-.6-1.4-1.4-.6 1.4-.6z')
 };
 
 /** The icon's CSS `mask-image` value for `id`, if the id has one. */

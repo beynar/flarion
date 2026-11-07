@@ -137,21 +137,58 @@ export function randomSorts(r: Rng, w: World): SortSpec[] {
 	const props = [...w.registry.all().map((d) => d.id), 'ghost'];
 	const out: SortSpec[] = [];
 	for (let i = 0; i < n; i++) {
-		const prop = r.bool(0.7) ? r.pick(['title', 'amount', 'score', 'due', 'meeting', 'prio', 'stage', 'tags', 'done', 'created', 'edited', 'notes', 'fnum', 'ftext', 'fdate', 'fbool', 'uid', 'ai', 'rnum']) : r.pick(props);
+		const prop = r.bool(0.7) ? r.pick(['title', 'amount', 'score', 'due', 'meeting', 'prio', 'stage', 'tags', 'done', 'created', 'edited', 'notes', 'fnum', 'ftext', 'fdate', 'fbool', 'fdue', 'ftitles', 'fchain', 'uid', 'ai', 'rnum', 'rcount', 'rdue', 'rtags', 'rback', 'rchain']) : r.pick(props);
 		if (out.some((s) => s.prop === prop)) continue;
 		out.push({ prop, dir: r.pick(['asc', 'desc']), ...(r.bool(0.4) ? { nulls: r.pick(['first', 'last'] as const) } : {}) });
 	}
 	return out;
 }
 
-export function randomGroupBy(r: Rng): GroupBySpec | undefined {
-	if (!r.bool(0.3)) return undefined;
-	const prop = r.pick(['prio', 'stage', 'tags', 'owner', 'done', 'due', 'rel', 'by', 'editor', 'prio', 'stage', 'ghost']);
+/** Group keys a spec can mention (hide, order): the ones the property has, `$empty`, and a stranger. */
+function candidateKeys(r: Rng, w: World, prop: string, by: 'option' | 'group' | undefined): string[] {
+	const def = w.registry.get(prop);
+	let keys: string[] = [];
+	switch (def?.type) {
+		case 'select':
+		case 'multi_select':
+			keys = def.config.options.map((o) => o.id);
+			break;
+		case 'status':
+			keys = by === 'group' ? def.config.groups.map((g) => g.id) : def.config.options.map((o) => o.id);
+			break;
+		case 'checkbox':
+			keys = ['true', 'false'];
+			break;
+		case 'person':
+		case 'created_by':
+		case 'last_edited_by':
+			keys = USERS;
+			break;
+		case 'relation':
+			keys = Array.from({ length: 4 }, () => r.pick(w.pages).id);
+			break;
+		case 'date':
+			keys = Array.from({ length: 3 }, () => sampledDate(r, w, prop) ?? '2026-03-01');
+			break;
+		default:
+	}
+	return [...new Set([...keys, '$empty', 'nope'])];
+}
+
+export function randomGroupBy(r: Rng, w: World): GroupBySpec | undefined {
+	if (!r.bool(0.35)) return undefined;
+	const prop = r.pick(['prio', 'stage', 'stage', 'tags', 'owner', 'done', 'due', 'rel', 'rel:reverse', 'rel1', 'by', 'editor', 'prio', 'ghost']);
+	const by = prop === 'stage' && r.bool(0.5) ? ('group' as const) : undefined;
+	const keys = candidateKeys(r, w, prop, by);
+	const some = (n: number) => [...new Set(r.shuffle(keys).slice(0, r.int(1, n)))];
 	return {
 		prop,
 		...(r.bool(0.5) ? { sort: r.pick(['manual', 'asc', 'desc'] as const) } : {}),
 		...(r.bool(0.3) ? { hideEmpty: true } : {}),
-		...(prop === 'due' ? { bucket: r.pick(DATE_UNITS) } : {})
+		...(prop === 'due' ? { bucket: r.pick(DATE_UNITS) } : {}),
+		...(by ? { by } : {}),
+		...(r.bool(0.25) ? { hidden: some(3) } : {}),
+		...(r.bool(0.35) ? { order: some(6) } : {})
 	};
 }
 
@@ -182,11 +219,11 @@ export function randomScenario(r: Rng, w: World): Scenario {
 	if (r.bool(0.85)) spec.filter = randomFilter(r, w, r.pick([1, 2, 3, 3]));
 	const sorts = randomSorts(r, w);
 	if (sorts.length || r.bool(0.2)) spec.sorts = sorts;
-	const groupBy = randomGroupBy(r);
+	const groupBy = randomGroupBy(r, w);
 	if (groupBy) spec.groupBy = groupBy;
 	const opts: QueryOptions = { visible: randomVisible(r, w), me: r.bool(0.9) ? r.pick(USERS) : undefined, now: NOW };
 	if (r.bool(0.5)) opts.collectionId = r.pick(w.collections).id;
 	if (r.bool(0.6)) opts.window = { offset: r.pick([0, 0, 0, 1, 5, 30, 200]), limit: r.pick([1, 5, 20, 50, 400]) };
-	if (spec.groupBy && r.bool(0.2)) opts.groupWindows = { [r.pick(['p1', 'p2', 'in_progress', 'true', '$empty'])]: { offset: 1, limit: 3 } };
+	if (spec.groupBy && r.bool(0.2)) opts.groupWindows = { [r.pick(['p1', 'p2', 'in_progress', 'todo', 'complete', 'true', '$empty'])]: { offset: 1, limit: 3 } };
 	return { spec, opts };
 }

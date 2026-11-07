@@ -14,6 +14,14 @@ export { analyzeFormula, extractDeps, inferType, readsNow, type AnalyzeResult, t
 export { evaluateFormula, type EvalContext, type EvalResult } from './eval';
 export { FUNCTION_NAMES, formatWithPattern } from './functions';
 export {
+	computeRollup,
+	rollupResultType,
+	rollupTargetKind,
+	targetKindOf,
+	type RollupItem,
+	type RollupTargetKind
+} from './rollup';
+export {
 	envFromProperties,
 	formatValue,
 	formulaTypeOf,

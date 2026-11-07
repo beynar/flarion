@@ -14,10 +14,16 @@
 		type EdytorInstance,
 		type Uploader
 	} from 'edytor';
+	import { toast } from 'entasis/toast';
 	import { createRpc, type Rpc } from '#lib/client/rpc.ts';
+	import { useWorkspace, type WorkspaceStore } from '#lib/client/workspace.svelte.ts';
 	import { BLOCK_KIND, KINDS_VERSION } from '#lib/shared/blocks/kinds.ts';
 	import { TITLE_PROP_ID } from '#lib/shared/property-types.ts';
+	import { runAiWrite, type WriteCall } from './ai/run.ts';
+	import { aiRuntime, type AiRuntime } from './ai/state.svelte.ts';
 	import { setEditorContext, type AncestorRef, type DatabaseRef } from './context.ts';
+	import MoveBlocksDialog from './MoveBlocksDialog.svelte';
+	import { blockMoves, type BlockMoves } from './moves.svelte.ts';
 	import { createEditorPlugins } from './plugins.ts';
 	import { createUploader } from './uploads.ts';
 	import { rpcUnfurl, type Unfurl } from './unfurl.ts';
@@ -160,6 +166,115 @@
 		}
 	};
 
+	// ───────────── Write with AI (docs/PLAN.md "AI features") ─────────────
+	// Drafts stream from `ai.write` into a shared suggestion (`ai/run.ts`). The development server has no Workers AI: a dev
+	// build asks for the fake model when `localStorage['flarion:fake-ai']` is `1` (the server honours it only under
+	// `ENVIRONMENT=development`), which is how the editor's end-to-end tests run the whole flow.
+	const fakeAi = () => {
+		if (!import.meta.env.DEV) return false;
+		try {
+			return localStorage.getItem('flarion:fake-ai') === '1';
+		} catch {
+			return false;
+		}
+	};
+	const withFakeAi: typeof fetch = (input, init) => {
+		const request = new Request(input as Request, init);
+		request.headers.set('x-flarion-fake-ai', '1');
+		return fetch(request);
+	};
+	const aiApi = untrack(() => (fakeAi() ? createRpc({ getWorkspaceId: () => workspaceId, fetch: withFakeAi }) : api));
+	const writeCall: WriteCall = (input) => aiApi.ai.write(input);
+	const aiHost: AiRuntime = {
+		run: async (spec) => {
+			if (edytor) await runAiWrite({ edytor, pageId, write: writeCall, notify: (title) => toast.info({ title }) }, spec);
+		},
+		readonly: isReadonly
+	};
+	$effect(() => {
+		aiRuntime.current = aiHost;
+		return () => {
+			if (aiRuntime.current === aiHost) aiRuntime.current = undefined;
+		};
+	});
+
+	// ───────────── Moving blocks to another page, Turn into page (edytor's export, import, commit) ─────────────
+	// Both need the workspace around the editor (the page picker, the tree); the standalone test page has none.
+	const store: WorkspaceStore | undefined = (() => {
+		try {
+			return useWorkspace();
+		} catch {
+			return undefined;
+		}
+	})();
+	let moveDialog = $state<{ open: boolean; ids: string[] }>({ open: false, ids: [] });
+
+	/** The first block's text, for a new page's title. */
+	const titleOfBlocks = (ids: string[]) => {
+		const first = edytor?.value ? findInJson(edytor.value.children, ids[0]) : undefined;
+		const text = (first?.content ?? []).map((part) => ('text' in part && typeof part.text === 'string' ? part.text : '')).join('').trim();
+		return text.slice(0, 80) || 'Untitled';
+	};
+	const findInJson = <T extends { id?: string; children?: T[] }>(blocks: readonly T[] | undefined, id: string | undefined): T | undefined => {
+		for (const block of blocks ?? []) {
+			if (block.id === id) return block;
+			const inner = findInJson(block.children, id);
+			if (inner) return inner;
+		}
+		return undefined;
+	};
+	/** `{ parent, index }` of a block among its siblings, from the document's JSON. */
+	const positionOf = (id: string): { parent: string | null; index: number } | null => {
+		const walk = (blocks: readonly { id?: string; children?: unknown[] }[], parent: string | null): { parent: string | null; index: number } | null => {
+			for (const [index, block] of blocks.entries()) {
+				if (block.id === id) return { parent, index };
+				const inner = walk((block.children ?? []) as { id?: string; children?: unknown[] }[], block.id ?? null);
+				if (inner) return inner;
+			}
+			return null;
+		};
+		return edytor?.value ? walk(edytor.value.children as { id?: string; children?: unknown[] }[], null) : null;
+	};
+
+	const moveBlocksTo = async (ids: string[], toPage: string) => {
+		try {
+			await api.page.moveBlocks({ from: pageId, to: toPage, ids });
+			const target = store?.resolvePage(toPage);
+			toast.success({ title: `Moved to ${target?.title || 'Untitled'}` });
+		} catch (error) {
+			console.error('move blocks failed', error);
+			toast.danger({ title: 'Could not move the blocks', description: error instanceof Error ? error.message : undefined });
+		}
+	};
+	const turnIntoPage = async (ids: string[]) => {
+		if (!subpage || ids.length === 0 || !edytor) return;
+		const at = positionOf(ids[0]!);
+		try {
+			const title = titleOfBlocks(ids);
+			const { id } = await subpage({ parentId: pageId, title });
+			// A subpage block where the blocks were, then the blocks leave for the new page.
+			if (at) edytor.insertBlocks({ parent: at.parent, index: at.index }, [{ type: 'page', data: { pageId: id, title } }]);
+			await api.page.moveBlocks({ from: pageId, to: id, ids });
+		} catch (error) {
+			console.error('turn into page failed', error);
+			toast.danger({ title: 'Could not turn the blocks into a page', description: error instanceof Error ? error.message : undefined });
+		}
+	};
+	const moves: BlockMoves = {
+		moveTo: (ids) => (moveDialog = { open: true, ids }),
+		turnIntoPage
+	};
+	$effect(() => {
+		if (!store || isReadonly()) {
+			if (blockMoves.current === moves) blockMoves.current = undefined;
+			return;
+		}
+		blockMoves.current = moves;
+		return () => {
+			if (blockMoves.current === moves) blockMoves.current = undefined;
+		};
+	});
+
 	setEditorContext({
 		workspaceId: untrack(() => workspaceId),
 		pageId: untrack(() => pageId),
@@ -175,6 +290,7 @@
 		upload: upload ?? createUploader({ workspaceId, pageId, rpc: api }),
 		unfurl: unfurl ?? rpcUnfurl(api),
 		custom: { createInlineDatabase, readonly: isReadonly },
+		ai: { run: aiHost.run, readonly: isReadonly },
 		open,
 		href,
 		title: (id) => resolvePage?.(id)?.title,
@@ -241,6 +357,16 @@
 		onNavigate(decodeURIComponent(target));
 	};
 </script>
+
+{#if store}
+	<MoveBlocksDialog
+		{store}
+		fromPageId={pageId}
+		count={moveDialog.ids.length}
+		bind:open={moveDialog.open}
+		onpick={(target) => void moveBlocksTo(moveDialog.ids, target)}
+	/>
+{/if}
 
 <!-- svelte-ignore a11y_no_static_element_interactions -->
 <div class="flarion-editor-view" {onclickcapture} bind:this={view}>

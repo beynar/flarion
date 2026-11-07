@@ -40,18 +40,21 @@ import type { WorkspaceSocketActor } from './actor';
 import { pruneLog, LOG_RETENTION_MS, type PruneResult } from './changelog';
 import { runCommit, type CommitResult } from './commit';
 import {
+	afterWrite,
 	applyEavOp,
 	invalidateRegistry,
 	isEavOp,
 	isEavError,
 	loadRegistry,
+	recomputeNowFormulas,
+	usesNow,
 	ensureEavLayout,
 	readCollection,
 	readProperties,
 	readViews,
 	type ChangeRecord
 } from './eav';
-import { notFound, WorkspaceError } from './errors';
+import { invalid, notFound, WorkspaceError } from './errors';
 import { ingestInTransaction, type IngestResult } from './ingest';
 import { LiveHub, unitEvaluations, type CommitInfo } from './live';
 import { migrateWorkspace } from './migrations';
@@ -82,6 +85,7 @@ import {
 	type TeamspaceInput
 } from './teamspaces';
 import { checkVersions } from './versions';
+import { indexBodies, indexChanges, removeFromIndex } from '../../search/index-writes';
 import { ForbiddenError } from 'viborm';
 import {
 	AccessService,
@@ -95,6 +99,8 @@ import { createAuthorizer } from './authorize';
 import { queryViewRows, type QueryViewInput, type QueryViewResult } from '../../engine/view';
 import { revokeGrantRecords, setGrantRecords, toGrant, type GrantInput } from './grants';
 import { syncRooms, type RoomStub } from './room-sync';
+import { chunks } from './util';
+import { planPurge, purgePageRows, purgeTeamspaceRows, purgeableTeamspaces, TRASH_RETENTION_MS, type PurgedPage } from './purge';
 import type { Grant } from '../../../lib/shared/schemas';
 import {
 	abortUpload,
@@ -115,6 +121,12 @@ import {
 	type PageLevel
 } from './files';
 import { APP_VERSION_HEADER, APP_VERSION_PARAM, registryScopesOf } from '../../../lib/shared/protocol';
+import { reindexAll as reindexSearch } from '../../search/index-writes';
+import { applyChunks, chunkIdsOf, diffChunks, forgetChunks, type EmbedPlan, type PageChunks } from '../../search/embed-store';
+import { embedPages, type EmbedResult } from '../../search/embed';
+import { quickFind, recordVisit, searchPages, type QuickFindInput, type QuickFindResult, type SearchInput, type SearchResult } from '../../search/query';
+import { ensureSearchTables } from '../../search/tables';
+import { vectorSearchOf } from '../../search/vectors';
 
 type TrashListInput = v.InferOutput<typeof trashListInputSchema>;
 
@@ -136,6 +148,12 @@ export interface SyncMemberArgs {
 /** Alarm cadence: prune the change log hourly while it holds anything. */
 const ALARM_INTERVAL_MS = 60 * 60 * 1000;
 const SYSTEM_ACTOR = 'system';
+
+/** Close code and reason of a Page DO socket whose page was moved to the trash. */
+const TRASH_CLOSE_CODE = 4403;
+const TRASH_CLOSE_REASON = 'moved to Trash';
+/** Rooms called at once. */
+const ROOM_BATCH = 16;
 
 /** Protocol frames start with a string `t`; oRPC's have a numeric one. */
 const PROTOCOL_FRAME = /^\s*\{\s*"t"\s*:\s*"/;
@@ -164,6 +182,7 @@ export class WorkspaceDO extends DurableObject<Env> {
 		super(ctx, env);
 		WorkspaceDO.constructed++;
 		ensureFilesTable(ctx.storage.sql);
+		ensureSearchTables(ctx.storage.sql);
 		this.#db = createWorkspaceClient(ctx.storage);
 		this.#access = new AccessService({ db: this.#db, sql: ctx.storage.sql });
 		// Raw steps, the viborm estate and the EAV layout, before any request or socket message is served.
@@ -173,6 +192,8 @@ export class WorkspaceDO extends DurableObject<Env> {
 		});
 		this.#hub = new LiveHub({
 			sql: ctx.storage.sql,
+			db: this.#db,
+			now: () => Date.now(),
 			send: (socketId, message) => this.#send(socketId, message),
 			actorOf: (socketId) => this.#socket(socketId)?.actor ?? null,
 			view: (actor) => this.#access.view(actor)
@@ -183,7 +204,9 @@ export class WorkspaceDO extends DurableObject<Env> {
 			presence: this.#presence,
 			send: (socketId, message) => this.#send(socketId, message),
 			streams: () => this.#hub.streamSockets(),
-			now: () => Date.now()
+			now: () => Date.now(),
+			checkView: (sub) => this.#checkView(sub),
+			serialize: (work) => this.#serialize(work)
 		});
 		this.#transport = new HibernatableSocketTransport<SocketContext, WorkspaceSocketActor>(ctx, socketRouter, {
 			createContext: (socket) => ({ socket, api: this.#api, instanceId: this.instanceId }),
@@ -255,11 +278,13 @@ export class WorkspaceDO extends DurableObject<Env> {
 		// After hibernation the in-memory visibility sets are gone: rebuild the sender's before serving it.
 		const sender = this.#transport.handle(ws);
 		if (sender) await this.#access.ensure(sender.actor);
-		if (typeof message === 'string' && PROTOCOL_FRAME.test(message)) return this.#protocolFrame(ws, message);
-		return this.#transport.message(ws, message);
+		// In the commits' queue: a view is evaluated through the engine (asynchronously), and a socket message
+		// must never observe a commit that is half fanned out.
+		if (typeof message === 'string' && PROTOCOL_FRAME.test(message)) return this.#serialize(() => this.#protocolFrame(ws, message));
+		return this.#serialize(() => this.#transport.message(ws, message));
 	}
 
-	#protocolFrame(ws: WebSocket, text: string): void {
+	async #protocolFrame(ws: WebSocket, text: string): Promise<void> {
 		const socket = this.#transport.handle(ws);
 		if (!socket) return ws.close(1011, 'missing attachment');
 		const decoded = decodeClientMessage(text);
@@ -268,13 +293,13 @@ export class WorkspaceDO extends DurableObject<Env> {
 		try {
 			switch (message.t) {
 				case 'hello':
-					return this.#api.hello(socket, RAW_STREAM, message);
+					return await this.#api.hello(socket, RAW_STREAM, message);
 				case 'subscribe':
-					return this.#api.subscribe(socket, { id: message.id, sub: message.sub });
+					return await this.#api.subscribe(socket, { id: message.id, sub: message.sub });
 				case 'unsubscribe':
 					return this.#api.unsubscribe(socket, message.id);
 				case 'window':
-					return this.#api.window(socket, message);
+					return await this.#api.window(socket, message);
 				case 'presence':
 					return this.#api.presence(socket, message.pageId);
 				case 'notifications.read':
@@ -331,6 +356,7 @@ export class WorkspaceDO extends DurableObject<Env> {
 		options: { mid?: string; backlinkTargets?: () => readonly string[]; definition?: boolean } = {}
 	): Promise<CommitResult> {
 		const roomWork: { value: { scope: CommitAccess; changes: ReturnType<AccessService['changedActors']> } | null } = { value: null };
+		let closeTrashedRooms = false;
 		const result = await this.#serialize(async () => {
 			let commit: CommitResult;
 			try {
@@ -362,7 +388,7 @@ export class WorkspaceDO extends DurableObject<Env> {
 					backlinkTargets: options.backlinkTargets?.()
 				};
 				try {
-					this.#hub.fanOut(info);
+					await this.#hub.fanOut(info);
 				} catch (error) {
 					// The commit stands; the live state may not. Drop the registry and ask every socket to
 					// reconnect: `hello` with its last seq replays or resnapshots.
@@ -370,14 +396,45 @@ export class WorkspaceDO extends DurableObject<Env> {
 				}
 				// Definitions held outside any subscription (property registry, teamspace and member directory).
 				this.#api.broadcastRegistry(registryScopesOf(commit.rows.map((row) => row.kind)), commit.seq);
+				if (commit.rows.some((row) => row.kind === 'trash' || row.kind === 'archiveTeamspace')) closeTrashedRooms = true;
 				if (access.affecting) roomWork.value = { scope: access, changes: this.#access.changedActors() };
 				this.#access.clearDeltas();
 			}
 			return commit;
 		});
+		// Trashing a page closes its room: open tabs show "This page was moved to Trash" (docs/PLAN.md).
+		if (closeTrashedRooms) await this.#closeTrashedRooms();
 		if (roomWork.value) await this.#syncRooms(roomWork.value.scope, roomWork.value.changes);
 		void this.#armAlarm();
 		return result;
+	}
+
+	/** Closes every open room whose page is in the trash, with the reason the tabs show. Best effort. */
+	async #closeTrashedRooms(): Promise<void> {
+		const workspaceId = this.ctx.id.name ?? '';
+		const open = this.ctx.storage.sql
+			.exec<{ page_id: string }>('SELECT o.page_id AS page_id FROM open_room o JOIN page p ON p.id = o.page_id WHERE p.deleted_at IS NOT NULL')
+			.toArray()
+			.map((r) => r.page_id);
+		for (const part of chunks(open, ROOM_BATCH)) {
+			await Promise.all(
+				part.map(async (pageId) => {
+					try {
+						const room = this.env.PAGE.getByName(`${workspaceId}:${pageId}`) as unknown as { closeAll(code?: number, reason?: string): Promise<unknown> };
+						await room.closeAll(TRASH_CLOSE_CODE, TRASH_CLOSE_REASON);
+					} catch (error) {
+						console.warn(`[workspace] closing the room of trashed page ${pageId} failed:`, error instanceof Error ? error.message : error);
+					}
+				})
+			);
+		}
+	}
+
+	/** The reason a view subscription is refused, if any (a primary sort that changes with the clock). */
+	async #checkView(sub: { sorts?: readonly { prop: string }[] }): Promise<string | null> {
+		const first = sub.sorts?.[0];
+		if (first && (await usesNow(this.#db, first.prop))) return 'A formula that reads now() cannot be the primary sort of a view';
+		return null;
 	}
 
 	/** Pushes access changes into the open rooms (best effort: a room that fails keeps its 10-minute token). */
@@ -414,11 +471,48 @@ export class WorkspaceDO extends DurableObject<Env> {
 		if ((await this.ctx.storage.getAlarm()) === null) await this.ctx.storage.setAlarm(Date.now() + ALARM_INTERVAL_MS);
 	}
 
-	/** Prunes the change log (7 days plus a size cap); re-arms itself while the log holds anything. */
+	/**
+	 * Hourly: prunes the change log (7 days plus a size cap) and recomputes what depends on the clock (formulas
+	 * that read `now()`, views with relative dates), publishing the results through the live loop. Re-arms itself
+	 * while the log holds anything or something reads the clock.
+	 */
 	override async alarm(): Promise<void> {
 		const result = await this.pruneLog();
+		try {
+			await this.hourly();
+		} catch (error) {
+			console.error('[workspace] hourly recompute failed:', error instanceof Error ? (error.stack ?? error.message) : error);
+		}
 		this.#alarmChecked = false;
-		if (result.remaining > 0) await this.#armAlarm();
+		if (result.remaining > 0 || this.#readsClock()) await this.#armAlarm();
+	}
+
+	/** Whether any formula reads the clock (the alarm then keeps ticking). */
+	#readsClock(): boolean {
+		const sql = this.ctx.storage.sql;
+		const formula = sql
+			.exec("SELECT 1 FROM property WHERE type = 'formula' AND deleted_at IS NULL AND (config_json LIKE '%now(%' OR config_json LIKE '%today(%') LIMIT 1")
+			.toArray();
+		return formula.length > 0 || this.#hub.hasClockUnits();
+	}
+
+	/**
+	 * The hourly job, also callable by tests and operators: recomputes the `now()` formulas (and what depends on
+	 * them) on the live pages and, when a view's filter has relative dates, makes the live loop evaluate it
+	 * again. What changed is committed as one system commit, so it reaches collaborators like any write.
+	 */
+	async hourly(): Promise<{ recomputed: number; seq: number | null }> {
+		const now = Date.now();
+		const records = await this.#serialize(() => recomputeNowFormulas(this.#db, { actorId: SYSTEM_ACTOR, now }));
+		const clock = this.#hub.hasClockUnits();
+		if (records.length === 0 && !clock) return { recomputed: 0, seq: null };
+		const all: ChangeRecord[] = [...records];
+		if (clock) all.push({ kind: 'clock', page: null, prop: null, old: null, new: { at: now } });
+		const { seq } = await this.#commit(this.#db, SYSTEM_ACTOR, async (_tx, env) => {
+			for (const r of records) if (r.page) env.unstamped.add(r.page);
+			return all;
+		});
+		return { recomputed: records.length, seq };
 	}
 
 	/** Also callable from tests and operators: prune now (or as of `now`). */
@@ -614,6 +708,13 @@ export class WorkspaceDO extends DurableObject<Env> {
 						throw withOpPath(error, index);
 					}
 				}
+				// Rollups and formulas that depend on what the batch wrote (one pass for the whole batch), then
+				// the search index, all in this transaction: their records flow through the same live loop.
+				const written = new Set(records.flatMap((r) => (r.page ? [r.page] : [])));
+				const computed = await afterWrite(tx, records, { actorId: env.actorId, now: env.now });
+				for (const r of computed) if (r.page && !written.has(r.page)) env.unstamped.add(r.page);
+				records.push(...computed);
+				await indexChanges(tx, records);
 				return records;
 			},
 			{ mid: batch.mid, definition: ops.some(isDefinitionOp) }
@@ -675,7 +776,7 @@ export class WorkspaceDO extends DurableObject<Env> {
 	async getPage(actor: Actor, id: string): Promise<PageRow> {
 		const level = await this.#access.pageAccess(actor, id);
 		// A page the caller cannot see does not exist for them.
-		const row = level ? this.#hub.reader.pageRows([id], () => level).get(id) : undefined;
+		const row = level ? (await this.#hub.reader.pageRows([id], () => level)).get(id) : undefined;
 		if (!row) throw notFound(`Page "${id}"`);
 		return row;
 	}
@@ -954,6 +1055,7 @@ export class WorkspaceDO extends DurableObject<Env> {
 			SYSTEM_ACTOR,
 			async (tx) => {
 				result = await ingestInTransaction(tx, items);
+				await indexBodies(tx, items);
 				return result.records;
 			},
 			{ backlinkTargets: () => result?.backlinkTargets ?? [] }
@@ -1050,6 +1152,188 @@ export class WorkspaceDO extends DurableObject<Env> {
 		return filesUsage(this.ctx.storage.sql);
 	}
 
+	// ───────────────────────── search (Accounts, AI, API: src/server/search) ─────────────────────────
+
+	/** What a search of `actor` runs on: raw reads, ANDed with the actor's visibility set (FORBIDDEN for non-members). */
+	async #searchContext(actor: Actor, semantic: boolean) {
+		this.#writeDb(actor);
+		const visible = await this.visibleNums({ userId: actor.userId, role: actor.role });
+		return { db: this.#db, visible, vector: semantic ? vectorSearchOf(this.env, actor.workspaceId) : null };
+	}
+
+	/** The search page: full text (plus Vectorize for questions), filters, snippets. Only pages the actor can read. */
+	async searchQuery(actor: Actor, input: SearchInput): Promise<SearchResult> {
+		return searchPages(await this.#searchContext(actor, true), input);
+	}
+
+	/** Quick find (`⌘K`): title prefixes, recently visited pages, then full-text hits. */
+	async searchQuick(actor: Actor, input: QuickFindInput): Promise<QuickFindResult> {
+		return quickFind(await this.#searchContext(actor, false), actor.userId, input);
+	}
+
+	/** Records that `actor` opened a page they can read (feeds quick find's "recent"). Anything else is ignored. */
+	async searchVisit(actor: Actor, pageId: string): Promise<void> {
+		const context = await this.#searchContext(actor, false);
+		const row = await this.#db.page.findUnique({ where: { id: pageId }, select: { num: true, deletedAt: true } });
+		if (row && !row.deletedAt && context.visible.has(row.num)) await recordVisit(this.#db, actor.userId, row.num);
+	}
+
+	/** Backfill for workspaces that existed before search: rebuilds the whole FTS5 index. Idempotent. */
+	async reindexAll(): Promise<{ pages: number }> {
+		return reindexSearch(this.#db);
+	}
+
+	/** Backfill for Vectorize: embeds the chunks of every live page whose hash is new. Idempotent; a no-op without AI/Vectorize. */
+	async embedAll(): Promise<EmbedResult[]> {
+		const results: EmbedResult[] = [];
+		const store = {
+			diff: async (model: string, pages: PageChunks[]) => diffChunks(this.#db, model, pages),
+			apply: (model: string, pages: PageChunks[]) => applyChunks(this.#db, model, pages),
+			chunkIds: (pageIds: string[]) => chunkIdsOf(this.#db, pageIds),
+			forget: (pageIds: string[]) => forgetChunks(this.#db, pageIds)
+		};
+		let after = 0;
+		for (;;) {
+			const rows = await this.#db.$queryRawUnsafe<{ id: string; num: number; version: number; text: string; outline_json: string; edited_at: number | null; edited_by: string | null }>(
+				`SELECT p.id AS id, p.num AS num, t.version AS version, t.text AS text, t.outline_json AS outline_json, t.edited_at AS edited_at, t.edited_by AS edited_by
+				 FROM page p JOIN page_text t ON t.page_num = p.num WHERE p.deleted_at IS NULL AND p.num > ? ORDER BY p.num LIMIT 50`,
+				after
+			);
+			if (rows.length === 0) break;
+			const items: PageIndexItem[] = rows.map((r) => ({
+				pageId: r.id,
+				version: r.version,
+				text: r.text,
+				outline: JSON.parse(r.outline_json || '[]'),
+				links: [],
+				mentions: [],
+				editedAt: r.edited_at ?? 0,
+				editedBy: r.edited_by
+			}));
+			const result = await embedPages(this.env, this.ctx.id.name ?? '', items, { store });
+			results.push(result);
+			if (result.unavailable) break;
+			after = rows[rows.length - 1]!.num;
+		}
+		return results;
+	}
+
+	/** Embedding bookkeeping, called over RPC by `embedPages` and `deletePageVectors` (src/server/search). */
+	async embedDiff(model: string, pages: PageChunks[]): Promise<EmbedPlan[]> {
+		return diffChunks(this.#db, model, pages);
+	}
+
+	async embedApply(model: string, pages: PageChunks[]): Promise<void> {
+		await applyChunks(this.#db, model, pages);
+	}
+
+	async embedChunkIds(pageIds: string[]): Promise<string[]> {
+		return chunkIdsOf(this.#db, pageIds);
+	}
+
+	async embedForget(pageIds: string[]): Promise<void> {
+		await forgetChunks(this.#db, pageIds);
+	}
+
+	// ───────────────────────── trash and purge ─────────────────────────
+
+	/**
+	 * What the Purge workflow deletes next: tombstones older than the cutoff (30 days by default), deepest first,
+	 * at most `limit`, and the archived teamspaces that have no page left. Read only.
+	 */
+	async purgePlan(cutoffMs: number = Date.now() - TRASH_RETENTION_MS, limit = 500): Promise<{ pages: PurgedPage[]; teamspaces: string[] }> {
+		return { pages: await planPurge(this.#db, cutoffMs, limit), teamspaces: await purgeableTeamspaces(this.#db, cutoffMs) };
+	}
+
+	/**
+	 * Deletes tombstoned pages and everything in this object that hangs off them (EAV rows, relation cells of
+	 * other pages, grants, links, collection members, indexed text). Idempotent, and safe to retry after a
+	 * partial failure: pages that are live or still hold a child outside the set are skipped, and the answer is
+	 * the pages of `pages` that are gone from the database afterwards (this call's or an earlier one's), which
+	 * is what the next steps (search rows, rooms, files, vectors) act on. The caller (the workflow, or
+	 * `purgeTrash` after its own checks) is trusted: the base client is the only one that can hard-delete.
+	 */
+	async purgePages(pages: PurgedPage[]): Promise<PurgedPage[]> {
+		return this.#purge(SYSTEM_ACTOR, pages);
+	}
+
+	async #purge(actorId: string, pages: readonly PurgedPage[]): Promise<PurgedPage[]> {
+		await this.#commit(this.#db, actorId, async (tx, env) => {
+			const out = await purgePageRows(tx, pages.map((p) => p.id), { actorId, now: env.now });
+			for (const r of out.records) if (r.page) env.unstamped.add(r.page);
+			return out.records;
+		});
+		const left = new Set<string>();
+		for (const part of chunks(pages, 90)) {
+			for (const r of this.ctx.storage.sql.exec<{ id: string }>(`SELECT id FROM page WHERE id IN (${part.map(() => '?').join(',')})`, ...part.map((p) => p.id)).toArray()) left.add(r.id);
+		}
+		return pages.filter((p) => !left.has(p.id));
+	}
+
+	/** Removes the search rows (and visits) of purged pages by number; idempotent. */
+	async removeIndexRows(nums: number[]): Promise<void> {
+		await removeFromIndex(this.#db, nums);
+	}
+
+	/** Deletes archived teamspaces past the cutoff once their pages are purged. Returns the ids removed. */
+	async purgeTeamspaces(cutoffMs: number = Date.now() - TRASH_RETENTION_MS): Promise<string[]> {
+		const ids = await purgeableTeamspaces(this.#db, cutoffMs);
+		let done: string[] = [];
+		if (ids.length > 0) {
+			await this.#commit(this.#db, SYSTEM_ACTOR, async (tx) => {
+				done = await purgeTeamspaceRows(tx, ids);
+				return done.map((id) => ({ kind: 'teamspace.purge', page: null, prop: id, old: null, new: null }));
+			});
+		}
+		return done;
+	}
+
+	/**
+	 * `page.purge`: deletes a trashed page and everything under it for good, ahead of the 30 days. Needs `full`
+	 * on the page (the policy keeps a trashed page's grants, so the person who could delete it can purge it)
+	 * and the page must be the root of its trash entry. Returns the pages that went; the caller finishes the job
+	 * (rooms, files, vectors) through the Purge workflow.
+	 */
+	async purgeTrash(actor: Actor, pageId: string): Promise<{ pages: PurgedPage[] }> {
+		const gov = this.#writeDb(actor);
+		const row = this.ctx.storage.sql
+			.exec<{ deleted_at: string | null; trash_root: string | null }>('SELECT deleted_at, trash_root FROM page WHERE id = ?', pageId)
+			.toArray()[0];
+		const can = row ? await (gov.page as unknown as { can(level: 'read' | 'full', where: { id: string }): Promise<boolean> }).can('read', { id: pageId }) : false;
+		if (!row || !can) throw notFound(`Page "${pageId}"`);
+		if (!row.deleted_at || row.trash_root !== pageId) throw invalid('/id', 'not_in_trash', 'Only a page that was moved to the trash can be deleted forever');
+		if (!(await (gov.page as unknown as { can(level: 'full', where: { id: string }): Promise<boolean> }).can('full', { id: pageId }))) {
+			throw new WorkspaceError('FORBIDDEN', 'You do not have access to delete this page');
+		}
+		// Everything below it goes, whichever entry of the trash it was in.
+		const ids = this.#hub.reader.subtree([pageId]);
+		const nums = this.#hub.reader.nums(ids);
+		const gone = await this.#purge(actor.userId, ids.flatMap((id) => (nums.has(id) ? [{ id, num: nums.get(id) as number }] : [])));
+		await removeFromIndex(this.#db, gone.map((p) => p.num));
+		return { pages: gone };
+	}
+
+	/** Every page of the workspace, tombstones included, after `num`: how workspace deletion walks the Page DOs. */
+	async pagesAfter(num: number, limit = 500): Promise<PurgedPage[]> {
+		return this.ctx.storage.sql.exec<{ id: string; num: number }>('SELECT id, num FROM page WHERE num > ? ORDER BY num LIMIT ?', num, limit).toArray();
+	}
+
+	/**
+	 * Deletes everything this object stores (workspace deletion, after 30 days): closes the sockets, cancels the
+	 * alarm and wipes the storage. The Purge workflow has already taken the rooms, the R2 prefix and the vectors.
+	 */
+	async destroy(): Promise<void> {
+		for (const socket of this.#transport.sockets()) {
+			try {
+				socket.ws.close(CLOSE.WORKSPACE_GONE, 'workspace deleted');
+			} catch {
+				// already closed
+			}
+		}
+		await this.ctx.storage.deleteAlarm();
+		await this.ctx.storage.deleteAll();
+	}
+
 	// ───────────────────────── diagnostics ─────────────────────────
 
 	/** Live-loop counters, for tests and operators: shared units, evaluations, sockets with a stream. */
@@ -1060,7 +1344,7 @@ export class WorkspaceDO extends DurableObject<Env> {
 			isolateEvaluations: unitEvaluations(),
 			streams: this.#hub.streamSockets().length,
 			head: this.#hub.headSeq(),
-			stale: this.#hub.staleUnits()
+			stale: await this.#hub.staleUnits()
 		};
 	}
 }

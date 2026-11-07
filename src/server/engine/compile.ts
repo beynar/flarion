@@ -24,6 +24,10 @@ import type { WorkspaceDb } from '../db/workspace.client';
 import { totalCountOf, valueCountOf, selectivity } from '../objects/workspace/eav/counts';
 import { loadEavRegistry, type EavRegistry } from '../objects/workspace/eav/registry';
 import { all } from '../objects/workspace/eav/sql';
+import { chunks, qmarks } from '../objects/workspace/eav/sql';
+import type { Ctx } from './context';
+import { IN_CHUNK } from './context';
+import { LIVE_TARGET_SQL } from './relations';
 import { EXACT_NEEDLE_UNITS, eavSource, pageSource, type Frag, type Source, type Verify } from './sources';
 
 export interface ConstNode {
@@ -174,9 +178,15 @@ export async function compileCondition(env: CompileEnv, c: Condition): Promise<P
 const eavProp = (env: CompileEnv, c: Condition): number | undefined => env.registry.num(c.prop);
 
 /** Rows of the property, any value: the positive side of is empty / is not empty. */
-async function presenceLeaf(env: CompileEnv, c: Condition, table: 'p_text' | 'p_num' | 'p_date' | 'p_ref', prop: number): Promise<LeafNode> {
+async function presenceLeaf(
+	env: CompileEnv,
+	c: Condition,
+	table: 'p_text' | 'p_num' | 'p_date' | 'p_ref',
+	prop: number,
+	frag: Frag | null = null
+): Promise<LeafNode> {
 	const total = await env.est(() => totalCountOf(env.db, prop), NO_ESTIMATE);
-	return leaf(env, c, eavSource(table, prop, null), c.op === 'is_empty', total, total, `${table} prop=${prop} (rows)`);
+	return leaf(env, c, eavSource(table, prop, frag), c.op === 'is_empty', total, total, `${table} prop=${prop} (rows)`);
 }
 
 // ───────────────────────────── text ─────────────────────────────
@@ -407,9 +417,11 @@ async function refsLeaf(env: CompileEnv, c: Condition, def: PropertyDef | undefi
 			const bound = await env.est(() => env.bound(), NO_ESTIMATE);
 			return leaf(env, c, pageSource(frag), false, bound === NO_ESTIMATE ? bound : Math.ceil(bound / 2), bound, `page ${col} ${c.op}`);
 		}
+		if (def?.type === 'relation' && def.config.reverseOf) return reverseLeaf(env, c, def.config.reverseOf, null);
 		const prop = eavProp(env, c);
 		if (prop === undefined) return FALSE;
-		return presenceLeaf(env, c, 'p_ref', prop);
+		// A relation to a tombstone reads as gone: only rows pointing at a live page count as a value.
+		return presenceLeaf(env, c, 'p_ref', prop, def?.type === 'relation' ? { sql: LIVE_TARGET_SQL, params: [] } : null);
 	}
 
 	let target: string;
@@ -435,17 +447,59 @@ async function refsLeaf(env: CompileEnv, c: Condition, def: PropertyDef | undefi
 		return leaf(env, c, pageSource(frag), negate, posEst, indexed ? posEst : bound, `page ${col} = ?`);
 	}
 
+	if (def?.type === 'relation' && def.config.reverseOf) {
+		const [holder] = await all<{ num: number }>(env.db, 'SELECT num FROM page WHERE id = ? AND deleted_at IS NULL', target);
+		if (!holder) return negate ? TRUE : FALSE;
+		return reverseLeaf(env, c, def.config.reverseOf, holder.num);
+	}
 	const prop = eavProp(env, c);
 	if (prop === undefined || !def) return FALSE;
 	let v = target;
 	if (def.type === 'relation') {
-		// Relation targets are stored as the target's `page.num`.
-		const [row] = await all<{ num: number }>(env.db, 'SELECT num FROM page WHERE id = ?', target);
+		// Relation targets are stored as the target's `page.num`; a tombstoned target is no target.
+		const [row] = await all<{ num: number }>(env.db, 'SELECT num FROM page WHERE id = ? AND deleted_at IS NULL', target);
 		if (!row) return negate ? TRUE : FALSE;
 		v = String(row.num);
 	}
 	const posEst = await env.est(() => valueCountOf(env.db, prop, v), NO_ESTIMATE);
 	return leaf(env, c, eavSource('p_ref', prop, { sql: 'v = ?', params: [v] }), negate, posEst, posEst, `p_ref prop=${prop} v=${v}`);
+}
+
+// ───────────────────────────── reverse relations ─────────────────────────────
+
+/**
+ * The reverse side of a two-way relation: page T is related to X when X's relation points at T. A range scan of
+ * `p_ref` on `(prop, v)` (or on `page` for one holder X); the holder must be live, the executor restricts T.
+ * `holder === null`: any holder (the presence of the property).
+ */
+function reverseSource(prop: number, holder: number | null): Source {
+	const live = 'EXISTS (SELECT 1 FROM page WHERE page.num = p_ref.page AND page.deleted_at IS NULL)';
+	const where = holder === null ? `prop = ? AND ${live}` : 'prop = ? AND page = ?';
+	const base = holder === null ? [prop] : [prop, holder];
+	return {
+		async scan(ctx: Ctx) {
+			ctx.counters.scans++;
+			const rows = await ctx.q<{ v: string }>(`SELECT DISTINCT v FROM p_ref WHERE ${where}`, ...base);
+			return rows.map((r) => Number(r.v));
+		},
+		async probe(ctx: Ctx, nums: readonly number[]) {
+			const out = new Set<number>();
+			for (const part of chunks(nums, IN_CHUNK)) {
+				ctx.counters.probes++;
+				const rows = await ctx.q<{ v: string }>(`SELECT DISTINCT v FROM p_ref WHERE ${where} AND v IN (${qmarks(part.length)})`, ...base, ...part.map(String));
+				for (const r of rows) out.add(Number(r.v));
+			}
+			return [...out];
+		}
+	};
+}
+
+async function reverseLeaf(env: CompileEnv, c: Condition, relationId: string, holder: number | null): Promise<PlanNode> {
+	const prop = env.registry.num(relationId);
+	if (prop === undefined) return FALSE;
+	const negate = c.op === 'is_empty' || c.op === 'not_contains';
+	const posEst = await env.est(() => (holder === null ? totalCountOf(env.db, prop) : probeRows(env, 'p_ref', prop, { sql: 'page = ?', params: [holder] })), NO_ESTIMATE);
+	return leaf(env, c, reverseSource(prop, holder), negate, posEst, posEst, `p_ref prop=${prop} reverse${holder === null ? '' : ` page=${holder}`}`);
 }
 
 // ───────────────────────────── helpers ─────────────────────────────

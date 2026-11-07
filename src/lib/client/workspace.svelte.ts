@@ -66,7 +66,8 @@ import type {
 	ViewRow
 } from '#lib/shared/protocol.ts';
 import type { Member, Teamspace, TeamspaceMember, Workspace } from '#lib/shared/schemas.ts';
-import type { ViewDef } from '#lib/shared/definitions.ts';
+import type { CollectionDef, ViewDef } from '#lib/shared/definitions.ts';
+import { GROUP_EMPTY, type GroupBySpec } from '#lib/shared/filter-ast.ts';
 import { compareRank, placeAt, rankAfter } from '#lib/shared/sort-keys.ts';
 
 // ───────────────────────────── types ─────────────────────────────
@@ -94,6 +95,13 @@ export interface PageEntity {
 
 export type WindowStatus = 'pending' | 'ready' | 'error';
 
+/** One group of a grouped `view` window: its key, how many rows it holds in all, and the ids loaded so far. */
+export interface GroupWindow {
+	key: string;
+	total: number;
+	ids: string[];
+}
+
 export interface WindowState {
 	id: string;
 	kind: SubscriptionKind;
@@ -106,7 +114,23 @@ export interface WindowState {
 	total: number;
 	/** The `seq` of the snapshot this window is built on. */
 	seq: number | null;
+	/** Grouped `view` windows: the groups in display order (`ids` is then every id loaded, once). */
+	groups?: GroupWindow[];
 	error?: string;
+}
+
+/** A database's definition and views, as the view host reads them. */
+export interface CollectionBundle {
+	collection: CollectionDef;
+	views: ViewDef[];
+}
+
+/** A `view` window ready to render. `groups` is set for a grouped view (`loaded` counts the server's rows, for "Load more"). */
+export interface ViewData {
+	status: WindowStatus;
+	total: number;
+	rows: ViewRow[];
+	groups?: { key: string; total: number; loaded: number; rows: ViewRow[] }[];
 }
 
 export interface PageRef {
@@ -292,7 +316,10 @@ export class WorkspaceStore {
 	readonly windows = new SvelteMap<string, WindowState>();
 	/** Who is on which page (everyone, me included). */
 	readonly presence = new SvelteMap<string, PresenceUser[]>();
+	/** Views of each collection (by collection id), as fetched by `loadCollection` and edited optimistically. */
 	readonly views = new SvelteMap<string, ViewDef[]>();
+	/** The collection definitions behind them. */
+	readonly collections = new SvelteMap<string, CollectionDef>();
 	status = $state<SocketStatus>('connecting');
 	/** The log position applied so far, null before the first snapshot. */
 	seq = $state<number | null>(null);
@@ -340,6 +367,8 @@ export class WorkspaceStore {
 	#titleTimers = new Map<string, unknown>();
 	#subs = new Map<string, { sub: Subscription; count: number }>();
 	#pendingDiffs = new Map<string, DiffFrame[]>();
+	/** View windows resized and not yet answered: the answer is a diff at the log's head, possibly already applied. */
+	#awaitingWindow = new Set<string>();
 	#loadedParents = new Set<string>([ROOT]);
 	#expanded = new Set<string | null>([null]);
 	#treeTimer: unknown = null;
@@ -578,22 +607,36 @@ export class WorkspaceStore {
 			ids: prev?.ids ?? [],
 			rows: prev?.rows ?? new Map(),
 			total: prev?.total ?? 0,
-			seq: prev?.seq ?? null
+			seq: prev?.seq ?? null,
+			...(prev?.groups ? { groups: prev.groups } : {})
 		});
 	}
 
 	#closeWindow(id: string): void {
 		const w = this.windows.get(id);
 		this.windows.delete(id);
+		this.#awaitingWindow.delete(id);
 		this.#pendingDiffs.delete(id);
 		if (w) this.#gc(new Set(w.ids));
 	}
 
-	/** Grows or shrinks a view window. */
+	/**
+	 * Grows or shrinks a view window; `group` addresses one group of a grouped view (the limit of the others is
+	 * unchanged). A group's limit is not part of the held subscription, so a reconnect resubscribes with the
+	 * view's own `limit` for every group.
+	 */
 	setWindow(id: string, limit: number, group?: string): void {
 		const held = this.#subs.get(id);
-		if (held && held.sub.kind === 'view') held.sub = { ...held.sub, limit };
-		this.#send({ t: 'window', id, limit, group });
+		if (held && held.sub.kind === 'view' && group === undefined) held.sub = { ...held.sub, limit };
+		this.#awaitingWindow.add(id);
+		this.#send({ t: 'window', id, limit, ...(group !== undefined ? { group } : {}) });
+	}
+
+	/** Asks the server for a fresh snapshot of a held subscription (a view's definition changed). */
+	resubscribe(id: string): void {
+		const held = this.#subs.get(id);
+		if (!held) return;
+		this.#send({ t: 'subscribe', id, sub: held.sub });
 	}
 
 	#send(msg: ClientMessage): void {
@@ -690,9 +733,11 @@ export class WorkspaceStore {
 	receive(msg: ServerMessage): void {
 		switch (msg.t) {
 			case 'welcome':
+				this.#awaitingWindow.clear();
 				// A reconnect: definition changes pushed while the socket was down (the log replays page and
 				// value changes, not the registry or the directory) are fetched again.
 				if (this.#welcomed) {
+					this.#scheduleCollectionsRefresh();
 					this.#scheduleRegistryRefresh();
 					this.#scheduleDirectoryRefresh();
 					this.#o.onReconnect?.();
@@ -703,6 +748,8 @@ export class WorkspaceStore {
 				this.#o.onLock?.({ pageId: msg.pageId, locked: msg.locked, lockedBy: msg.lockedBy, lockedAt: msg.lockedAt });
 				return;
 			case 'registry':
+				// Property and option edits, and (the frame's other reason) a view or collection definition change.
+				this.#scheduleCollectionsRefresh();
 				if (msg.scopes.includes('properties')) this.#scheduleRegistryRefresh();
 				if (msg.scopes.includes('directory')) this.#scheduleDirectoryRefresh();
 				return;
@@ -762,6 +809,7 @@ export class WorkspaceStore {
 		const touched = new Set<string>(w.ids);
 		const ids: string[] = [];
 		const rows = new Map<string, ViewRow | BacklinkRow>();
+		let groups: GroupWindow[] | undefined;
 		if (msg.kind === 'tree') {
 			for (const row of msg.rows) {
 				this.#base.set(row.id, entityFromTree(row, this.#base.get(row.id)));
@@ -779,8 +827,11 @@ export class WorkspaceStore {
 		} else if (msg.kind === 'view') {
 			const all = msg.groups ? msg.groups.flatMap((g) => g.rows) : msg.rows;
 			for (const row of all) {
-				ids.push(row.id);
+				if (!rows.has(row.id)) ids.push(row.id);
 				rows.set(row.id, row);
+			}
+			if (msg.groups) {
+				groups = msg.groups.map((g) => ({ key: g.key, total: g.total, ids: g.rows.map((r) => r.id) }));
 			}
 		} else {
 			for (const row of msg.rows) {
@@ -788,7 +839,7 @@ export class WorkspaceStore {
 				rows.set(row.id, row);
 			}
 		}
-		this.windows.set(msg.id, { ...w, status: 'ready', ids, rows, total: msg.total, seq: msg.seq, error: undefined });
+		this.windows.set(msg.id, { ...w, status: 'ready', ids, rows, total: msg.total, seq: msg.seq, groups, error: undefined });
 		if (w.kind === 'tree' || w.kind === 'page') {
 			const keep = new Set(ids);
 			this.#gc(new Set([...touched].filter((id) => !keep.has(id))));
@@ -813,7 +864,12 @@ export class WorkspaceStore {
 	}
 
 	#applyDiff(msg: DiffFrame): void {
-		if (this.seq !== null && msg.seq <= this.seq && !msg.subs.some((s) => this.windows.get(s.id)?.status === 'pending')) {
+		// The answer to a `window` message carries the log's head: no newer than what the window holds.
+		const answersWindow = (id: string) => {
+			const w = this.windows.get(id);
+			return this.#awaitingWindow.has(id) && !!w && w.status === 'ready' && w.seq !== null && msg.seq <= w.seq;
+		};
+		if (this.seq !== null && msg.seq <= this.seq && !msg.subs.some((s) => this.windows.get(s.id)?.status === 'pending' || answersWindow(s.id))) {
 			return; // already applied (a replay overlapping what we hold)
 		}
 		for (const s of msg.subs) {
@@ -825,7 +881,9 @@ export class WorkspaceStore {
 				this.#pendingDiffs.set(s.id, list);
 				continue;
 			}
-			if (w.seq !== null && msg.seq <= w.seq) continue;
+			if (answersWindow(s.id)) {
+				this.#awaitingWindow.delete(s.id);
+			} else if (w.seq !== null && msg.seq <= w.seq) continue;
 			this.#applyDiffTo({ ...msg, subs: [s] }, s.id);
 		}
 		// Frames held for a snapshot do not advance the log position past it.
@@ -838,6 +896,10 @@ export class WorkspaceStore {
 		const w = this.windows.get(id);
 		const ops = frame.subs.find((s) => s.id === id)?.ops;
 		if (!w || !ops) return;
+		if (w.kind === 'view') {
+			this.windows.set(id, { ...this.#applyViewOps(w, ops), seq: Math.max(w.seq ?? 0, frame.seq) });
+			return;
+		}
 		const shared = w.kind === 'tree' || w.kind === 'page';
 		const ids = [...w.ids];
 		const rows = new Map(w.rows);
@@ -925,7 +987,143 @@ export class WorkspaceStore {
 			}
 			case 'count':
 				return op.total;
+			case 'groups':
+				return total;
 		}
+	}
+
+	/** The group-by of a view subscription: its own override, else its saved view's. */
+	#groupSpecOf(w: WindowState): GroupBySpec | null {
+		if (w.sub.kind !== 'view') return null;
+		if (w.sub.groupBy !== undefined) return w.sub.groupBy;
+		const sub = w.sub;
+		return this.views.get(sub.collectionId)?.find((v) => v.id === (sub.viewId ?? this.views.get(sub.collectionId)?.[0]?.id))?.groupBy ?? null;
+	}
+
+	/**
+	 * Applies the ops of one commit to a `view` window, flat or grouped. In a grouped window `add`, `remove`
+	 * and `move` name their group (a row changing group is a `remove` and an `add`), `count` carries a group's
+	 * total (or the window's, without `group`), and `update` is row-level. A `groups` op carries the ordered group
+	 * keys (created empty, dropped or reordered); an `add` naming a group the window lacks creates it as a
+	 * fallback, where the group-by order puts it.
+	 */
+	#applyViewOps(w: WindowState, ops: DiffOp[]): WindowState {
+		const rows = new Map(w.rows);
+		const ids = [...w.ids];
+		const groups = w.groups ? w.groups.map((g) => ({ ...g, ids: [...g.ids] })) : undefined;
+		let total = w.total;
+		const findGroup = (key: string | undefined) => groups?.find((g) => g.key === (key ?? GROUP_EMPTY));
+		const heldAnywhere = (id: string) => (groups ? groups.some((g) => g.ids.includes(id)) : ids.includes(id));
+		const drop = (id: string) => {
+			if (heldAnywhere(id)) return;
+			rows.delete(id);
+			const i = ids.indexOf(id);
+			if (i !== -1) ids.splice(i, 1);
+		};
+		for (const op of ops) {
+			switch (op.op) {
+				case 'add': {
+					const row = op.row as ViewRow;
+					rows.set(row.id, row);
+					if (groups) {
+						if (!ids.includes(row.id)) ids.push(row.id);
+						const g = findGroup(op.group) ?? this.#newGroup(groups, op.group ?? GROUP_EMPTY, this.#groupSpecOf(w));
+						const had = g.ids.indexOf(row.id);
+						if (had !== -1) g.ids.splice(had, 1);
+						else g.total += 1;
+						g.ids.splice(Math.min(op.index, g.ids.length), 0, row.id);
+					} else {
+						const had = ids.indexOf(row.id);
+						if (had !== -1) ids.splice(had, 1);
+						else total += 1;
+						ids.splice(Math.min(op.index, ids.length), 0, row.id);
+					}
+					break;
+				}
+				case 'remove': {
+					if (groups) {
+						const targets = op.group !== undefined ? [findGroup(op.group)] : groups;
+						for (const g of targets) {
+							const i = g?.ids.indexOf(op.id) ?? -1;
+							if (g && i !== -1) {
+								g.ids.splice(i, 1);
+								g.total = Math.max(0, g.total - 1);
+							}
+						}
+						drop(op.id);
+					} else {
+						const i = ids.indexOf(op.id);
+						if (i === -1) break;
+						ids.splice(i, 1);
+						rows.delete(op.id);
+						total = Math.max(0, total - 1);
+					}
+					break;
+				}
+				case 'move': {
+					const list = groups ? findGroup(op.group)?.ids : ids;
+					if (!list) break;
+					const i = list.indexOf(op.id);
+					if (i === -1) break;
+					list.splice(i, 1);
+					list.splice(Math.min(op.index, list.length), 0, op.id);
+					break;
+				}
+				case 'update': {
+					const row = rows.get(op.id) as ViewRow | undefined;
+					if (!row) break;
+					if (op.prop === SYSTEM_TITLE) rows.set(op.id, { ...row, title: typeof op.value === 'string' ? op.value : '' });
+					else if (op.prop === '$icon') rows.set(op.id, { ...row, icon: (op.value as string | null) ?? null });
+					else if (op.prop === '$cover') rows.set(op.id, { ...row, cover: (op.value as string | null) ?? null });
+					else if (op.prop.startsWith('$')) break;
+					else rows.set(op.id, { ...row, values: { ...row.values, [op.prop]: op.value } });
+					break;
+				}
+				case 'groups': {
+					if (!groups) break;
+					// The server's ordered list of group keys: new ones start empty, missing ones go, the rest reorder.
+					const next = op.keys.map((key) => groups.find((g) => g.key === key) ?? ({ key, total: 0, ids: [] } as GroupWindow));
+					groups.splice(0, groups.length, ...next);
+					for (const id of [...rows.keys()]) drop(id);
+					break;
+				}
+				case 'count': {
+					if (groups && op.group !== undefined) {
+						const g = findGroup(op.group);
+						if (g) g.total = op.total;
+					} else total = op.total;
+					break;
+				}
+			}
+		}
+		let kept = groups;
+		return { ...w, ids, rows, total, ...(kept ? { groups: kept } : {}) };
+	}
+
+	/** Inserts an empty group where the group-by order puts it. */
+	#newGroup(groups: GroupWindow[], key: string, spec: GroupBySpec | null): GroupWindow {
+		const g: GroupWindow = { key, total: 0, ids: [] };
+		const empty = groups.findIndex((x) => x.key === GROUP_EMPTY);
+		const end = empty === -1 ? groups.length : empty;
+		if (key === GROUP_EMPTY) {
+			groups.push(g);
+			return g;
+		}
+		const def = spec ? this.#registry.get(spec.prop) : undefined;
+		const options = def && (def.type === 'select' || def.type === 'status' || def.type === 'multi_select') ? def.config.options.map((o) => o.id) : [];
+		const sort = spec?.sort ?? 'manual';
+		let at = end;
+		if (sort === 'manual' && options.length) {
+			const rank = options.indexOf(key);
+			at = groups.findIndex((x, i) => i < end && options.indexOf(x.key) > rank);
+			if (at === -1) at = end;
+		} else {
+			const cmp = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0) * (sort === 'desc' ? -1 : 1);
+			at = groups.findIndex((x, i) => i < end && cmp(x.key, key) > 0);
+			if (at === -1) at = end;
+		}
+		groups.splice(at, 0, g);
+		return g;
 	}
 
 	/** Removes base entities no tree or page window holds any more. */
@@ -1410,6 +1608,137 @@ export class WorkspaceStore {
 		return this.#defineOps([{ op: 'deleteProperty', id }], this.properties.filter((p) => p.id !== id));
 	}
 
+	// ───────────────────────────── databases: collections and views ─────────────────────────────
+
+	#collectionLoads = new Map<string, Promise<CollectionBundle | null>>();
+	#collectionsTimer: unknown = null;
+
+	/** Fetches a collection and its views (cached in `collections` and `views`). `force` fetches again. */
+	loadCollection(id: string, force = false): Promise<CollectionBundle | null> {
+		const cached = this.collections.get(id);
+		const views = this.views.get(id);
+		if (!force && cached && views) return Promise.resolve({ collection: cached, views });
+		const inflight = this.#collectionLoads.get(id);
+		if (inflight) return inflight;
+		const run = (async () => {
+			try {
+				const found = await this.#rpc.collection.get({ id });
+				this.collections.set(id, found.collection);
+				this.views.set(id, found.views);
+				return found;
+			} catch {
+				return null;
+			} finally {
+				this.#collectionLoads.delete(id);
+			}
+		})();
+		this.#collectionLoads.set(id, run);
+		return run;
+	}
+
+	#scheduleCollectionsRefresh(): void {
+		if (this.#collectionsTimer || this.#disposed || this.collections.size === 0) return;
+		this.#collectionsTimer = this.#clock.setTimeout(() => {
+			this.#collectionsTimer = null;
+			for (const id of [...this.collections.keys()]) void this.loadCollection(id, true);
+		}, 150);
+	}
+
+	/** Re-reads every collection this tab shows (a tab coming back to the foreground). */
+	refreshCollections(): void {
+		for (const id of [...this.collections.keys()]) void this.loadCollection(id, true);
+	}
+
+	/**
+	 * Edits a view (name, type, filter, sorts, group-by, columns). The local copy changes at once and the call
+	 * goes out; a failure restores it. The view's windows are asked for a fresh snapshot afterwards, in case the
+	 * server does not recompute them for a definition change.
+	 */
+	async updateView(
+		collectionId: string,
+		viewId: string,
+		patch: Partial<Pick<ViewDef, 'name' | 'type' | 'filter' | 'sorts' | 'groupBy' | 'columns'>>
+	): Promise<void> {
+		const before = this.views.get(collectionId) ?? [];
+		this.views.set(collectionId, before.map((v) => (v.id === viewId ? { ...v, ...patch } : v)));
+		try {
+			await this.mutate([{ op: 'updateView', id: viewId, ...patch }]);
+		} catch (error) {
+			this.views.set(collectionId, before);
+			throw error;
+		}
+	}
+
+	/** Adds a view (last in the tab bar). Resolves with its id. */
+	async createView(
+		collectionId: string,
+		input: { type: ViewDef['type']; name: string; id?: string; onCreated?: (id: string) => void } & Partial<Pick<ViewDef, 'filter' | 'sorts' | 'groupBy' | 'columns'>>
+	): Promise<string> {
+		const before = this.views.get(collectionId) ?? [];
+		const id = input.id ?? newId('v');
+		const rank = rankAfter(before.at(-1)?.rank ?? null);
+		const view: ViewDef = {
+			id,
+			collectionId,
+			type: input.type,
+			name: input.name,
+			filter: input.filter ?? { and: [] },
+			sorts: input.sorts ?? [],
+			groupBy: input.groupBy ?? null,
+			columns: input.columns ?? { columns: [], options: {} },
+			rank
+		};
+		this.views.set(collectionId, [...before, view]);
+		input.onCreated?.(id);
+		try {
+			await this.mutate([
+				{
+					op: 'createView',
+					id,
+					collectionId,
+					type: view.type,
+					name: view.name,
+					filter: view.filter,
+					sorts: view.sorts,
+					groupBy: view.groupBy,
+					columns: view.columns,
+					rank
+				}
+			]);
+		} catch (error) {
+			this.views.set(collectionId, before);
+			throw error;
+		}
+		return id;
+	}
+
+	async deleteView(collectionId: string, viewId: string): Promise<void> {
+		const before = this.views.get(collectionId) ?? [];
+		this.views.set(collectionId, before.filter((v) => v.id !== viewId));
+		try {
+			await this.mutate([{ op: 'deleteView', id: viewId }]);
+		} catch (error) {
+			this.views.set(collectionId, before);
+			throw error;
+		}
+	}
+
+	/**
+	 * Creates a full-page database: a page (`isDatabase`), its collection (id = the page's id, membership
+	 * "parent is this page") and a default table view, as the editor does for an inline one. Resolves with the id.
+	 */
+	async createDatabase(opts: { parentId: string | null; teamspaceId?: string | null; title?: string; icon?: string | null }): Promise<string> {
+		const id = await this.createPage({ ...opts, title: opts.title ?? 'Untitled database', isDatabase: true });
+		try {
+			await this.#rpc.collection.create({ id, pageId: id, sourceAst: { and: [{ prop: '$parent', op: 'is', value: id }] } });
+			await this.#rpc.view.create({ collectionId: id, type: 'table', name: 'Table' });
+		} catch (error) {
+			this.#notify(failure(error));
+			throw error;
+		}
+		return id;
+	}
+
 	// ───────────────────────────── teamspaces ─────────────────────────────
 
 	async #teamspaceCall<T>(call: () => Promise<T>, refreshTree = false): Promise<T> {
@@ -1533,30 +1862,100 @@ export class WorkspaceStore {
 		return w ? (w.ids.map((id) => w.rows.get(id)).filter(Boolean) as BacklinkRow[]) : [];
 	}
 
+	/** The layers' value ops by page, and the pages an unconfirmed layer trashes. */
+	#layerIndex(): { ops: Map<string, ValueOp[]>; trashed: Set<string> } {
+		const ops = new Map<string, ValueOp[]>();
+		const trashed = new Set<string>();
+		for (const layer of this.#layers)
+			for (const op of layer.ops) {
+				if (op.op === 'trash') trashed.add(op.page);
+				else if (op.op === 'restore') trashed.delete(op.page);
+				else if (op.op === 'setProp' || op.op === 'addOption' || op.op === 'removeOption') {
+					const list = ops.get(op.page);
+					if (list) list.push(op);
+					else ops.set(op.page, [op]);
+				}
+			}
+		return { ops, trashed };
+	}
+
+	/** A row with the unconfirmed value edits of `list` applied on top of the server's values. */
+	#layeredRow(row: ViewRow, list: ValueOp[] | undefined): ViewRow {
+		if (!list?.length) return row;
+		let values = row.values;
+		let title = row.title;
+		for (const op of list) {
+			if (op.prop === SYSTEM_TITLE) {
+				if (op.op === 'setProp') title = typeof op.value === 'string' ? op.value : '';
+				continue;
+			}
+			const def = this.#registry.get(op.prop);
+			const r = def ? applyValueOp(def, values[op.prop] ?? null, op) : null;
+			if (r?.ok) values = { ...values, [op.prop]: r.value };
+			else if (!def && op.op === 'setProp') values = { ...values, [op.prop]: op.value };
+		}
+		return values === row.values && title === row.title ? row : { ...row, values, title };
+	}
+
 	/** Rows of a window (view and backlinks) with optimistic value edits applied. */
 	windowRows(windowId: string): (ViewRow | BacklinkRow)[] {
 		const w = this.windows.get(windowId);
 		if (!w) return [];
+		void this.pending;
+		const { ops, trashed } = this.#layerIndex();
 		return w.ids.flatMap((id): (ViewRow | BacklinkRow)[] => {
 			const row = w.rows.get(id);
-			if (!row) return [];
-			if (!('values' in row)) return [row];
-			let values = row.values;
-			let title = row.title;
-			for (const layer of this.#layers)
-				for (const op of layer.ops) {
-					if ((op.op === 'setProp' || op.op === 'addOption' || op.op === 'removeOption') && op.page === id) {
-						if (op.prop === SYSTEM_TITLE && op.op === 'setProp') title = typeof op.value === 'string' ? op.value : '';
-						else {
-							const def = this.#registry.get(op.prop);
-							const r = def ? applyValueOp(def, values[op.prop] ?? null, op) : null;
-							if (r?.ok) values = { ...values, [op.prop]: r.value };
-							else if (!def && op.op === 'setProp') values = { ...values, [op.prop]: op.value };
-						}
-					}
-				}
-			return [{ ...row, values, title }];
+			if (!row || trashed.has(id)) return [];
+			return 'values' in row ? [this.#layeredRow(row, ops.get(id))] : [row];
 		});
+	}
+
+	/**
+	 * A `view` window as the screen shows it: flat `rows`, or `groups` with their rows, with the unconfirmed edits
+	 * applied. A card whose group-by property is being edited moves to its new group at once (at the end of it);
+	 * the server's diff then puts it at its sorted place. `undefined` before the window exists.
+	 */
+	viewData(windowId: string): ViewData | undefined {
+		const w = this.windows.get(windowId);
+		if (!w || w.kind !== 'view') return undefined;
+		void this.pending;
+		const { ops, trashed } = this.#layerIndex();
+		const byId = new Map<string, ViewRow>();
+		for (const [id, row] of w.rows) if (!trashed.has(id) && 'values' in row) byId.set(id, this.#layeredRow(row as ViewRow, ops.get(id)));
+		const total = Math.max(0, w.total - [...trashed].filter((id) => w.rows.has(id)).length);
+		if (!w.groups) {
+			return { status: w.status, total, rows: w.ids.flatMap((id) => (byId.has(id) ? [byId.get(id)!] : [])) };
+		}
+		const spec = this.#groupSpecOf(w);
+		const def = spec ? this.#registry.get(spec.prop) : undefined;
+		const keysOf = (value: PropValue | null | undefined): string[] | null => {
+			if (!def) return null;
+			if (def.type === 'checkbox') return [value === true ? 'true' : 'false'];
+			if (def.type === 'date' || def.type === 'relation') return null;
+			const list = Array.isArray(value) ? value : typeof value === 'string' && value !== '' ? [value] : [];
+			return list.length ? list : [GROUP_EMPTY];
+		};
+		// Rows whose group-by value is edited by a layer: where they belong now.
+		const moved = new Map<string, string[]>();
+		if (spec) {
+			for (const [id, list] of ops) {
+				if (!byId.has(id) || !list.some((op) => op.prop === spec.prop)) continue;
+				const keys = keysOf(byId.get(id)!.values[spec.prop]);
+				if (keys) moved.set(id, keys);
+			}
+		}
+		const groups = w.groups.map((g) => {
+			let idsIn = g.ids.filter((id) => byId.has(id) && (!moved.has(id) || moved.get(id)!.includes(g.key)));
+			let t = g.total - (g.ids.length - idsIn.length);
+			for (const [id, keys] of moved) {
+				if (keys.includes(g.key) && !g.ids.includes(id)) {
+					idsIn = [...idsIn, id];
+					t += 1;
+				}
+			}
+			return { key: g.key, total: Math.max(t, idsIn.length), loaded: g.ids.length, rows: idsIn.map((id) => byId.get(id)!) };
+		});
+		return { status: w.status, total, rows: [], groups };
 	}
 
 	// ───────────────────────────── reads ─────────────────────────────
@@ -1860,4 +2259,9 @@ export function useWorkspace(): WorkspaceStore {
 	const store = read?.();
 	if (!store) throw new Error('useWorkspace() outside a workspace');
 	return store;
+}
+
+/** The store of the workspace being shown, or `undefined` outside `(app)/[ws]` (the standalone editor). */
+export function tryWorkspace(): WorkspaceStore | undefined {
+	return getContext<(() => WorkspaceStore | undefined) | undefined>(CTX)?.();
 }

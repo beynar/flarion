@@ -16,8 +16,11 @@ export interface Window {
 }
 
 export interface QueryOptions {
-	/** Pages the actor may see (from the Sync core's `visibleNums(actor)`). Everything is intersected with it. */
-	visible: VisibleSet;
+	/**
+	 * Pages the actor may see (from the Sync core's `visibleNums(actor)`). Everything is intersected with it.
+	 * `null`: no restriction beyond liveness, for callers that intersect with each viewer's set themselves (the live loop).
+	 */
+	visible: VisibleSet | null;
 	/** The signed-in user, for `is me`. */
 	me?: string;
 	/** Epoch ms of "now", for relative dates. */

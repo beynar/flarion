@@ -1,24 +1,59 @@
 <!--
-	The seam between the editor's `database_view` block (and, later, a full-page database) and the view
-	components. P2 renders a working table-shaped READ view through `rpc.collection.query`; P3's App UI replaces
-	this component with the table, board, list, gallery, calendar and timeline views on live windows, keeping the
-	props below.
+	The live view of a database: the host of the table, board, list, gallery, calendar and timeline layouts. It
+	replaces the P2 polling table and keeps its props, so the editor's `database_view` block and a database's own
+	page both render it.
 
-	  workspaceId   the workspace the collection lives in (the calls carry it)
+	  workspaceId   the workspace the collection lives in
 	  collectionId  the collection to show
 	  viewId        a view of it, or null for its first view
 	  localFilter   an extra filter ANDed with the view's, local to the block (null for none)
+	  readonly      the viewer may not change rows or the view
+	  href          where a row's page lives (default `/<workspaceId>/<pageId>`)
+	  onViewChange  the active view changed (a block stores it); without it the host keeps the choice itself
+	  fullPage      the database's own page: the layouts take the room
 
-	It refreshes itself (every few seconds, on focus and after adding a row) because it is not a live window yet.
+	The host subscribes to the view through the workspace store (a `view` subscription: a snapshot, then diffs
+	applied in `seq` order, windows per view or per board column), picks the layout of the view's type, and owns the
+	tab bar and the toolbar (filter, sort, group, properties, layout, search, New). Definition edits go through the
+	store (`updateView`) and show at once.
 -->
 <script lang="ts">
-	import { onMount, untrack } from 'svelte';
-	import { createRpc, type Rpc } from '#lib/client/rpc.ts';
+	import { untrack } from 'svelte';
+	import { toast } from 'entasis/toast';
+	import { goto } from '$app/navigation';
+	import { rpc } from '#lib/client/rpc.ts';
+	import { subKey, tryWorkspace, type ViewData } from '#lib/client/workspace.svelte.ts';
+	import { newId } from '#lib/client/runtime.ts';
+	import { fileCoverPath } from '#lib/components/editor/uploads.ts';
+	import { coverBackground } from '#lib/components/page-header/covers.ts';
+	import { createRegistry, TITLE_PROP_ID, type PropValue, type PropertyDef } from '#lib/shared/property-types.ts';
 	import type { FilterGroup } from '#lib/shared/filter-ast.ts';
-	import type { CollectionDef, ViewDef } from '#lib/shared/definitions.ts';
-	import { TITLE_PROP_ID, type PropertyDef } from '#lib/shared/property-types.ts';
-	import type { QueryPage } from '#lib/shared/schemas.ts';
-	import { cellText } from './format-cell.ts';
+	import type { Values, ViewRow } from '#lib/shared/protocol.ts';
+	import { rankBetween } from '#lib/shared/sort-keys.ts';
+	import { cellActions } from './cell-actions.ts';
+	import type { ViewEnv } from './env.ts';
+	import { FileNames } from './file-names.svelte.ts';
+	import {
+		dateProps,
+		defaultGroupProp,
+		neededProps,
+		newRowInit,
+		optionsOfView,
+		rangeFilter,
+		searchFilter,
+		viewSubscription,
+		visibleColumns,
+		addDaysIso,
+		isoDay
+	} from './view-model.ts';
+	import BoardView from './BoardView.svelte';
+	import CalendarView from './CalendarView.svelte';
+	import GalleryView from './GalleryView.svelte';
+	import ListView from './ListView.svelte';
+	import TableView from './TableView.svelte';
+	import TimelineView from './TimelineView.svelte';
+	import ViewTabs from './ViewTabs.svelte';
+	import ViewToolbar from './ViewToolbar.svelte';
 
 	let {
 		workspaceId,
@@ -27,193 +62,318 @@
 		localFilter,
 		readonly = false,
 		href,
-		client
+		onViewChange,
+		fullPage = false
 	}: {
 		workspaceId: string;
 		collectionId: string;
 		viewId: string | null;
 		localFilter: FilterGroup | null;
-		/** Hides the "New" row (a locked or read-only page). */
 		readonly?: boolean;
-		/** Where a row's page lives (default `/<workspaceId>/<pageId>`). */
 		href?: (pageId: string) => string;
-		/** A client to call through (tests, the standalone editor); default: the app's, scoped to `workspaceId`. */
-		client?: Rpc;
+		onViewChange?: (viewId: string) => void;
+		fullPage?: boolean;
 	} = $props();
 
-	const REFRESH_MS = 10_000;
-	const PAGE_SIZE = 50;
-
-	const api = $derived(client ?? createRpc({ getWorkspaceId: () => workspaceId }));
+	const store = tryWorkspace();
 	const link = (id: string) => (href ? href(id) : `/${workspaceId}/${id}`);
 
-	type Loaded = {
-		collection: CollectionDef;
-		view: ViewDef | null;
-		views: ViewDef[];
-		properties: PropertyDef[];
-		members: Map<string, string>;
-		page: QueryPage;
-	};
-
-	let loaded = $state<Loaded>();
-	let failure = $state<string>();
-	let busy = $state(false);
-	let adding = $state(false);
-
-	async function load(): Promise<void> {
-		const rpcClient = api;
-		const id = collectionId;
-		const wanted = viewId;
-		const filter = localFilter;
-		try {
-			const [found, properties] = await Promise.all([rpcClient.collection.get({ id }), rpcClient.property.list()]);
-			const view = found.views.find((candidate) => candidate.id === wanted) ?? found.views[0] ?? null;
-			const page = await rpcClient.collection.query({
-				collectionId: id,
-				...(view ? { viewId: view.id } : {}),
-				...(filter ? { spec: { filter } } : {}),
-				limit: PAGE_SIZE
-			});
-			const members = new Map<string, string>();
-			if (properties.some((p) => ['person', 'created_by', 'last_edited_by'].includes(p.type))) {
-				try {
-					for (const m of await rpcClient.workspace.members.list()) members.set(m.userId, m.name);
-				} catch {
-					// Names are a nicety: ids show as "Someone".
-				}
-			}
-			if (id !== collectionId) return;
-			loaded = { collection: found.collection, view, views: found.views, properties, members, page };
-			failure = undefined;
-		} catch (error) {
-			if (id !== collectionId) return;
-			failure = describe(error);
-		}
-	}
-
-	function describe(error: unknown): string {
-		const code = (error as { code?: string } | null)?.code;
-		if (code === 'NOT_FOUND') return 'This database no longer exists, or you cannot see it.';
-		if (code === 'NOT_IMPLEMENTED') return 'This view is not available yet.';
-		return error instanceof Error && error.message ? error.message : 'This view could not be loaded.';
-	}
-
-	async function refresh() {
-		busy = true;
-		try {
-			await load();
-		} finally {
-			busy = false;
-		}
-	}
-
-	// A different collection, view or filter reloads from scratch.
+	// ───────────── definitions ─────────────
+	let failure = $state<string | null>(null);
 	$effect(() => {
-		void collectionId;
-		void viewId;
-		void JSON.stringify(localFilter);
-		void workspaceId;
+		const id = collectionId;
+		if (!store) return;
+		let current = true;
+		let timer: ReturnType<typeof setTimeout> | undefined;
 		untrack(() => {
-			loaded = undefined;
-			failure = undefined;
-			void refresh();
+			failure = null;
+			void store.refreshProperties();
+			// An inline database is created a moment after its block appears: a collection that is not there yet is asked
+			// for again before the view gives up.
+			const attempt = (n: number) =>
+				void store.loadCollection(id, n > 0).then((found) => {
+					if (!current || found || store.collections.get(id)) return;
+					if (n >= 8) failure = 'This database no longer exists, or you cannot see it.';
+					else timer = setTimeout(() => attempt(n + 1), 700);
+				});
+			attempt(0);
 		});
-	});
-
-	onMount(() => {
-		const timer = setInterval(() => {
-			if (document.visibilityState === 'visible') void load();
-		}, REFRESH_MS);
-		const onVisible = () => document.visibilityState === 'visible' && void load();
-		document.addEventListener('visibilitychange', onVisible);
 		return () => {
-			clearInterval(timer);
-			document.removeEventListener('visibilitychange', onVisible);
+			current = false;
+			clearTimeout(timer);
 		};
 	});
-
-	/** The columns: the view's visible ones, else the collection's shown properties; the title always leads. */
-	const columns = $derived.by(() => {
-		if (!loaded) return [] as { id: string; name: string; def: PropertyDef | undefined }[];
-		const byId = new Map(loaded.properties.map((p) => [p.id, p]));
-		const fromView = loaded.view?.columns.columns.filter((c) => !c.hidden).map((c) => c.prop) ?? [];
-		const ids = (fromView.length > 0 ? fromView : loaded.collection.shownProps).filter((id) => id !== TITLE_PROP_ID);
-		return [
-			{ id: TITLE_PROP_ID, name: byId.get(TITLE_PROP_ID)?.name ?? 'Name', def: byId.get(TITLE_PROP_ID) },
-			...ids.flatMap((id) => {
-				const def = byId.get(id);
-				return def ? [{ id, name: def.name, def }] : [];
-			})
-		];
+	// Definitions are read again when the tab comes back (another person may have changed the views).
+	$effect(() => {
+		const onVisible = () => document.visibilityState === 'visible' && store?.refreshCollections();
+		document.addEventListener('visibilitychange', onVisible);
+		return () => document.removeEventListener('visibilitychange', onVisible);
 	});
 
-	async function addRow() {
-		if (!loaded || adding || readonly) return;
-		adding = true;
+	const collection = $derived(store?.collections.get(collectionId));
+	const views = $derived(store?.views.get(collectionId) ?? []);
+	let activeId = $state<string | null>(untrack(() => viewId));
+	$effect(() => {
+		activeId = viewId;
+	});
+	const view = $derived(views.find((v) => v.id === activeId) ?? views[0]);
+	const registry = $derived(createRegistry(store?.properties ?? []));
+	const columns = $derived(visibleColumns(view ?? null, collection ?? null, store?.properties ?? []));
+
+	function pickView(id: string) {
+		activeId = id;
+		onViewChange?.(id);
+	}
+
+	// ───────────── the subscription ─────────────
+	let searchText = $state('');
+	let search = $state('');
+	$effect(() => {
+		const text = searchText;
+		const t = setTimeout(() => (search = text), 250);
+		return () => clearTimeout(t);
+	});
+
+	/** The date range a calendar or timeline has loaded: a window around what it shows. */
+	let range = $state<{ from: string; to: string } | null>(null);
+	function showRange(from: string, to: string) {
+		if (range && range.from <= from && range.to >= to) return;
+		const pad = (iso: string, d: number) => addDaysIso(iso, d);
+		range = { from: pad(from, -31), to: pad(to, 31) };
+	}
+	$effect(() => {
+		void view?.id;
+		range = null;
+	});
+
+	const dates = $derived(view ? dateProps(view, store?.properties ?? []) : { start: null, end: null });
+	const LIMITS = { table: 100, list: 100, gallery: 60, board: 25, calendar: 500, timeline: 500 } as const;
+
+	// A board without a group-by picks one.
+	$effect(() => {
+		const v = view;
+		if (!store || !v || v.type !== 'board' || v.groupBy || !store.properties.length || readonly || !store.canEdit) return;
+		const def = defaultGroupProp(store.properties);
+		if (def) untrack(() => void store.updateView(collectionId, v.id, { groupBy: { prop: def.id } }).catch(() => undefined));
+	});
+
+	const sub = $derived.by(() => {
+		if (!view || !collection) return null;
+		const ranged = (view.type === 'calendar' || view.type === 'timeline') && dates.start;
+		const r = range ?? (ranged ? defaultRange() : null);
+		const extra: FilterGroup[] = [];
+		const q = searchFilter(search);
+		if (q) extra.push(q);
+		if (ranged && r && dates.start) extra.push(rangeFilter(dates.start.id, dates.end?.id ?? null, r.from, r.to));
+		return viewSubscription({
+			collectionId,
+			view,
+			localFilter,
+			extraFilter: extra.length ? { and: extra } : null,
+			props: neededProps(view, columns, [dates.start?.id, dates.end?.id]),
+			limit: LIMITS[view.type]
+		});
+	});
+	function defaultRange() {
+		const now = Date.now();
+		return { from: addDaysIso(isoDay(now), -45), to: addDaysIso(isoDay(now), 75) };
+	}
+	const windowId = $derived(sub ? subKey('vw', collectionId + JSON.stringify(sub)) : null);
+	$effect(() => {
+		const id = windowId;
+		const s = sub;
+		if (!store || !id || !s) return;
+		return store.subscribe(id, s);
+	});
+
+	const data = $derived(windowId && store ? store.viewData(windowId) : undefined);
+	let retained = $state.raw<ViewData | undefined>();
+	$effect(() => {
+		const d = data;
+		if (d && d.status === 'ready') retained = d;
+	});
+	$effect(() => {
+		void view?.id;
+		void collectionId;
+		retained = undefined;
+	});
+	const shown = $derived(data && data.status === 'ready' ? data : retained);
+	const windowFailed = $derived(data?.status === 'error');
+
+	// ───────────── relation targets and file names ─────────────
+	const files = new FileNames(untrack(() => workspaceId));
+	let relationSubs = $state<string[]>([]);
+	$effect(() => {
+		if (!store || !shown) return;
+		const relProps = columns.filter((c) => c.def.type === 'relation').map((c) => c.def.id);
+		const fileProps = columns.filter((c) => c.def.type === 'files').map((c) => c.def.id);
+		const rows = shown.groups ? shown.groups.flatMap((g) => g.rows) : shown.rows;
+		const targets = new Set<string>();
+		const fileIds = new Set<string>();
+		for (const r of rows) {
+			for (const id of relProps) for (const t of arr(r.values[id])) targets.add(t);
+			for (const id of fileProps) for (const f of arr(r.values[id])) fileIds.add(f);
+		}
+		files.request(fileIds);
+		const list = [...targets].filter((id) => !untrack(() => store.pages.has(id))).sort();
+		const key = list.join(',');
+		if (key === untrack(() => relationSubs.join('|'))) return;
+		const chunks: string[][] = [];
+		for (let i = 0; i < list.length && chunks.length < 4; i += 50) chunks.push(list.slice(i, i + 50));
+		const ids = chunks.map((pageIds) => subKey('rel', pageIds.join(',')));
+		const releases = chunks.map((pageIds, i) => store.subscribe(ids[i], { kind: 'page', pageIds }));
+		relationSubs = ids;
+		return () => releases.forEach((r) => r());
+	});
+	const arr = (v: PropValue | null | undefined): string[] => (Array.isArray(v) ? (v as string[]) : []);
+	const lookups = $derived({
+		members: store?.members ?? [],
+		resolvePage: (id: string) => {
+			const p = store?.resolvePage(id);
+			if (p) return p;
+			// Not loaded yet: show a placeholder until the subscriptions answered; then it is a deleted page.
+			const answered = relationSubs.length > 0 && relationSubs.every((s) => store?.windows.get(s)?.status === 'ready');
+			return answered ? null : { id, title: '…', icon: null };
+		},
+		fileInfo: files.info,
+		pageHref: (id: string) => link(id)
+	});
+
+	// ───────────── writes ─────────────
+	const editable = $derived(!readonly && !!store?.canEdit && (collection ? (store.page(collection.pageId)?.access ?? 'update') !== 'read' : false));
+
+	async function newRow(extra: Values = {}, opts: { open?: boolean } = {}): Promise<string | null> {
+		if (!store || !collection || !view || !editable) return null;
+		const init = newRowInit({ collection, view, localFilter, registry, meId: store.user.id, extra });
+		const id = newId('p');
 		try {
-			await api.page.create({ parentId: loaded.collection.pageId, values: { [TITLE_PROP_ID]: 'Untitled' } });
-			await load();
+			await rpc.page.create({ id, parentId: init.parentId, values: { [TITLE_PROP_ID]: '', ...init.values } });
+			focusId = id;
+			if (opts.open) await goto(link(id));
+			return id;
 		} catch (error) {
-			failure = describe(error);
-		} finally {
-			adding = false;
+			const message = (error as { message?: string } | null)?.message;
+			notifyError(message);
+			return null;
 		}
 	}
+	const notifyError = (description?: string) => toast.danger({ title: 'Could not create the page', description });
+
+	let focusId = $state<string | null>(null);
+
+	async function moveRow(rowId: string, place: { before?: string | null; after?: string | null }) {
+		if (!store) return;
+		try {
+			const [moved, after, before] = await Promise.all([
+				rpc.page.get({ id: rowId }),
+				place.after ? rpc.page.get({ id: place.after }) : null,
+				place.before ? rpc.page.get({ id: place.before }) : null
+			]);
+			for (const n of [after, before]) {
+				if (n && n.parentId !== moved.parentId) {
+					toast.info({ title: 'This page cannot be reordered here', description: 'It belongs to another parent.' });
+					return;
+				}
+			}
+			const rank = rankBetween(after?.rank ?? null, before?.rank ?? null);
+			await store.mutate([{ op: 'move', page: rowId, parentId: moved.parentId, rank }]);
+		} catch {
+			// the store has raised the toast, or the ranks collided (the next drop retries)
+		}
+	}
+
+	async function updateView(patch: Parameters<ViewEnv['updateView']>[0]) {
+		if (!store || !view) return;
+		const id = windowId;
+		await store.updateView(collectionId, view.id, patch);
+		// In case the server does not recompute the window for this definition change: ask for a fresh snapshot.
+		if (id && ('filter' in patch || 'sorts' in patch || 'groupBy' in patch || 'type' in patch)) store.resubscribe(id);
+	}
+
+	function loadMore(group?: string) {
+		if (!store || !windowId || !shown || !view) return;
+		if (group !== undefined) {
+			const g = shown.groups?.find((x) => x.key === group);
+			if (g) store.setWindow(windowId, Math.min(1000, g.loaded + LIMITS.board), group);
+		} else {
+			const have = shown.rows.length;
+			if (have < shown.total) store.setWindow(windowId, Math.min(1000, have + LIMITS[view.type]));
+		}
+	}
+
+	const env = $derived.by((): ViewEnv | null => {
+		if (!store || !collection || !view) return null;
+		const s = store;
+		const o = optionsOfView(view);
+		return {
+			store: s,
+			workspaceId,
+			collection,
+			view,
+			columns,
+			properties: s.properties,
+			editable,
+			localFilter,
+			fullPage,
+			lookups,
+			actions: (rowId: string, def: PropertyDef) => cellActions(s, rowId, def, files),
+			href: link,
+			open: (id, event) => {
+				if (event && (event.metaKey || event.ctrlKey || event.shiftKey)) return void window.open(link(id), '_blank');
+				void goto(link(id));
+			},
+			setTitle: (rowId, title) => void s.setValue(rowId, TITLE_PROP_ID, title).catch(() => undefined),
+			setValue: (rowId, prop, value) => s.setValue(rowId, prop, value).catch(() => undefined),
+			newRow,
+			updateView,
+			setOption: (patch) => updateView({ columns: { columns: view.columns.columns, options: { ...view.columns.options, ...patch } } }),
+			moveRow,
+			manualOrder: view.sorts.length === 0 && search === '',
+			loadMore,
+			entity: (id) => s.page(id),
+			cover: (row: ViewRow) => {
+				if (o.coverProp) {
+					const first = arr(row.values[o.coverProp])[0];
+					if (first) return coverBackground(fileCoverPath(workspaceId, first));
+				}
+				return coverBackground(row.cover);
+			}
+		};
+	});
 </script>
 
-<div class="view-host" data-testid="view-host" data-state={failure ? 'error' : loaded ? 'ready' : 'loading'} aria-busy={!loaded && !failure}>
-	{#if failure && !loaded}
+<div class="view-host" class:full={fullPage} data-testid="view-host" data-view-type={view?.type} data-state={failure ? 'error' : shown && env ? 'ready' : 'loading'} aria-busy={!shown && !failure}>
+	{#if !store}
+		<div class="note">Open this page in the app to see its database.</div>
+	{:else if failure}
 		<div class="note" role="alert">
 			<span>{failure}</span>
-			<button type="button" onclick={() => void refresh()}>Try again</button>
+			<button type="button" onclick={() => void store.loadCollection(collectionId, true)}>Try again</button>
 		</div>
-	{:else if !loaded}
+	{:else if !env || !view}
 		<div class="note" aria-hidden="true"><span class="skeleton"></span></div>
 	{:else}
-		<div class="scroll">
-			<table class="grid" data-view-type={loaded.view?.type ?? 'table'}>
-				<thead>
-					<tr>
-						{#each columns as column (column.id)}
-							<th scope="col">{column.name}</th>
-						{/each}
-					</tr>
-				</thead>
-				<tbody>
-					{#each loaded.page.rows as row (row.id)}
-						<tr data-testid="view-row" data-row-id={row.id}>
-							{#each columns as column (column.id)}
-								<td data-prop={column.id}>
-									{#if column.id === TITLE_PROP_ID}
-										<a class="title" href={link(row.id)} data-testid="view-row-title">
-											{#if row.icon}<span class="icon" aria-hidden="true">{row.icon}</span>{/if}
-											<span>{row.title || 'Untitled'}</span>
-										</a>
-									{:else}
-										{cellText(column.def, row.values[column.id], loaded.members)}
-									{/if}
-								</td>
-							{/each}
-						</tr>
-					{:else}
-						<tr class="empty">
-							<td colspan={columns.length} data-testid="view-empty">No pages yet</td>
-						</tr>
-					{/each}
-				</tbody>
-			</table>
+		<div class="chrome">
+			<ViewTabs {env} {views} activeId={view.id} onPick={pickView} />
+			<ViewToolbar {env} bind:search={searchText} />
 		</div>
-		<div class="foot">
-			{#if !readonly}
-				<button type="button" class="add" data-testid="view-add-row" disabled={adding} onclick={() => void addRow()}>+ New page</button>
-			{/if}
-			<span class="count" data-testid="view-count">
-				{loaded.page.total} {loaded.page.total === 1 ? 'page' : 'pages'}{loaded.page.nextCursor ? ` · showing ${loaded.page.rows.length}` : ''}
-			</span>
-			{#if failure}<span class="warn" role="alert">{failure}</span>{/if}
-			{#if busy}<span class="count" aria-live="polite">Refreshing…</span>{/if}
-		</div>
+		{#if windowFailed && !shown}
+			<div class="note" role="alert">This view could not be loaded.</div>
+		{:else if !shown}
+			<div class="note" aria-hidden="true"><span class="skeleton"></span></div>
+		{:else if view.type === 'table'}
+			<TableView {env} data={shown} bind:focusId />
+		{:else if view.type === 'board'}
+			<BoardView {env} data={shown} />
+		{:else if view.type === 'list'}
+			<ListView {env} data={shown} />
+		{:else if view.type === 'gallery'}
+			<GalleryView {env} data={shown} />
+		{:else if view.type === 'calendar'}
+			<CalendarView {env} data={shown} onRange={showRange} />
+		{:else if view.type === 'timeline'}
+			<TimelineView {env} data={shown} onRange={showRange} />
+		{/if}
 	{/if}
 </div>
 
@@ -221,70 +381,16 @@
 	.view-host {
 		color: var(--app-text);
 		font-size: 14px;
+		min-width: 0;
 	}
-	.scroll {
-		overflow-x: auto;
-	}
-	.grid {
-		width: 100%;
-		min-width: 100%;
-		border-collapse: collapse;
-		table-layout: auto;
-	}
-	th,
-	td {
-		padding: 6px 10px;
-		text-align: left;
-		white-space: nowrap;
-		border-bottom: 1px solid var(--app-hairline);
-		max-width: 320px;
-		overflow: hidden;
-		text-overflow: ellipsis;
-	}
-	th {
-		font-weight: 500;
-		font-size: 12px;
-		color: var(--app-text-secondary);
-		border-top: 1px solid var(--app-hairline);
-	}
-	tbody tr:hover {
-		background: var(--app-hover);
-	}
-	.title {
-		display: inline-flex;
-		align-items: center;
-		gap: 6px;
-		color: inherit;
-		font-weight: 500;
-		text-decoration: none;
-	}
-	.title:hover span:last-child {
-		text-decoration: underline;
-		text-decoration-color: var(--app-text-tertiary, var(--app-text-secondary));
-	}
-	.empty td {
-		color: var(--app-text-secondary);
-	}
-	.foot {
+	.chrome {
 		display: flex;
 		align-items: center;
-		gap: 12px;
-		padding: 6px 4px 0;
-		font-size: 12px;
-		color: var(--app-text-secondary);
-	}
-	.add {
-		color: var(--app-text-secondary);
-		cursor: pointer;
-		padding: 2px 6px;
-		border-radius: var(--app-radius-control);
-	}
-	.add:hover:not(:disabled) {
-		background: var(--app-hover);
-		color: var(--app-text);
-	}
-	.warn {
-		color: var(--app-danger, #c4554d);
+		justify-content: space-between;
+		gap: 8px;
+		min-height: 36px;
+		border-bottom: 1px solid var(--app-hairline);
+		margin-bottom: 2px;
 	}
 	.note {
 		display: flex;

@@ -7,6 +7,7 @@
 	import { words } from './words.svelte.js';
 	import { iconOf } from './icons.js';
 	import { PALETTE } from './palette.js';
+	import { blockMoves } from '../moves.svelte.ts';
 	import {
 		type BlockMenuAction,
 		type BlockMenuColor,
@@ -20,6 +21,26 @@
 	let menuNode = $state<HTMLElement>();
 	const rows = $derived(controller.rows);
 	const labels = $derived(words.blockMenu);
+
+	/**
+	 * Flarion's two page-level rows, after edytor's own: "Move to…" (another page, through the page picker) and
+	 * "Turn into page" (a subpage holding the blocks). They need a workspace around the editor, so they exist only when the
+	 * editor view registered `blockMoves`; a search keeps the ones it names.
+	 */
+	const pageRows = $derived.by(() => {
+		if (!blockMoves.current) return [];
+		const all = [
+			{ id: 'moveTo', label: 'Move to…', run: (ids: string[]) => blockMoves.current?.moveTo(ids) },
+			{ id: 'turnIntoPage', label: 'Turn into page', run: (ids: string[]) => void blockMoves.current?.turnIntoPage(ids) }
+		];
+		const query = controller.query.trim().toLowerCase();
+		return query ? all.filter((row) => row.label.toLowerCase().includes(query) || 'move page subpage'.includes(query)) : all;
+	});
+	const runPageRow = (run: (ids: string[]) => void) => {
+		const ids = controller.blocks.map((block) => block.id);
+		controller.close(false);
+		run(ids);
+	};
 
 	type Row = BlockMenuAction | KindRow | BlockMenuColor;
 	/** A row's shape: a colour (`field`), a kind (`value`), or an action. */
@@ -145,7 +166,16 @@
 				</div>
 			{/if}
 			{@render list(rows, false)}
-			{#if rows.length === 0}
+			{#each pageRows as row (row.id)}
+				<button
+					type="button"
+					class="block-menu-row"
+					data-testid={`block-menu-${row.id}`}
+					style:--block-menu-icon={iconOf(`action.${row.id}`)}
+					onclick={() => runPageRow(row.run)}>{row.label}</button
+				>
+			{/each}
+			{#if rows.length === 0 && pageRows.length === 0}
 				<div class="block-menu-empty" role="presentation">{labels.noResults}</div>
 			{/if}
 		</div>

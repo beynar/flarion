@@ -112,10 +112,18 @@ describe('page', () => {
 		expect((await owner.page.trashList({})).items).toEqual([]);
 	});
 
-	test('what is still stubbed says so', async () => {
-		const { owner } = await setup();
-		expect((await failure(owner.page.purge({ id: 'a' }))).code).toBe('NOT_IMPLEMENTED');
-		expect((await failure(owner.page.duplicate({ id: 'a' }))).code).toBe('NOT_IMPLEMENTED');
+	test('page.purge deletes a trashed page for good, and refuses a live one, an unknown one and a caller without full access', async () => {
+		const { ws, owner, ann } = await setup();
+		await owner.mutate({ mid: 'purge-1', appVersion: '0.0.1', ops: [{ op: 'create', id: 'doomed', parentId: null, rank: r1, teamspaceId: ws.generalId, values: { title: 'Doomed' } }] });
+		expect((await failure(owner.page.purge({ id: 'nope' }))).code).toBe('NOT_FOUND');
+		expect((await failure(owner.page.purge({ id: 'doomed' }))).status).toBe(422);
+		await owner.page.trash({ id: 'doomed' });
+		// Ann can read it (a member of General) but has only `update`: she cannot delete it forever.
+		expect((await failure(ann.page.purge({ id: 'doomed' }))).status).toBe(403);
+		await owner.page.purge({ id: 'doomed' });
+		expect((await owner.page.trashList({})).items).toEqual([]);
+		expect((await failure(owner.page.get({ id: 'doomed' }))).code).toBe('NOT_FOUND');
+		expect(await ws.stub.pagesAfter(0)).not.toContainEqual(expect.objectContaining({ id: 'doomed' }));
 	});
 });
 

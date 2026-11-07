@@ -5,6 +5,9 @@ import { rpcUnfurl } from '../../../src/lib/components/editor/unfurl';
 import { UPLOADS_UNAVAILABLE, stubUpload } from '../../../src/lib/components/editor/uploads';
 import { WIRED_PLUGINS } from '../../../src/lib/components/editor/plugins';
 
+// The plugin list pulls in the database view block, whose host navigates with SvelteKit's `goto` (unavailable under Vitest).
+vi.mock('$app/navigation', () => ({ goto: () => Promise.resolve() }));
+
 describe('upload and unfurl seams', () => {
 	it('the standalone editor has no upload and says so on the block', async () => {
 		await expect(stubUpload(new File(['x'], 'a.png'), { progress() {} })).rejects.toThrow(UPLOADS_UNAVAILABLE);

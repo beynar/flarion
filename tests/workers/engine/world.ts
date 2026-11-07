@@ -8,7 +8,7 @@ import type { WorkspaceClient } from '../../../src/server/db/workspace.client';
 import type { FilterGroup, FilterNode } from '../../../src/lib/shared/filter-ast';
 import type { PropValue, PropertyDef } from '../../../src/lib/shared/property-types';
 import { evenRanks } from '../../../src/lib/shared/sort-keys';
-import { applyEavOp, loadEavRegistry, writeComputedValue, writeInitialValues, type EavRegistry } from '../../../src/server/objects/workspace/eav';
+import { afterWrite, applyEavOp, loadEavRegistry, writeComputedValue, writeInitialValues, type EavRegistry } from '../../../src/server/objects/workspace/eav';
 import { loadPage, writeValues } from '../../../src/server/objects/workspace/eav/values';
 import { invalidateRegistry } from '../../../src/server/objects/workspace/eav/registry';
 import type { Rng } from '../../unit/shared/helpers';
@@ -33,7 +33,7 @@ export const DEFS: PropertyDef[] = [
 	{ id: 'done', name: 'Done', type: 'checkbox', config: {} },
 	{ id: 'due', name: 'Due', type: 'date', config: { includeTime: false } },
 	{ id: 'meeting', name: 'Meeting', type: 'date', config: { includeTime: true } },
-	{ id: 'rel', name: 'Related', type: 'relation', config: { limit: 'many' } },
+	{ id: 'rel', name: 'Related', type: 'relation', config: { limit: 'many', twoWay: true, reverseName: 'Referenced by' } },
 	{ id: 'rel1', name: 'Parent task', type: 'relation', config: { limit: 'one' } },
 	{ id: 'files', name: 'Files', type: 'files', config: {} },
 	{ id: 'created', name: 'Created', type: 'created_time', config: {} },
@@ -41,11 +41,21 @@ export const DEFS: PropertyDef[] = [
 	{ id: 'by', name: 'Created by', type: 'created_by', config: {} },
 	{ id: 'editor', name: 'Edited by', type: 'last_edited_by', config: {} },
 	{ id: 'uid', name: 'ID', type: 'unique_id', config: { prefix: 'T' } },
-	{ id: 'ftext', name: 'F text', type: 'formula', config: { expression: '"x"', resultType: 'text' } },
-	{ id: 'fnum', name: 'F num', type: 'formula', config: { expression: '1', resultType: 'number' } },
+	// Formulas and rollups are computed by the engine (and re-computed from scratch by the oracle, `naive.ts`):
+	// over the page's own values, over other computed properties (a chain), over a relation's titles and over rollups.
+	{ id: 'ftext', name: 'F text', type: 'formula', config: { expression: 'concat(prop("Notes"), " / ", prop("Priority"))', resultType: 'text' } },
+	{ id: 'fnum', name: 'F num', type: 'formula', config: { expression: 'prop("Amount") * 2 + prop("Score")', resultType: 'number' } },
 	{ id: 'fdate', name: 'F date', type: 'formula', config: { expression: 'now()', resultType: 'date' } },
-	{ id: 'fbool', name: 'F bool', type: 'formula', config: { expression: 'true', resultType: 'checkbox' } },
+	{ id: 'fbool', name: 'F bool', type: 'formula', config: { expression: 'prop("Done") or prop("Score") > 10', resultType: 'checkbox' } },
+	{ id: 'fdue', name: 'F due', type: 'formula', config: { expression: 'prop("Due")', resultType: 'date' } },
+	{ id: 'ftitles', name: 'F titles', type: 'formula', config: { expression: 'join(prop("Related"), ", ")', resultType: 'text' } },
 	{ id: 'rnum', name: 'R num', type: 'rollup', config: { relationProp: 'rel', targetProp: 'amount', fn: 'sum', resultType: 'number' } },
+	{ id: 'rcount', name: 'R count', type: 'rollup', config: { relationProp: 'rel', targetProp: 'title', fn: 'count_values', resultType: 'number' } },
+	{ id: 'rdue', name: 'R due', type: 'rollup', config: { relationProp: 'rel', targetProp: 'due', fn: 'earliest', resultType: 'date' } },
+	{ id: 'rtags', name: 'R tags', type: 'rollup', config: { relationProp: 'rel1', targetProp: 'tags', fn: 'show_unique', resultType: 'text' } },
+	{ id: 'rback', name: 'R back', type: 'rollup', config: { relationProp: 'rel:reverse', targetProp: 'score', fn: 'average', resultType: 'number' } },
+	{ id: 'rchain', name: 'R chain', type: 'rollup', config: { relationProp: 'rel', targetProp: 'fnum', fn: 'max', resultType: 'number' } },
+	{ id: 'fchain', name: 'F chain', type: 'formula', config: { expression: 'prop("R num") + prop("R chain")', resultType: 'number' } },
 	{ id: 'ai', name: 'AI', type: 'ai', config: { kind: 'summary', sources: [] } }
 ];
 
@@ -173,27 +183,9 @@ function randomValues(r: Rng, registry: EavRegistry, pages: { id: string }[], de
 }
 
 function computedValue(r: Rng, def: PropertyDef): PropValue | null {
-	if (r.bool(0.35)) return null;
-	switch (def.type) {
-		case 'formula':
-			switch (def.config.resultType) {
-				case 'text':
-					return textValue(r, false);
-				case 'number':
-					return r.pick(NUMBERS);
-				case 'checkbox':
-					return r.bool();
-				case 'date':
-					return dateValue(r, false);
-			}
-			return null;
-		case 'rollup':
-			return r.pick(NUMBERS);
-		case 'ai':
-			return textValue(r, r.bool(0.1));
-		default:
-			return null;
-	}
+	// Only AI properties are written as random computed values; formulas and rollups are computed by the engine.
+	if (r.bool(0.35) || def.type !== 'ai') return null;
+	return textValue(r, r.bool(0.1));
 }
 
 // ───────────────────────────── filters (also used for collection sources) ─────────────────────────────
@@ -272,6 +264,14 @@ export async function buildWorld(db: WorkspaceClient, r: Rng, opts: BuildOptions
 			for (const id of part) await writeInitialValues(tx, id, randomValues(r, registry, refs, density) as never, ctx);
 		});
 	}
+	// Every formula and rollup, for every page (tombstoned ones included), as the Sync core's `create` records seed it.
+	await db.$transaction(async (tx) => {
+		await afterWrite(
+			tx,
+			pageIds.map((id) => ({ kind: 'create', page: id, prop: null, old: null, new: null })),
+			ctx
+		);
+	});
 	const uid = registry.get('uid') as PropertyDef;
 	for (const part of chunk(pageIds, 50)) {
 		await db.$transaction(async (tx) => {
@@ -282,7 +282,7 @@ export async function buildWorld(db: WorkspaceClient, r: Rng, opts: BuildOptions
 			}
 		});
 	}
-	const computed = DEFS.filter((d) => d.type === 'formula' || d.type === 'rollup' || d.type === 'ai');
+	const computed = DEFS.filter((d) => d.type === 'ai');
 	for (const part of chunk(pageIds, 50)) {
 		await db.$transaction(async (tx) => {
 			for (const id of part) {

@@ -30,6 +30,8 @@ const COMMENTS_PATH = /^\/rooms\/comments\/([^/]+)\/?$/;
 const DEV_TOKEN_PATH = '/rooms/dev/token';
 /** Development only: locks or unlocks a page's room, as a user with full access (the e2e tests for page locks). */
 const DEV_LOCK_PATH = '/rooms/dev/lock';
+/** Development only: ends a page's open half-day history slot, so a version exists now (the e2e tests for history). */
+const DEV_HISTORY_PATH = '/rooms/dev/history-slot';
 /** The query parameter a client sends its block `KINDS_VERSION` in (see `src/lib/shared/blocks/kinds.ts`). */
 export const KINDS_PARAM = 'kinds';
 
@@ -96,6 +98,7 @@ interface PageRoomApi {
 	recordIdentity(workspaceId: string, pageId: string): Promise<void>;
 	noteBypass(userId: string, bypass: boolean): Promise<void>;
 	setLocked(userId: string, locked: boolean, full: boolean): Promise<unknown>;
+	closeHistorySlot(): Promise<void>;
 }
 const pageRoom = (env: Env, workspaceId: string, pageId: string) =>
 	env.PAGE.getByName(roomName(workspaceId, pageId)) as unknown as PageRoomApi;
@@ -155,10 +158,26 @@ async function noteFullAccess(env: Env, claims: RoomClaims): Promise<void> {
 	}
 }
 
+/** `POST /rooms/dev/history-slot` `{ workspaceId, pageId }`: development only. */
+async function handleDevHistorySlot(request: Request, env: Env): Promise<Response> {
+	if (env.ENVIRONMENT !== 'development') return new Response('Not found', { status: 404 });
+	if (request.method !== 'POST') return new Response('Method not allowed', { status: 405 });
+	const body = (await request.json().catch(() => null)) as Record<string, unknown> | null;
+	const { workspaceId, pageId } = body ?? {};
+	if (typeof workspaceId !== 'string' || typeof pageId !== 'string' || !isValidRoomId(workspaceId) || !isValidRoomId(pageId)) {
+		return new Response('Invalid ids', { status: 400 });
+	}
+	const room = pageRoom(env, workspaceId, pageId);
+	await room.recordIdentity(workspaceId, pageId);
+	await room.closeHistorySlot();
+	return Response.json({ ok: true });
+}
+
 export const handleRoom: RouteHandler = async (request, env) => {
 	const url = new URL(request.url);
 	if (url.pathname === DEV_TOKEN_PATH) return handleDevToken(request, env);
 	if (url.pathname === DEV_LOCK_PATH) return handleDevLock(request, env);
+	if (url.pathname === DEV_HISTORY_PATH) return handleDevHistorySlot(request, env);
 	const comments = COMMENTS_PATH.exec(url.pathname);
 	const match = comments ?? ROOM_PATH.exec(url.pathname);
 	if (!match) return new Response('Not found', { status: 404 });

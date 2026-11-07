@@ -228,13 +228,23 @@ export const ROLLUP_FUNCTIONS = [
 	'unchecked',
 	'percent_checked',
 	'percent_unchecked',
-	'show_unique'
+	'show_unique',
+	'show_original'
 ] as const;
 export type RollupFunction = (typeof ROLLUP_FUNCTIONS)[number];
 
 export const AI_PROPERTY_KINDS = ['summary', 'keywords', 'translation', 'custom'] as const;
 
 const EmptyConfig = v.object({});
+
+/** Suffix of the id of a two-way relation's synthetic reverse property: `<relation id>:reverse`. */
+export const REVERSE_SUFFIX = ':reverse';
+export const reverseIdOf = (relationId: string): string => relationId + REVERSE_SUFFIX;
+export const isReverseId = (id: string): boolean => id.endsWith(REVERSE_SUFFIX) && id.length > REVERSE_SUFFIX.length;
+/** The relation a synthetic reverse id mirrors. */
+export const relationOfReverse = (id: string): string => id.slice(0, id.length - REVERSE_SUFFIX.length);
+/** The longest id a two-way relation can have: its reverse id must still be a valid property id (64). */
+export const MAX_TWO_WAY_ID_LENGTH = 64 - REVERSE_SUFFIX.length;
 
 export const propertyConfigSchemas = {
 	title: EmptyConfig,
@@ -262,7 +272,16 @@ export const propertyConfigSchemas = {
 	relation: v.object({
 		/** The collection whose pages the relation points at; null/absent: any page. */
 		collectionId: v.optional(v.nullable(idSchema)),
-		limit: v.optional(v.picklist(['one', 'many']), 'many')
+		limit: v.optional(v.picklist(['one', 'many']), 'many'),
+		/**
+		 * Two-way: the target pages show the reverse side as a synthetic property (id `<id>:reverse`, see
+		 * {@link reverseIdOf}), computed by a range scan of `p_ref` on `(prop, v)`. No mirrored rows are stored.
+		 */
+		twoWay: v.optional(v.boolean()),
+		/** Name of the synthetic reverse property (default: "<name> (reverse)"). */
+		reverseName: v.optional(nameSchema),
+		/** Set by the server on the synthetic reverse property only: the id of the relation it mirrors. Never stored. */
+		reverseOf: v.optional(idSchema)
 	}),
 	rollup: v.object({
 		relationProp: idSchema,
@@ -913,6 +932,19 @@ export function parsePropertyConfig<T extends PropertyType>(type: T, config: unk
 export function formatUniqueId(prefix: string | undefined, n: number): string {
 	return prefix ? `${prefix}-${n}` : String(n);
 }
+
+/** Property types a view may group by (board columns, grouped lists). */
+export const GROUPABLE_TYPES: ReadonlySet<PropertyType> = new Set<PropertyType>([
+	'select',
+	'status',
+	'multi_select',
+	'person',
+	'checkbox',
+	'date',
+	'relation',
+	'created_by',
+	'last_edited_by'
+]);
 
 // ───────────────────────────── property lookup ─────────────────────────────
 
