@@ -3,8 +3,9 @@
  * (the `page.grants.*` RPC handlers are the Accounts track's and call those DO methods).
  *
  * Writes run in a governed transaction (`db.$as(actor)`): the policy's `grant` rules need `full` on the
- * grant's page, and are checked again here so the refusal reads as `FORBIDDEN` (or `NOT_FOUND` for a page
- * the caller cannot see) rather than a policy error. A revoked grant is tombstoned (`deletedAt`), never
+ * grant's page. Setting a grant checks `full` here first (a create has no row to refuse); revoking lets the
+ * governed update refuse and explains the refusal (`governed.ts`), so it reads as `FORBIDDEN` (or `NOT_FOUND` for
+ * a page the caller cannot see) rather than a policy error. A revoked grant is tombstoned (`deletedAt`), never
  * deleted, so history keeps a record of who had access.
  */
 import type { Grant } from '../../../lib/shared/schemas';
@@ -14,6 +15,7 @@ import type { AccessLevel } from '../../db/workspace.schema';
 import type { GovernedTx } from './access';
 import type { ChangeRecord } from './eav';
 import { invalid, notFound, WorkspaceError } from './errors';
+import { canRead, orExplain } from './governed';
 
 type SubjectKind = (typeof GRANT_SUBJECT_KINDS)[number];
 
@@ -150,8 +152,15 @@ export async function setGrantRecords(
 export async function revokeGrantRecords(tx: GovernedTx, grantId: string, now: number): Promise<ChangeRecord[]> {
 	const grant = (await tx.grant.findUnique({ where: { id: grantId } })) as GrantRow | null;
 	if (!grant || grant.deletedAt) throw notFound(`Grant "${grantId}"`);
-	await assertFullOnPage(tx, grant.pageId);
-	await tx.grant.update({ where: { id: grantId }, data: { deletedAt: new Date(now) } });
+	// The governed update is the check (`grant` update needs `full` on its page): no `can` before it. The grant was
+	// readable, so its page is too; a refusal is a 403 (`governed.ts`).
+	await orExplain(
+		() => tx.grant.update({ where: { id: grantId }, data: { deletedAt: new Date(now) } }),
+		async () =>
+			(await canRead(tx.page, { id: grant.pageId }))
+				? new WorkspaceError('FORBIDDEN', 'You need full access to share this page')
+				: notFound(`Page "${grant.pageId}"`)
+	);
 	return [
 		{
 			kind: 'grant.revoke',

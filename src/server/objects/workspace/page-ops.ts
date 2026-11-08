@@ -11,6 +11,7 @@ import { isRank } from '../../../lib/shared/sort-keys';
 import type { WorkspaceTx } from '../../db/workspace.client';
 import type { AccessLevel } from '../../db/workspace.schema';
 import { invalid, WorkspaceError } from './errors';
+import { canRead, orExplain } from './governed';
 import { defaultsForView, writeInitialValues, type ChangeRecord } from './eav';
 import { isoTime, LIVE_SUBTREE_CTE, rawAll, rawRun, SUBTREE_CTE } from './util';
 
@@ -66,12 +67,27 @@ async function livePage(tx: WorkspaceTx, id: string, path: string): Promise<Page
 }
 
 /**
- * A governed update that matches no row the actor may change does nothing, silently: so writes that matter
- * ask first. (A governed `create` throws on its own.)
+ * A pre-flight `can` for the checks that ARE the enforcement: where no governed single-row write follows (the read of
+ * a database's defaults), or where the write is raw SQL (page create and move: `authorizeOp` does that). A governed
+ * single-row `update` or `delete` needs no pre-check: the policy makes it throw `NotFoundError` on its own (see
+ * `governed.ts`), so those go through `governedPageWrite`. (A governed `create` throws on its own too.)
  */
 async function assertCan(tx: WorkspaceTx, id: string, level: AccessLevel, what: string): Promise<void> {
 	const can = (await (tx.page as unknown as { can(a: AccessLevel, w: { id: string }): Promise<boolean> }).can(level, { id })) as boolean;
 	if (!can) throw new WorkspaceError('FORBIDDEN', `You do not have access to ${what}`);
+}
+
+/**
+ * A governed single-row `tx.page.update` of a page the caller could read a moment ago. If the policy refuses it, the
+ * answer is `FORBIDDEN` (or `not_found` when the page is no longer readable), decided by one `can('read')` after the
+ * failure and not before every write.
+ */
+function governedPageWrite<T>(tx: WorkspaceTx, id: string, path: string, what: string, write: () => Promise<T>): Promise<T> {
+	return orExplain(write, async () =>
+		(await canRead(tx.page, { id }))
+			? new WorkspaceError('FORBIDDEN', `You do not have access to ${what}`)
+			: invalid(path, 'not_found', `Page "${id}" does not exist`)
+	);
 }
 
 async function assertTeamspace(tx: WorkspaceTx, id: string | null, path: string): Promise<void> {
@@ -241,7 +257,6 @@ async function setPage(
 	env: PageOpEnv
 ): Promise<ChangeRecord[]> {
 	const page = await livePage(tx, op.page, '/page');
-	await assertCan(tx, page.id, 'update', 'edit this page');
 	const data: { icon?: string | null; cover?: string | null } = {};
 	const before: Record<string, unknown> = {};
 	const after: Record<string, unknown> = {};
@@ -256,10 +271,12 @@ async function setPage(
 		after.cover = op.cover;
 	}
 	if (Object.keys(data).length === 0) return [];
-	await tx.page.update({
-		where: { id: page.id },
-		data: { ...data, updatedById: env.actorId, updatedAt: new Date(env.now) }
-	});
+	await governedPageWrite(tx, page.id, '/page', 'edit this page', () =>
+		tx.page.update({
+			where: { id: page.id },
+			data: { ...data, updatedById: env.actorId, updatedAt: new Date(env.now) }
+		})
+	);
 	return [{ kind: 'setPage', page: page.id, prop: null, old: before, new: after }];
 }
 
@@ -302,14 +319,22 @@ async function restorePage(tx: WorkspaceTx, id: string, env: PageOpEnv): Promise
 		if (!parent || parent.deletedAt) parentId = null; // the parent is still in the trash: restore to the root
 	}
 	await env.noteParent(parentId);
-	await tx.page.updateMany({
+	// `updateMany` under `$as` touches only the rows the policy lets the actor change, and says so with a smaller count
+	// (never an error). `authorizeOp` asked for `full` on the root, which holds on every page below it (access is only
+	// inherited downwards), so every page of the entry must be restored: a smaller count is a refusal, and the
+	// commit rolls back instead of restoring part of the subtree.
+	const entry = (await rawAll<{ n: number }>(tx, 'SELECT COUNT(*) AS n FROM page WHERE trash_root = ?', page.id))[0]?.n ?? 0;
+	const restored = await tx.page.updateMany({
 		where: { trashRoot: page.id },
 		data: { deletedAt: null, deletedById: null, trashRoot: null }
 	});
+	if (restored.count !== entry) throw new WorkspaceError('FORBIDDEN', 'You do not have access to restore this page');
 	if (parentId !== page.parentId) {
-		await tx.page.update({ where: { id: page.id }, data: { parentId } });
+		await governedPageWrite(tx, page.id, '/page', 'restore this page', () => tx.page.update({ where: { id: page.id }, data: { parentId } }));
 	}
-	await tx.page.update({ where: { id: page.id }, data: { updatedById: env.actorId, updatedAt: new Date(env.now) } });
+	await governedPageWrite(tx, page.id, '/page', 'restore this page', () =>
+		tx.page.update({ where: { id: page.id }, data: { updatedById: env.actorId, updatedAt: new Date(env.now) } })
+	);
 	return [
 		{
 			kind: 'restore',

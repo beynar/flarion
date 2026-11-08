@@ -11,6 +11,7 @@ import type { WorkspaceDb, WorkspaceTx } from '../../db/workspace.client';
 import type { Actor } from '../../auth/session';
 import type { ChangeRecord } from './eav';
 import { invalid, notFound, WorkspaceError } from './errors';
+import { canRead, orExplain } from './governed';
 import { isoTime, rawRun } from './util';
 
 type Privacy = Teamspace['privacy'];
@@ -65,8 +66,10 @@ export async function readTeamspace(db: WorkspaceDb, actor: Actor, id: string): 
 }
 
 /**
- * A governed update or delete that matches no row the actor may change does nothing, silently (a create
- * throws on its own): so the writes below ask the policy first, for the action its rules name.
+ * A pre-flight `can`, only where NO governed single-row write follows to do the checking (an update with nothing to
+ * change). A governed single-row `update` or `delete` throws `NotFoundError` on its own when the policy refuses it
+ * (viborm 1.12.1, `governed.ts`), so those go through `teamspaceWrite`: no `can` before the write, one `can('read')`
+ * after a refusal to tell 404 from 403.
  */
 async function assertCan(
 	delegate: unknown,
@@ -76,6 +79,18 @@ async function assertCan(
 ): Promise<void> {
 	const can = await (delegate as { can(a: string, w: unknown): Promise<boolean> }).can(action, where);
 	if (!can) throw new WorkspaceError('FORBIDDEN', `Only a teamspace owner can ${what}`);
+}
+
+/**
+ * A governed single-row write on a teamspace (or one of its members) the caller could read a moment ago. When the policy
+ * refuses it: `FORBIDDEN` "Only a teamspace owner can <what>", or `NOT_FOUND` if the teamspace is no longer readable.
+ */
+function teamspaceWrite<T>(tx: WorkspaceTx, id: string, what: string, write: () => Promise<T>): Promise<T> {
+	return orExplain(write, async () =>
+		(await canRead(tx.teamspace, { id }))
+			? new WorkspaceError('FORBIDDEN', `Only a teamspace owner can ${what}`)
+			: notFound(`Teamspace "${id}"`)
+	);
 }
 
 export function assertNotGuest(actor: Actor, what: string): void {
@@ -132,23 +147,23 @@ export async function updateTeamspaceRecords(
 	patch: Partial<TeamspaceInput> & { id: string }
 ): Promise<ChangeRecord[]> {
 	const row = await liveTeamspace(tx, patch.id);
-	await assertCan(tx.teamspace, 'update', { id: row.id }, 'change its settings');
 	const data: Record<string, unknown> = {};
 	if (patch.name !== undefined) data.name = patch.name;
 	if (patch.icon !== undefined) data.icon = patch.icon;
 	if (patch.description !== undefined) data.description = patch.description;
 	if (patch.privacy !== undefined) data.privacy = patch.privacy;
 	if (patch.defaultLevel !== undefined) data.defaultLevel = patch.defaultLevel;
-	if (Object.keys(data).length > 0) await tx.teamspace.update({ where: { id: row.id }, data });
+	if (Object.keys(data).length > 0) await teamspaceWrite(tx, row.id, 'change its settings', () => tx.teamspace.update({ where: { id: row.id }, data }));
+	else await assertCan(tx.teamspace, 'update', { id: row.id }, 'change its settings'); // nothing to write: the check is the answer
 	return [{ kind: 'teamspace.update', page: null, prop: row.id, old: null, new: data }];
 }
 
 /** Tombstones the teamspace and all its pages with one shared timestamp, exactly like a subtree. */
 export async function archiveTeamspaceRecords(tx: WorkspaceTx, id: string, actorId: string, now: number): Promise<ChangeRecord[]> {
 	const row = await liveTeamspace(tx, id);
-	await assertCan(tx.teamspace, 'update', { id: row.id }, 'archive it');
 	const stamp = isoTime(now);
-	await tx.teamspace.update({ where: { id: row.id }, data: { deletedAt: new Date(now) } });
+	// The governed update is the check (an owner's `update`); the raw statement below only runs after it passed.
+	await teamspaceWrite(tx, row.id, 'archive it', () => tx.teamspace.update({ where: { id: row.id }, data: { deletedAt: new Date(now) } }));
 	const pages = await rawRun(
 		tx,
 		'UPDATE page SET deleted_at = ?, deleted_by = ? WHERE teamspace_id = ? AND deleted_at IS NULL',
@@ -199,9 +214,8 @@ export async function listArchivedTeamspaces(db: WorkspaceDb, sql: SqlStorage): 
 export async function restoreTeamspaceRecords(tx: WorkspaceTx, id: string): Promise<ChangeRecord[]> {
 	const row = await tx.teamspace.findUnique({ where: { id } });
 	if (!row?.deletedAt) throw notFound(`Archived teamspace "${id}"`);
-	await assertCan(tx.teamspace, 'update', { id: row.id }, 'restore it');
 	const stamp = isoTime(row.deletedAt.getTime());
-	await tx.teamspace.update({ where: { id: row.id }, data: { deletedAt: null } });
+	await teamspaceWrite(tx, row.id, 'restore it', () => tx.teamspace.update({ where: { id: row.id }, data: { deletedAt: null } }));
 	const pages = await rawRun(
 		tx,
 		'UPDATE page SET deleted_at = NULL, deleted_by = NULL WHERE teamspace_id = ? AND deleted_at = ? AND trash_root IS NULL',
@@ -253,14 +267,17 @@ export async function addTeamspaceMemberRecords(
 		return { member: toMember(existing), records: [] };
 	}
 	if (existing) {
-		await assertCan(tx.teamspace, 'update', { id: input.teamspaceId }, 'change a member');
-		if (existing.role === 'owner' && role !== 'owner' && (await ownerCount(tx, input.teamspaceId)) <= 1) {
+		// The governed update is the permission check; the owner count is read after it (a demotion that leaves no owner
+		// throws and rolls the commit back, so the refusal for a non-owner still comes first).
+		row = await teamspaceWrite(tx, input.teamspaceId, 'change a member', () =>
+			tx.teamspaceMember.update({
+				where: { teamspaceId_userId: { teamspaceId: input.teamspaceId, userId: input.userId } },
+				data: { role }
+			})
+		);
+		if (existing.role === 'owner' && role !== 'owner' && (await ownerCount(tx, input.teamspaceId)) === 0) {
 			throw new WorkspaceError('CONFLICT', 'A teamspace needs at least one owner');
 		}
-		row = await tx.teamspaceMember.update({
-			where: { teamspaceId_userId: { teamspaceId: input.teamspaceId, userId: input.userId } },
-			data: { role }
-		});
 	} else {
 		row = await tx.teamspaceMember.create({
 			data: { teamspaceId: input.teamspaceId, userId: input.userId, role, rank: await nextMemberRank(tx, input.userId) }
@@ -280,11 +297,10 @@ export async function setTeamspaceMemberRoleRecords(
 	const key = { teamspaceId_userId: { teamspaceId: input.teamspaceId, userId: input.userId } };
 	const existing = await tx.teamspaceMember.findUnique({ where: key });
 	if (!existing) throw notFound(`Member "${input.userId}"`);
-	await assertCan(tx.teamspace, 'update', { id: input.teamspaceId }, 'change a member');
-	if (existing.role === 'owner' && input.role !== 'owner' && (await ownerCount(tx, input.teamspaceId)) <= 1) {
+	const row = await teamspaceWrite(tx, input.teamspaceId, 'change a member', () => tx.teamspaceMember.update({ where: key, data: { role: input.role } }));
+	if (existing.role === 'owner' && input.role !== 'owner' && (await ownerCount(tx, input.teamspaceId)) === 0) {
 		throw new WorkspaceError('CONFLICT', 'A teamspace needs at least one owner');
 	}
-	const row = await tx.teamspaceMember.update({ where: key, data: { role: input.role } });
 	return {
 		member: toMember(row),
 		records: [{ kind: 'teamspace.member', page: null, prop: input.teamspaceId, old: { role: existing.role }, new: { userId: input.userId, role: input.role } }]
@@ -299,12 +315,11 @@ export async function removeTeamspaceMemberRecords(
 	const key = { teamspaceId_userId: { teamspaceId: input.teamspaceId, userId: input.userId } };
 	const existing = await tx.teamspaceMember.findUnique({ where: key });
 	if (!existing) return [];
-	// Owners remove anyone; everyone may remove themselves (the policy's `leave`).
-	const allowed = await (tx.teamspaceMember as unknown as { can(a: string, w: unknown): Promise<boolean> }).can('leave', key);
-	if (!allowed) throw new WorkspaceError('FORBIDDEN', 'Only a teamspace owner can remove a member');
-	if (existing.role === 'owner' && (await ownerCount(tx, input.teamspaceId)) <= 1) {
+	// Owners remove anyone; everyone may remove themselves (the policy's `leave`, which the governed delete asks). The owner
+	// count is read after the delete: the last owner leaving throws and rolls the commit back.
+	await teamspaceWrite(tx, input.teamspaceId, 'remove a member', () => tx.teamspaceMember.delete({ where: key }));
+	if (existing.role === 'owner' && (await ownerCount(tx, input.teamspaceId)) === 0) {
 		throw new WorkspaceError('CONFLICT', 'A teamspace needs at least one owner');
 	}
-	await tx.teamspaceMember.delete({ where: key });
 	return [{ kind: 'teamspace.member', page: null, prop: input.teamspaceId, old: { userId: input.userId, role: existing.role }, new: null }];
 }

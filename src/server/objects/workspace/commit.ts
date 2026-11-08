@@ -86,7 +86,11 @@ export async function runCommit(db: WorkspaceClient, input: CommitInput): Promis
 				if (now !== was) flips.set(id, now);
 			}
 
-			// Pages edited by the commit get their edit stamp (creates carry it already).
+			// Pages edited by the commit get their edit stamp (creates carry it already). `tx` is governed, and a governed `updateMany`
+			// touches only the rows the policy lets the actor change, with a smaller count and no error. That is the behaviour wanted
+			// here, so the count is NOT checked: the stamp is metadata, and the right to the write itself was asked by the op
+			// (`authorizeOp`, the governed writes of the records). A record can name a page the actor may only read (an `addMember` of
+			// a page they can see into a database they edit): it is not an edit of that page and is left unstamped.
 			const edited = new Set<string>();
 			for (const r of records) if (r.page && r.kind !== 'create' && r.kind !== 'links' && !env.unstamped.has(r.page) && !env.stamped.has(r.page)) edited.add(r.page);
 			if (edited.size > 0) {

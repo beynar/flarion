@@ -133,23 +133,27 @@ describe('Durable Object SQLite driver: errors', () => {
 		await withClient(async (client) => {
 			await client.user.create({ data: { id: 'u1', name: 'A', email: 'a@x.dev' } });
 			const unique = await client.user.create({ data: { id: 'u2', name: 'B', email: 'a@x.dev' } }).catch((e) => e);
-			expect(unique).toMatchObject({ name: 'UniqueConstraintError', meta: { columns: ['email'], table: 'users' } });
+			// workerd's SQLite errors carry no `code`: viborm maps them from the message (the driver adds nothing), so the
+			// class, the V-code and the constrained columns all come from viborm itself.
+			expect(unique).toMatchObject({ name: 'UniqueConstraintError', code: 'V3001', meta: { columns: ['email'], table: 'users' } });
+			const pk = await client.user.create({ data: { id: 'u1', name: 'C' } }).catch((e) => e);
+			expect(pk).toMatchObject({ name: 'UniqueConstraintError', code: 'V3001', meta: { columns: ['id'], table: 'users' } });
 			const fk = await client.post.create({ data: { id: 'p1', title: 't', authorId: 'nobody' } }).catch((e) => e);
-			expect(fk).toMatchObject({ name: 'ForeignKeyError' });
+			expect(fk).toMatchObject({ name: 'ForeignKeyError', code: 'V3002' });
 			// RESTRICT: a parent with children cannot be deleted.
 			await client.post.create({ data: { id: 'p2', title: 't', authorId: 'u1' } });
 			const restrict = await client.user.delete({ where: { id: 'u1' } }).catch((e) => e);
-			expect(restrict).toMatchObject({ name: 'ForeignKeyError' });
+			expect(restrict).toMatchObject({ name: 'ForeignKeyError', code: 'V3002' });
 		});
 	});
 
-	test('raw NOT NULL and CHECK failures are mapped, and the platform error code is attached', async () => {
+	test('raw NOT NULL and CHECK failures are mapped by viborm from the message, NOT NULL with its column', async () => {
 		await withClient(async (client, state) => {
 			const notNull = await client.$executeRawUnsafe('INSERT INTO users (id) VALUES (?)', 'x').catch((e) => e);
-			expect(notNull).toMatchObject({ name: 'NotNullConstraintError' });
+			expect(notNull).toMatchObject({ name: 'NotNullConstraintError', code: 'V3003', meta: { columns: ['name'], table: 'users' } });
 			state.storage.sql.exec('CREATE TABLE checked (n INTEGER CHECK (n > 0))');
 			const check = await client.$executeRawUnsafe('INSERT INTO checked VALUES (-1)').catch((e) => e);
-			expect(check).toMatchObject({ name: 'CheckConstraintError' });
+			expect(check).toMatchObject({ name: 'CheckConstraintError', code: 'V3004' });
 			const auth = await client.$queryRawUnsafe('SELECT count(*) FROM sqlite_schema WHERE 1').catch((e) => e);
 			expect(auth).toBeTruthy();
 		});

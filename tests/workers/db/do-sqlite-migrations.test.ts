@@ -6,6 +6,7 @@ import { createDurableObjectStorageWriter } from 'viborm/migrations/storage/dura
 import { createTenantMigrator } from 'viborm/migrations/tenant';
 import { createDurableObjectSqliteClient } from '../../../src/server/db/driver/client';
 import { migrateOnWake } from '../../../src/server/db/driver/migrate';
+import { createDurableObjectSqliteDriver } from '../../../src/server/db/do-sqlite-driver';
 import { testEnv } from '../helpers';
 
 const v1 = {
@@ -96,13 +97,34 @@ describe('migrations on Durable Object SQLite', () => {
 			await m1.generate({ name: 'init' });
 			await m1.apply();
 			await client1.user.create({ data: { id: 'u1', name: 'Ada', posts: { create: [{ id: 'p1', title: 'a' }, { id: 'p2', title: 'b' }] } } });
-			// Pending write in this event: without ctx.storage.sync() the pragma would not take.
-			await client1.user.create({ data: { id: 'u2', name: 'Bob' } });
 			const client2 = createDurableObjectSqliteClient(state.storage, v2);
 			const m2 = createMigrationClient(client2, { storage, tables: TABLES });
 			await m2.generate({ name: 'v2' });
+			// A raw write with no await before `apply`, as close to the lift as a test gets. (Whether it is still pending when
+			// `apply` reaches `PRAGMA foreign_keys = OFF` depends on viborm's own I/O in between, so the hook has its own test below.)
+			state.storage.sql.exec("INSERT INTO users (id, name) VALUES ('u3', 'Cy')");
 			expect((await m2.apply()).outcome).toBe('applied');
 			expect(await client2.post.count()).toBe(2);
+		});
+	});
+
+	test("the driver's beforeForeignKeysOff hook settles a pending write, without which PRAGMA foreign_keys = OFF is a silent no-op", async () => {
+		await inObject('fk-hook', async (state) => {
+			const driver = createDurableObjectSqliteDriver(state.storage);
+			const q = (statement: string) => state.storage.sql.exec(statement).toArray();
+			const foreignKeys = () => (q('PRAGMA foreign_keys')[0] as { foreign_keys: number }).foreign_keys;
+			q('CREATE TABLE fk_probe (id TEXT PRIMARY KEY)');
+			q('PRAGMA foreign_keys = ON');
+			// control: a pending write turns the pragma into a no-op (it still reads 1)
+			q("INSERT INTO fk_probe VALUES ('a')");
+			q('PRAGMA foreign_keys = OFF');
+			expect(foreignKeys()).toBe(1);
+			// viborm calls this hook right before its `PRAGMA foreign_keys = OFF` (base class: declared, not implemented)
+			q("INSERT INTO fk_probe VALUES ('b')");
+			await (driver as unknown as { beforeForeignKeysOff(): Promise<void> }).beforeForeignKeysOff();
+			q('PRAGMA foreign_keys = OFF');
+			expect(foreignKeys()).toBe(0);
+			q('PRAGMA foreign_keys = ON');
 		});
 	});
 

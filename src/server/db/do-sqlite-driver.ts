@@ -33,17 +33,26 @@
  *   never await non-storage I/O (fetch, timers) inside a transaction body.
  * - **Bound parameters**: 100 per statement, declared through `maxBindParametersPerStatement` so
  *   viborm splits or refuses oversized statements before they reach SQLite.
- * - **Errors**: workerd's SQLite errors carry no `code`; the driver derives one from the message
- *   (`SQLITE_CONSTRAINT_UNIQUE`, `SQLITE_AUTH`, `SQLITE_TOOBIG`, ...) so viborm maps them to
- *   `UniqueConstraintError`, `ForeignKeyError`, `NotNullConstraintError`, `CheckConstraintError` and
- *   attaches the constrained columns.
+ * - **Errors**: workerd's SQLite errors carry no `code`, and viborm maps them from the message on its own
+ *   (`UniqueConstraintError`, `ForeignKeyError`, `NotNullConstraintError`, `CheckConstraintError`, with the
+ *   constrained columns and table). The driver adds nothing: it used to attach a `code` parsed from the message,
+ *   and removing that changed no class, V-code, column or table (`tests/workers/db/do-sqlite-driver.test.ts`), only
+ *   dropped the `providerCode` diagnostic.
  * - **Migrations**: the driver declares viborm's `SQLITE_MIGRATION_CAPABILITY`, so `push`, `apply`,
- *   `down` and `reset` are admitted. Table recreation settles pending writes with `ctx.storage.sync()`
- *   before it lifts foreign keys (a pending write silently makes `PRAGMA foreign_keys = OFF` a no-op
- *   inside a Durable Object). The platform's own `_cf_*` tables (created by the KV API or alarms) are
+ *   `down` and `reset` are admitted. Table recreation calls the driver's `beforeForeignKeysOff` hook before it lifts
+ *   foreign keys; viborm's base class only DECLARES that hook (it does nothing by itself, its doc says a Durable Object
+ *   driver calls `ctx.storage.sync()` there), so ours implements it: a pending write silently makes `PRAGMA
+ *   foreign_keys = OFF` a no-op inside a Durable Object (`tests/workers/db/do-sqlite-migrations.test.ts`). The platform's own `_cf_*` tables (created by the KV API or alarms) are
  *   hidden from viborm's catalog read, because their PRAGMAs are refused with `SQLITE_AUTH`.
  *
  * ## Known limits
+ *
+ * - **Migration capability claims we cannot honour** (viborm maintainers' review, 2026-11-08): `SQLITE_MIGRATION_CAPABILITY`
+ *   asserts `reservedTablePrefixes: "none"` and `BEGIN IMMEDIATE` exclusion between connections. A Durable Object has
+ *   platform-owned `_cf_*` tables (hidden below by `hidePlatformTables`) and one connection with no `BEGIN IMMEDIATE`
+ *   (answered by the frame stack, not by a lock). Both hold in practice here (one writer, serialized by the object), and
+ *   viborm 1.12.1 admits no other values; the first-party `viborm/durable-object` driver announced by the maintainers
+ *   widens the contract. No workaround.
  *
  * - Integers outside +-2^53 lose precision on read: workerd returns JS numbers (no BigInt mode).
  *   Bound `bigint`s inside the safe range are bound as numbers, others as decimal strings.
@@ -127,26 +136,6 @@ function toBindValue(value: unknown): unknown {
 	return value;
 }
 
-const EXTENDED_CODE = /\(extended: (SQLITE_[A-Z0-9_]+)\)/;
-const BASE_CODE = /\b(SQLITE_[A-Z0-9_]+)\b/;
-
-/**
- * workerd raises plain `Error`s whose message ends with `: SQLITE_X (extended: SQLITE_X_Y)`. viborm
- * keys its constraint mapping on `error.code`, so derive it from the message when it is absent.
- */
-function annotateSqliteError(error: unknown): unknown {
-	if (!(error instanceof Error) || (error as { code?: unknown }).code !== undefined) return error;
-	const code = EXTENDED_CODE.exec(error.message)?.[1] ?? BASE_CODE.exec(error.message)?.[1];
-	if (code) {
-		try {
-			Object.defineProperty(error, 'code', { value: code, configurable: true, enumerable: false });
-		} catch {
-			/* frozen error: leave it to viborm's message matching */
-		}
-	}
-	return error;
-}
-
 /**
  * viborm's SQLite catalog read names every table, and the platform's `_cf_*` tables answer PRAGMAs
  * with SQLITE_AUTH. viborm only filters them for D1, so add the filter to that exact statement.
@@ -216,35 +205,31 @@ export class DurableObjectSqliteDriver extends Driver<DurableObjectStorage, Dura
 		const silent = source.startsWith(QUIET_WRITE);
 		const sql = silent ? source.slice(QUIET_WRITE.length) : source;
 		const statement = hidePlatformTables(sql);
-		try {
-			const cursor = storage.sql.exec(statement, ...params.map(toBindValue));
-			if (cursor.columnNames.length > 0) {
-				const rows = cursor.toArray() as T[];
-				return { rows, rowCount: rows.length };
-			}
-			// Writes and DDL: step the cursor to completion.
-			cursor.toArray();
-			if (silent || !WRITE_KEYWORDS.has(leadingKeyword(statement))) return { rows: [] as T[], rowCount: 0 };
-			const meta = storage.sql
-				.exec<{ changes: number; rowid: number }>(
-					'SELECT changes() AS changes, last_insert_rowid() AS rowid'
-				)
-				.one();
-			const insertId =
-				leadingKeyword(statement) !== 'UPDATE' &&
-				leadingKeyword(statement) !== 'DELETE' &&
-				meta.changes > 0 &&
-				meta.rowid > 0
-					? meta.rowid
-					: undefined;
-			return {
-				rows: [] as T[],
-				rowCount: meta.changes,
-				...(insertId === undefined ? {} : { insertId })
-			};
-		} catch (error) {
-			throw annotateSqliteError(error);
+		const cursor = storage.sql.exec(statement, ...params.map(toBindValue));
+		if (cursor.columnNames.length > 0) {
+			const rows = cursor.toArray() as T[];
+			return { rows, rowCount: rows.length };
 		}
+		// Writes and DDL: step the cursor to completion.
+		cursor.toArray();
+		if (silent || !WRITE_KEYWORDS.has(leadingKeyword(statement))) return { rows: [] as T[], rowCount: 0 };
+		const meta = storage.sql
+			.exec<{ changes: number; rowid: number }>(
+				'SELECT changes() AS changes, last_insert_rowid() AS rowid'
+			)
+			.one();
+		const insertId =
+			leadingKeyword(statement) !== 'UPDATE' &&
+			leadingKeyword(statement) !== 'DELETE' &&
+			meta.changes > 0 &&
+			meta.rowid > 0
+				? meta.rowid
+				: undefined;
+		return {
+			rows: [] as T[],
+			rowCount: meta.changes,
+			...(insertId === undefined ? {} : { insertId })
+		};
 	}
 
 	// ----- transactions -----
@@ -378,7 +363,7 @@ export class DurableObjectSqliteDriver extends Driver<DurableObjectStorage, Dura
 				await frame.commit();
 			} catch (error) {
 				await this.rollbackFrames(from).catch(() => undefined);
-				throw annotateSqliteError(error);
+				throw error;
 			}
 		}
 	}
