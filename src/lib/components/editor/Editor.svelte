@@ -145,7 +145,8 @@
 	$effect(() => {
 		const id = pageId;
 		const fetcher = fetchLock ?? rpcLockFetcher;
-		return pageLocks.watch(id, fetcher, untrack(() => body?.lock));
+		// Untracked: `watch` reads and writes the lock cache (a SvelteMap), and this effect must depend on the page only, or every answer re-runs it.
+		return untrack(() => pageLocks.watch(id, fetcher, body?.lock));
 	});
 	const lock = $derived(pageLocks.get(pageId) ?? body?.lock);
 	const lockedOut = $derived(!!lock?.locked && !lock.bypass);
