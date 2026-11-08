@@ -95,7 +95,6 @@ async function handleDevToken(request: Request, env: Env): Promise<Response> {
 
 /** The page room's lock methods, hand-typed (edytor's generated RPC types are too deep for tsc). */
 interface PageRoomApi {
-	recordIdentity(workspaceId: string, pageId: string): Promise<void>;
 	noteBypass(userId: string, bypass: boolean): Promise<void>;
 	setLocked(userId: string, locked: boolean, full: boolean): Promise<unknown>;
 	closeHistorySlot(): Promise<void>;
@@ -145,8 +144,6 @@ async function handleDevLock(request: Request, env: Env): Promise<Response> {
  * lock). Best effort and only when the Workspace DO knows the user: an unknown level changes nothing.
  */
 async function noteFullAccess(env: Env, claims: RoomClaims): Promise<void> {
-	// First, who the room is: an object reached through a stub without its name could not tell (see `recordPageMeta`).
-	await pageRoom(env, claims.workspaceId, claims.pageId).recordIdentity(claims.workspaceId, claims.pageId);
 	try {
 		const workspace = env.WORKSPACE.getByName(claims.workspaceId) as unknown as {
 			editorUserLevel(userId: string, pageId: string): Promise<string | null>;
@@ -167,9 +164,7 @@ async function handleDevHistorySlot(request: Request, env: Env): Promise<Respons
 	if (typeof workspaceId !== 'string' || typeof pageId !== 'string' || !isValidRoomId(workspaceId) || !isValidRoomId(pageId)) {
 		return new Response('Invalid ids', { status: 400 });
 	}
-	const room = pageRoom(env, workspaceId, pageId);
-	await room.recordIdentity(workspaceId, pageId);
-	await room.closeHistorySlot();
+	await pageRoom(env, workspaceId, pageId).closeHistorySlot();
 	return Response.json({ ok: true });
 }
 

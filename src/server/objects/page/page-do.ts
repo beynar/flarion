@@ -50,7 +50,7 @@ import { deletePrefix, pageHistoryStore } from './history-store';
 import { enqueueIndexJob } from './index-job';
 import { bumpPageVersion } from '../../share/cache';
 import { metric } from '../../metrics';
-import { ensurePageMetaTable, recordPageMeta, resolvePageIdentity, type PageIdentity } from './page-meta';
+import { ensurePageMetaTable, resolvePageIdentity, type PageIdentity } from './page-meta';
 import { loadSnapshot, pageKeyPrefix, saveSnapshot } from './snapshot-store';
 import {
 	canBypassLock,
@@ -134,22 +134,6 @@ export class PageDO extends DurableObject<Env> {
 			// Per-block locks (a block whose data names a user under `lockedBy`) hold their subtree; full access bypasses.
 			locks: { key: 'lockedBy', subtree: true, bypass: (user) => canBypassLock(ctx.storage.kv, user) }
 		});
-	}
-
-	/**
-	 * The room route tells the object who it is before the room loads (see `recordPageMeta`): not every stub
-	 * carries the object's name. Idempotent; a contradicting identity throws.
-	 */
-	async recordIdentity(workspaceId: string, pageId: string): Promise<void> {
-		recordPageMeta(this.ctx.storage.sql, this.ctx.id.name, { workspaceId, pageId });
-		// A fresh object whose name is unknown (the dev server's platform proxy) failed its first start for want of an identity
-		// (`restore` needs it to read R2); it starts again at the next dial. Calls that are not dials (a history read, a block
-		// move) would meet that stale failure, so start again now that the identity is known. A no-op once the room is live.
-		try {
-			await (this.document as unknown as { room: { storage: { retryStart(): Promise<void> } } }).room.storage.retryStart();
-		} catch (error) {
-			console.warn('page room: could not restart after recording its identity', String(error));
-		}
 	}
 
 	/** This object's page, from its name (recorded in `page_meta` on first use). */

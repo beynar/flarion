@@ -45,7 +45,6 @@ async function apply(db: D1Database): Promise<void> {
 		const name = path.split('/').pop()!;
 		if (applied.has(name)) continue;
 		const sql = await migrationFiles[path]!();
-		// One statement at a time: dev D1 goes through a platform proxy where `batch` is less forgiving.
 		for (const statement of splitStatements(sql)) await db.prepare(statement).run();
 		await db.prepare('INSERT INTO d1_migrations (name) VALUES (?1)').bind(name).run();
 		console.log(`[dev] applied D1 migration ${name}`);

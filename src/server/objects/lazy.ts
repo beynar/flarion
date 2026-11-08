@@ -55,7 +55,7 @@ export const WORKSPACE_METHODS = [
 ] as const;
 
 export const PAGE_METHODS = [
-	'recordIdentity', 'identity', 'fetch', 'webSocketMessage', 'webSocketClose', 'webSocketError', 'seedFrom', 'readPublished', 'readForIndex', 'read', 'metrics', 'lastUpdated',
+	'identity', 'fetch', 'webSocketMessage', 'webSocketClose', 'webSocketError', 'seedFrom', 'readPublished', 'readForIndex', 'read', 'metrics', 'lastUpdated',
 	'setAccess', 'roomUsers', 'appendBlocks', 'listCommentThreads', 'applyComment', 'lockState', 'setLocked', 'noteBypass', 'listHistory', 'readHistory', 'restoreHistory',
 	'undoRestore', 'historyWritten', 'closeHistorySlot', 'exportBlocks', 'importBlocks', 'commitMove', 'abortMove', 'applyLateEdits', 'lateEdits', 'ackLateEdits', 'purge',
 	'closeUser', 'closeAll', 'reportQuota', 'restore', 'announce', 'announceIfEmpty', 'persist',

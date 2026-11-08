@@ -39,5 +39,5 @@ Notes:
 - The `from` address may be any mailbox on an onboarded domain; keep it `noreply@beynar.dev` so replies are not expected.
 - Email Service is transactional only: do not use it for newsletters.
 - Use real addresses in tests: bounces from fake addresses hurt the sender reputation. Locally nothing is sent.
-- To send real mail from `wrangler dev` use `"remote": true` on the binding (remove before deploying); `vite dev` strips `send_email` and uses the KV mailbox.
+- To send real mail from `wrangler dev` use `"remote": true` on the binding (remove before deploying); `vite dev` and `wrangler dev` run `send_email` locally (Miniflare writes each message under `.wrangler/tmp/email` and delivers nothing), and in development the KV mailbox keeps a copy for `/api/auth/dev/mails`.
 - Account sending limits and suppression lists: dashboard > Email Service. A bounce suppresses the address; the invite flow surfaces a 500 ("The invitation email could not be sent") when the send call itself fails.

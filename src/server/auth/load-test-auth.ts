@@ -155,7 +155,6 @@ async function cleanup(env: Env, body: { runId?: unknown; workspaceIds?: unknown
 		}
 	}
 	for (const id of workspaceIds) {
-		// Two statements, not a batch: Distilled's D1 proxy cannot batch in `pnpm dev`.
 		await env.DB.prepare(`DELETE FROM "outbox" WHERE "workspaceId" = ?1`).bind(id).run();
 		await env.DB.prepare(`DELETE FROM "workspace" WHERE "id" = ?1`).bind(id).run();
 	}

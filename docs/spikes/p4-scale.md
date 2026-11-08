@@ -176,7 +176,7 @@ with an esbuild that has no `.wasm` loader (a static `import wasm from '....wasm
 `_worker.js` as `roaring.wasm` and adds it to `.assetsignore`; `wrangler.jsonc` has `find_additional_modules: true` (top level, staging and
 production; wrangler's default rules already type `**/*.wasm` as `CompiledWasm`) so wrangler uploads it as a module of the Worker. The workers tests alias
 `./wasm-source` to a static import (`vitest.config.ts`, `tests/workers/scale/wasm-source.ts`), which is how the test pool loads
-CompiledWasm. `pnpm dev` (Distilled) cannot be assumed to resolve it: **bitmaps are an accelerator, never a dependency.**
+CompiledWasm. `pnpm dev` (workerd, where `WebAssembly.compile` is disallowed) cannot resolve it: **bitmaps are an accelerator, never a dependency.**
 `ensureRoaring()` resolves `false` when the module cannot load, logs once, and every caller keeps its SQL path (the same degradation as
 `env.AI`). Setting the Worker var `BITMAPS` to `"off"` turns them off in a deployed object: the rollback switch.
 

@@ -102,9 +102,13 @@ export interface RunOptions {
 	model?: TextModel;
 }
 
-/** The model a run uses: the injected one, else (development only) the deterministic fake, else Workers AI. */
-export const modelFor = (env: Pick<Env, 'ENVIRONMENT' | 'AI'>, injected?: TextModel): TextModel | undefined =>
-	injected ?? (env.ENVIRONMENT === 'development' && !env.AI ? fakeTextModel : undefined);
+/**
+ * The model a run uses: the injected one, else (development only) the deterministic fake, else Workers AI. The development
+ * server has an `AI` binding now (wrangler's remote proxy), but a queue job carries no request header to ask for the fake, and
+ * the e2e suites need the same answer every time (and no billed call per edit), so development always takes the fake.
+ */
+export const modelFor = (env: Pick<Env, 'ENVIRONMENT'>, injected?: TextModel): TextModel | undefined =>
+	injected ?? (env.ENVIRONMENT === 'development' ? fakeTextModel : undefined);
 
 async function collect(env: AiEnv, prompt: PropertyPrompt, model: TextModel | undefined): Promise<string> {
 	const stream = streamText(env, { system: prompt.system, messages: prompt.messages, model, maxTokens: 1024 });

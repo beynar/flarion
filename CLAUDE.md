@@ -5,7 +5,7 @@ says "check exact syntax while building", read the library docs and adapt syntax
 Product name is **Flarion** (never use Notion's name, logo or fonts in the UI).
 
 ## Stack (pinned — do not upgrade)
-- SvelteKit 3.1 + Svelte 5 runes, Vite 8, `sveltekit-cloudflare-worker` (vendored tarball; source/docs at `/Users/arnaud/code/sveltekit-cloudflare-worker`).
+- SvelteKit 3.1 + Svelte 5 runes, Vite 8, `sveltekit-cloudflare-worker` (a GitHub commit, `github:beynar/sveltekit-cloudflare-worker#<full sha>`: pnpm cannot resolve a short sha that is not a branch tip; source/docs at `/Users/arnaud/code/sveltekit-cloudflare-worker`).
 - edytor 7.0.4 (editor, Yjs-v14-style CRDT, `edytor/cloudflare` attachRoom/routeDocumentSocket). Docs: https://edytor.dev/docs , source at `/Users/arnaud/code/edytor`.
 - viborm 1.12.1 (ORM; `viborm/permissions`, `viborm/soft-delete`, `viborm/ordering`, `viborm/d1`, `viborm/driver`). Docs: https://viborm.dev/docs , source at `/Users/arnaud/code/viborm` (may lag npm; trust `node_modules/viborm/dist` types first).
 - entasis 0.16.0 (UI). Docs: https://entasis.beynar.workers.dev/docs ; types in `node_modules/entasis/dist`.
@@ -16,7 +16,7 @@ Product name is **Flarion** (never use Notion's name, logo or fonts in the UI).
 ## Commands
 - `pnpm exec vitest run --project unit` / `--project workers` / `pnpm test`
 - `pnpm check` (svelte-check), `pnpm build` (vite build)
-- `pnpm dev` — local dev. AI, Email, Images, Vectorize and crons are NOT available locally (vite.config.ts strips them into `wrangler.dev.jsonc`); code must treat `env.AI`, `env.VECTORS`, `env.EMAIL`, `env.IMAGES` as optional and degrade.
+- `pnpm dev` — local dev: `src/worker.ts` runs in workerd (wrangler's Miniflare, configured from `wrangler.jsonc`) with HMR; Durable Objects keep their storage across edits. D1, R2, KV, queues, Email (writes `.wrangler/tmp/email`, delivers nothing), Images, rate limits, Workflows and crons (`curl "localhost:5173/cdn-cgi/handler/scheduled?cron=0+3+*+*+*"`) all run locally. `env.AI` goes through wrangler's remote proxy session (`wrangler login`; billed; AI Gateway `flarion` must exist on the account or `run(..., { gateway })` answers 2001). **Vectorize has no local simulation**: the binding throws `needs to be run remotely`, so development runs without vectors (`vectorIndexOf`) and AI properties use the fake model (`modelFor`). `wrangler d1 migrations apply DB --local` shares the dev state (`.wrangler/state/v3`); `dev-migrate.ts` also applies them on first use.
 - Never run `wrangler deploy`, create Cloudflare resources or touch DNS: the orchestrator does that.
 
 ## Conventions learned in P0
@@ -41,7 +41,6 @@ Product name is **Flarion** (never use Notion's name, logo or fonts in the UI).
 - FTS5 (`docs/spikes/p0-fts5.md`): title boost by multiplying bm25 per field; rank in a MATERIALIZED CTE;
   quote user input before MATCH.
 - Design: tokens in `src/lib/design/notion.tokens.ts`, `pnpm gen:theme` → `src/lib/design/generated/*`.
-- `sveltekit-cloudflare-worker` is vendored: `vendor/sveltekit-cloudflare-worker-0.0.1.tgz`.
 
 ## UI rule (owner requirement): entasis everywhere
 Every UI element must be an entasis component when entasis has one: `DataTable`/`Table` for tables and
@@ -56,7 +55,7 @@ and an exception must be justified in a comment.
 `src/worker.ts` is the only Worker entry; it routes in plan order to `src/server/http/*-route.ts` and
 re-exports DO classes, Workflows, `queue` and `scheduled`. Each route/class lives in its own module so
 tracks do not edit the same file. Durable Object access happens only from `src/worker.ts`-side modules
-(never from SvelteKit `+page.server.ts`/hooks: dev deadlock).
+SvelteKit server code reaches the same bindings with `import { env } from 'cloudflare:workers'` (adapter-cloudflare 8 has no `event.platform`; `App.Platform['env']` is a type alias of `Cloudflare.Env`). A Durable Object method called from SvelteKit in dev must not `import()` a module that is not loaded yet (the lazy shells in `server/objects/lazy.ts` use literal `import()`s, which the runner prefetches; `src/routes/(dev)/ssr-probe` is a working example).
 
 - `src/lib/shared/` — contracts shared by client and server (filter AST, property codecs, sort keys,
   block kinds, socket protocol, oRPC contract types). Pure TS, no Cloudflare imports.
@@ -88,8 +87,7 @@ Rules for parallel work:
   (`tests/unit/app-version.test.ts` checks it): bump them together, and raise `MIN_APP_VERSION` (`objects/workspace/versions.ts`)
   when the protocol breaks.
 - **`/rpc` CSRF**: every client uses `SimpleCsrfProtectionLinkPlugin` (`x-csrf-token: orpc`).
-- **D1 in `pnpm dev`**: batches (`$transaction([...])`) are NOT atomic behind Distilled's D1 proxy (dev only; workerd tests,
-  staging and production run the real atomic batch). See `src/server/db/global.client.ts`.
+- **D1 in `pnpm dev`** is workerd's real D1 now: `$transaction([...])` is the atomic batch everywhere.
 - **Workers-test noise**: `uncaught exception; source = Uncaught (in promise); stack = WorkspaceError ...` lines in
   `vitest --project workers` come from `@cloudflare/vitest-plugin` 1.6.0's DO stub wrapper, not from our code: a trivial
   Durable Object whose async method does `throw new Error('x')` prints the same, while the real dev server (workerd) returns
@@ -108,12 +106,11 @@ itself on `E2E_PORT` and reuses when one is already there. Three Playwright conf
 | Editor | `E2E_PORT=5273 pnpm exec playwright test -c tests/e2e/editor/playwright.config.ts` |
 | App UI (sidebar, teamspaces, share, properties, pushes, files) | `E2E_PORT=5473 pnpm exec playwright test -c tests/e2e/app/playwright.config.ts` |
 
-- **Concurrent servers are safe on distinct ports.** `vite.config.ts` gives a server on a non-default port its own
-  worker name and local resource ids (`flarion-<port>`, D1/KV/R2/queue/workflow suffixes, see `isolateDevState`):
-  Distilled's machine-wide registry (`~/.local/state/alchemy/registry/<script name>.json`) and its state under
-  `.sveltekit-cloudflare-worker/local/<name or id>` are keyed by those names, so two `flarion` workers used to overwrite
-  each other's registry entry and share SQLite files. Port 5173 (`pnpm dev`) keeps the plain names and the old state.
-  Delete `.sveltekit-cloudflare-worker/local/*-<port>*` to reset one port's data.
+- **Concurrent servers are safe on distinct ports.** `vite.config.ts` gives a server on a non-default port its own worker
+  name (`flarion-<port>`: wrangler's dev registry is keyed by name) and its own state directory (`persistState: { path: '.wrangler/state-<port>' }`),
+  and writes `wrangler.dev-<port>.jsonc` (same bindings as `wrangler.jsonc`, only `APP_ORIGIN`/`FILES_ORIGIN` and the name differ). Port 5173
+  (`pnpm dev`) reads `wrangler.jsonc` itself and keeps `.wrangler/state/v3`, shared with `wrangler dev`. Delete `.wrangler/state-<port>` to reset one
+  port's data. The generated `Cloudflare.Env` block of `src/app.d.ts` is only written for the default port (a derived config would rewrite its literal `vars`).
 - **Chromium**: Playwright's pinned build is used when cached; otherwise `tests/e2e/chromium.ts` picks the newest
   headless shell or Chromium under `~/Library/Caches/ms-playwright` (`PLAYWRIGHT_BROWSERS_PATH` is honoured).
   `E2E_CHROMIUM=/path/to/chrome-headless-shell` overrides it. Nothing to set up on a normal machine.
@@ -239,7 +236,7 @@ itself on `E2E_PORT` and reuses when one is already there. Three Playwright conf
   and the report prints the client's own round trip and `edit-to-diff` minus it (docs/ops/load-test.md).
 - **Socket shards** (`SocketShardDO`, `shard-router.ts`; `SOCKET_SHARDS` and `SOCKET_LOCAL_MAX` vars, 0 = off, on in staging only; `WorkspaceDO.configureShards` overrides per workspace): a shard holds a share of the
   hibernatable sockets and does the `ws.send` loop; the Workspace DO stays the only writer and sends one `[text, ids]` batch per shard per turn (`RemoteSocket` has the surface of a `WebSocket`, so the
-  live loop does not know). A shard finds the Workspace DO by `attachment.actor.workspaceId`, never by `ctx.id.name` (it is undefined under `vite dev`). Anything new that sends to sockets must go through
+  live loop does not know). A shard finds the Workspace DO by `attachment.actor.workspaceId`, never by `ctx.id.name` (kept from the Distilled days; `ctx.id.name` is set in `vite dev` now). Anything new that sends to sockets must go through
   `#send`/`socket.ws`, never `transport.sockets()`. The live fuzz has a shard mode (`tests/workers/live/fuzz-shards.test.ts`); the P1/P3 e2e gates pass with `SOCKET_SHARDS=2 SOCKET_LOCAL_MAX=0` in `.dev.vars`.
   Measured: shards halve the delivery of a bare fan-out but not the p95 of real writes (docs/spikes/p4-scale.md "Second pass"); the 1,000-tab p95 and the 300 ms cold window are not met.
 - **Commits cost CPU per ORM call**: build the policy client once per facts (`AccessService.governed` caches), give a transaction the registry (`primeRegistry`), and remember that `Date.now()` and `performance.now()` do not advance inside

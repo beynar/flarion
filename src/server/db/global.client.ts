@@ -12,35 +12,10 @@ import { globalSchema, SOFT_DELETE_MODELS } from './global.schema';
 
 export type GlobalClient = ReturnType<typeof createGlobalClient>;
 
-/**
- * `pnpm dev` runs request handling in Node behind Distilled's platform proxy, whose `D1.batch` is broken
- * (even `batch([prepare('SELECT 1')])` fails). In that mode only, a batch runs its statements one by one:
- * same results, no atomicity. Workerd (tests, staging, production) always gets the real, atomic `batch`.
- */
-const meta = (import.meta as ImportMeta & { env?: { DEV?: boolean; MODE?: string } }).env;
-const SEQUENTIAL_BATCH = meta?.DEV === true && meta?.MODE === 'development';
-
-function forRuntime(database: D1Database): D1Database {
-	if (!SEQUENTIAL_BATCH) return database;
-	return new Proxy(database, {
-		get(target, property) {
-			if (property === 'batch') {
-				return async (statements: D1PreparedStatement[]) => {
-					const results: D1Result[] = [];
-					for (const statement of statements) results.push(await statement.all());
-					return results;
-				};
-			}
-			const value = Reflect.get(target, property) as unknown;
-			return typeof value === 'function' ? (value as (...args: unknown[]) => unknown).bind(target) : value;
-		}
-	});
-}
-
 const plain = new WeakMap<object, GlobalClient>();
 
 export function createGlobalClient(database: D1Database) {
-	return createClient({ database: forRuntime(database), schema: globalSchema });
+	return createClient({ database, schema: globalSchema });
 }
 
 /** One client per binding object: building a client validates the whole schema. */

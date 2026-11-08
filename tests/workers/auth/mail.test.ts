@@ -17,13 +17,16 @@ describe('sendMail', () => {
 		expect(await world.CACHE.get(DEV_MAIL_KEY)).toBeTruthy();
 	});
 
-	test('with the Email binding it sends through Email Service and stores nothing', async () => {
-		await clearDevMails(world);
-		const sent: unknown[] = [];
-		const email = { send: async (m: unknown) => void sent.push(m) } as unknown as SendEmail;
-		await sendMail({ ...world, EMAIL: email } as never, message(1));
-		expect(sent).toEqual([{ from: world.MAIL_FROM, to: 'to-1@example.com', subject: 'Subject 1', html: '<p>1</p>', text: message(1).text }]);
-		expect(await readDevMails(world)).toEqual([]);
+	test('with the Email binding it sends through Email Service, and keeps a copy in the dev mailbox in development and test only', async () => {
+		const email = (sent: unknown[]) => ({ send: async (m: unknown) => void sent.push(m) }) as unknown as SendEmail;
+		for (const [ENVIRONMENT, stored] of [['production', false], ['staging', false], ['development', true], ['test', true]] as const) {
+			await clearDevMails(world);
+			const sent: unknown[] = [];
+			await sendMail({ ...world, ENVIRONMENT, EMAIL: email(sent) } as never, message(1));
+			expect(sent).toEqual([{ from: world.MAIL_FROM, to: 'to-1@example.com', subject: 'Subject 1', html: '<p>1</p>', text: message(1).text }]);
+			// `readDevMails` answers nothing in production, so read the key itself.
+			expect(Boolean(await world.CACHE.get(DEV_MAIL_KEY)), ENVIRONMENT).toBe(stored);
+		}
 	});
 
 	test('production without the binding fails instead of leaking links into KV', async () => {

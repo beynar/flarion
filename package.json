@@ -36,7 +36,7 @@
     "@tailwindcss/vite": "4.3.5",
     "svelte": "5.57.3",
     "svelte-check": "^4.7.8",
-    "sveltekit-cloudflare-worker": "file:vendor/sveltekit-cloudflare-worker-0.0.1.tgz",
+    "sveltekit-cloudflare-worker": "github:beynar/sveltekit-cloudflare-worker#b6bc029490747eb7a662bb344206bb934fdf4560",
     "tailwindcss": "4.3.5",
     "typescript": "6.0.3",
     "vite": "8.3.6",

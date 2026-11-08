@@ -1,7 +1,7 @@
 /**
  * `GET /share/:token` and `GET /share/:token/:pageId`: a published page, rendered by the Worker itself. The Worker
  * resolves the share (D1 route, then the Workspace DO as an anonymous actor, `resolveShare`) and answers a complete
- * HTML document, so SvelteKit is not involved: its server code never calls a Durable Object (dev deadlock) and a Worker
+ * HTML document, so SvelteKit is not involved: its server code does not call a Durable Object here and a Worker
  * that fetches its own hostname is unreliable on Cloudflare.
  *
  * The body is server HTML from the page's room and `edytor/export`, sanitized and cached in KV by version
