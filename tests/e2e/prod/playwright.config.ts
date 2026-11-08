@@ -4,9 +4,12 @@
  *   pnpm build && PROD_PORT=8790 pnpm exec playwright test -c tests/e2e/prod/playwright.config.ts
  */
 import { defineConfig } from '@playwright/test';
-import { chromiumLaunchOptions } from '../chromium';
+import { chromiumLaunchOptions, waitForHydration } from '../chromium';
 
 const port = Number(process.env.PROD_PORT ?? 8790);
+
+// The app is server-rendered: tests wait for a page to hydrate after each navigation (tests/e2e/hydration.mjs).
+waitForHydration();
 
 export default defineConfig({
 	outputDir: `../../../test-results/prod-${port}`,

@@ -44,7 +44,7 @@ export function lazyObject<T extends DurableObject<Env>>(
 export const WORKSPACE_METHODS = [
 	'diagEcho', 'diagTxn', 'shardStats', 'configureShards', 'shardFrame', 'shardClosed', 'fetch', 'webSocketMessage', 'webSocketClose', 'webSocketError', 'ping', 'alarm', 'hourly', 'pruneLog', 'init',
 	'syncMember', 'rename', 'getMemberRole', 'apply', 'createPage', 'nextRank', 'getPage', 'listTrash', 'readProperties', 'readCollection', 'readViews', 'exportDatabase', 'exportTree',
-	'pushNotification', 'queryView', 'teamspaces', 'createTeamspace', 'updateTeamspace', 'archiveTeamspace', 'archivedTeamspaces', 'restoreTeamspace', 'teamspaceMembers',
+	'pushNotification', 'queryView', 'ssrRead', 'teamspaces', 'createTeamspace', 'updateTeamspace', 'archiveTeamspace', 'archivedTeamspaces', 'restoreTeamspace', 'teamspaceMembers',
 	'addTeamspaceMember', 'setTeamspaceMemberRole', 'removeTeamspaceMember', 'pageAccess', 'pageLockChanged', 'pageQuota', 'can', 'listGrants', 'setGrant', 'revokeGrant', 'grantByToken',
 	'visibleNums', 'visibilityCached', 'ingestPages', 'openRoom', 'closeRoom', 'aiPropertyFlush', 'aiPropertyPrepare', 'aiPropertyWrite', 'aiPropertyFailed', 'aiPropertyMarkers',
 	'importCreate', 'importStatus', 'importCancel', 'importProgress', 'importJob', 'editorPageLevel', 'editorUserLevel', 'filesBegin', 'filesPending', 'filesRecordUploadId',
@@ -55,7 +55,7 @@ export const WORKSPACE_METHODS = [
 ] as const;
 
 export const PAGE_METHODS = [
-	'identity', 'fetch', 'webSocketMessage', 'webSocketClose', 'webSocketError', 'seedFrom', 'readPublished', 'readForIndex', 'read', 'metrics', 'lastUpdated',
+	'identity', 'fetch', 'webSocketMessage', 'webSocketClose', 'webSocketError', 'seedFrom', 'readPublished', 'readForRender', 'readForIndex', 'read', 'metrics', 'lastUpdated',
 	'setAccess', 'roomUsers', 'appendBlocks', 'listCommentThreads', 'applyComment', 'lockState', 'setLocked', 'noteBypass', 'listHistory', 'readHistory', 'restoreHistory',
 	'undoRestore', 'historyWritten', 'closeHistorySlot', 'exportBlocks', 'importBlocks', 'commitMove', 'abortMove', 'applyLateEdits', 'lateEdits', 'ackLateEdits', 'purge',
 	'closeUser', 'closeAll', 'reportQuota', 'restore', 'announce', 'announceIfEmpty', 'persist',

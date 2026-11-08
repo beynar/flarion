@@ -4,9 +4,16 @@
 	import { Toaster } from 'entasis/toast';
 	import { setButtonTheme } from 'entasis/button';
 	import { designTokens } from '#lib/design/generated/design-tokens.ts';
+	import { onMount } from 'svelte';
 	import { cspNonce, stampStyleNonce } from '#lib/client/csp.ts';
 
-	let { children } = $props();
+	let { data, children } = $props();
+
+	// The page is interactive from here: the server HTML is live markup before this (links work), but nothing runs. The marker is what the
+	// browser tests wait for before they type into a field the server rendered, and what a visible loading state keys off.
+	onMount(() => {
+		document.documentElement.dataset.hydrated = 'true';
+	});
 
 	// Run-time stylesheets of libraries (edytor's comment highlight) need the document's nonce under the production policy.
 	stampStyleNonce();
@@ -29,7 +36,7 @@
 
 <!-- designTokens: 16px type base at every width, raisedWithBorder off, neutral/neutral/primary
      roles and 100/150ms motion. The `edytor-notion` wrapper scopes edytor's document theme. -->
-<Theme {designTokens} nonce={cspNonce()}>
+<Theme {designTokens} nonce={data.nonce ?? cspNonce()}>
 	<div class="edytor-notion app-root">
 		{@render children()}
 	</div>

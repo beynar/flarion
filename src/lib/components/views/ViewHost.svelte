@@ -39,15 +39,12 @@
 	import {
 		dateProps,
 		defaultGroupProp,
-		neededProps,
+		hostSubscription,
 		newRowInit,
 		optionsOfView,
-		rangeFilter,
-		searchFilter,
-		viewSubscription,
 		visibleColumns,
 		addDaysIso,
-		isoDay
+		VIEW_LIMITS
 	} from './view-model.ts';
 	import BoardView from './BoardView.svelte';
 	import CalendarView from './CalendarView.svelte';
@@ -150,7 +147,6 @@
 	});
 
 	const dates = $derived(view ? dateProps(view, store?.properties ?? []) : { start: null, end: null });
-	const LIMITS = { table: 100, list: 100, gallery: 60, board: 25, calendar: 500, timeline: 500 } as const;
 
 	// A board without a group-by picks one.
 	$effect(() => {
@@ -160,27 +156,10 @@
 		if (def) untrack(() => void store.updateView(collectionId, v.id, { groupBy: { prop: def.id } }).catch(() => undefined));
 	});
 
-	const sub = $derived.by(() => {
-		if (!view || !collection) return null;
-		const ranged = (view.type === 'calendar' || view.type === 'timeline') && dates.start;
-		const r = range ?? (ranged ? defaultRange() : null);
-		const extra: FilterGroup[] = [];
-		const q = searchFilter(search);
-		if (q) extra.push(q);
-		if (ranged && r && dates.start) extra.push(rangeFilter(dates.start.id, dates.end?.id ?? null, r.from, r.to));
-		return viewSubscription({
-			collectionId,
-			view,
-			localFilter,
-			extraFilter: extra.length ? { and: extra } : null,
-			props: neededProps(view, columns, [dates.start?.id, dates.end?.id]),
-			limit: LIMITS[view.type]
-		});
-	});
-	function defaultRange() {
-		const now = Date.now();
-		return { from: addDaysIso(isoDay(now), -45), to: addDaysIso(isoDay(now), 75) };
-	}
+	// The server render reads the first window under this very subscription (`hostSubscription`).
+	const sub = $derived(
+		hostSubscription({ collectionId, collection, view, properties: store?.properties ?? [], localFilter, search, range })
+	);
 	const windowId = $derived(sub ? subKey('vw', collectionId + JSON.stringify(sub)) : null);
 	$effect(() => {
 		const id = windowId;
@@ -310,10 +289,10 @@
 		if (!store || !windowId || !shown || !view) return;
 		if (group !== undefined) {
 			const g = shown.groups?.find((x) => x.key === group);
-			if (g) store.setWindow(windowId, Math.min(MAX_WINDOW, g.loaded + LIMITS.board), group);
+			if (g) store.setWindow(windowId, Math.min(MAX_WINDOW, g.loaded + VIEW_LIMITS.board), group);
 		} else {
 			const have = shown.rows.length;
-			if (have < shown.total) store.growWindow(windowId, have + LIMITS[view.type]);
+			if (have < shown.total) store.growWindow(windowId, have + VIEW_LIMITS[view.type]);
 		}
 	}
 

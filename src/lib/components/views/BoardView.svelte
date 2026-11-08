@@ -6,6 +6,7 @@
 	dragging their header (the group-by's `hidden` and `order`).
 -->
 <script lang="ts">
+	import { untrack } from 'svelte';
 	import { Kanban, type KanbanCardMove, type KanbanColumnData, type KanbanColumnMove } from 'entasis/kanban';
 	import { PopupMenu } from 'entasis/popup-menu';
 	import type { MenuItem } from 'entasis/menu';
@@ -41,7 +42,7 @@
 		});
 
 	const groups = $derived((data.groups ?? []).filter((g) => !hidden.has(g.key)));
-	let columns = $state.raw<KanbanColumnData<Card>[]>([]);
+	let columns = $state.raw<KanbanColumnData<Card>[]>(untrack(() => groups.map((g) => ({ id: g.key, title: meta(g.key).label, cards: g.rows.map((row) => ({ id: `${g.key}|${row.id}`, title: row.title, row })) }))));
 	$effect.pre(() => {
 		columns = groups.map((g) => ({
 			id: g.key,

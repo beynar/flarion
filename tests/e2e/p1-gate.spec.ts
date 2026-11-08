@@ -25,7 +25,7 @@ const stamp = Date.now().toString(36);
 const WORKSPACE = 'Acme';
 // The dev database persists between runs, so "Acme" may already be taken: the slug gets a suffix then.
 let SLUG = 'acme';
-const EDITOR = '[data-flarion-editor] [data-edytor]';
+const EDITOR = '[data-flarion-editor]:not(:has([data-edytor-snapshot])) [data-edytor]';
 
 interface DevMail {
 	to: string;

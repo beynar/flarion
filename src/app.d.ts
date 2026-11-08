@@ -31,6 +31,13 @@ declare global {
 		interface Platform {
 			env: Cloudflare.Env;
 		}
+		/** Set by `hooks.server.ts` from the session cookie (`server/auth/session.ts`); null when signed out. */
+		interface Locals {
+			session: import('./server/auth/session').SessionInfo | null;
+			user: { id: string; name: string; email: string; image: string | null } | null;
+			/** This request's Content-Security-Policy nonce (`hooks.server.ts`). */
+			nonce: string;
+		}
 	}
 }
 export {};

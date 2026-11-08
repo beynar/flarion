@@ -1090,6 +1090,54 @@ export class LiveHub {
 		return built;
 	}
 
+	/**
+	 * What `snapshot` would send a socket that had just subscribed to a `tree`, `page` or `backlinks` subscription, built without
+	 * registering anything: the server render's read (`WorkspaceDO.ssrRead`). The ids come from the tables (a registered
+	 * subscription reads them from its units), the visibility cut and the rows are the same code, so the store takes the answer as
+	 * the snapshot it would have got. Views are not built here (`queryView` is their one-shot read). The actor must have been
+	 * `ensure`d by the caller.
+	 */
+	async oneShot(subId: string, sub: Subscription, actor: Actor, seq: number): Promise<ServerMessage | null> {
+		if (sub.kind === 'view') return null;
+		const view = this.#host.view(actor);
+		const ids =
+			sub.kind === 'tree'
+				? [...new Set(sub.parents)].flatMap((parent) => this.#reader.treeIds(parent ?? null))
+				: sub.kind === 'page'
+					? sub.pageIds.flatMap((id) => this.#reader.pageIds(id))
+					: this.#reader.backlinkIds(sub.pageId);
+		const all = this.#visible(ids, (n) => view.has(n));
+		const window = sub.kind === 'backlinks' ? all.slice(0, sub.limit ?? MAX_WINDOW) : all;
+		const rows = await this.#rowsFor(sub, window, view.level);
+		const list = window.map((id) => rows.get(id)).filter((r): r is AnyRow => !!r);
+		const base = { t: 'snapshot' as const, id: subId, total: all.length, seq };
+		switch (sub.kind) {
+			case 'tree':
+				return { ...base, kind: 'tree', rows: list as TreeRow[] };
+			case 'page':
+				return { ...base, kind: 'page', rows: list as PageRow[] };
+			case 'backlinks':
+				return { ...base, kind: 'backlinks', rows: list as BacklinkRow[] };
+		}
+	}
+
+	/** The page ids above `pageId`, root first, that `actor` can see (it stops at the first page it cannot: what the client's `ancestors` reads). */
+	ancestorsOf(pageId: string, actor: Actor): string[] {
+		const view = this.#host.view(actor);
+		const chain: string[] = [];
+		let cursor: string | null = pageId;
+		for (let i = 0; i < 64 && cursor; i++) {
+			const row: { parent_id: string | null } | undefined = this.#all<{ parent_id: string | null }>('SELECT parent_id FROM page WHERE id = ? AND deleted_at IS NULL', cursor)[0];
+			const parent: string | null = row?.parent_id ?? null;
+			if (!parent) break;
+			const num = this.#numOf(parent);
+			if (num === undefined || !view.has(num)) break;
+			chain.unshift(parent);
+			cursor = parent;
+		}
+		return chain;
+	}
+
 	async #buildSnapshot(row: SubRow, subId: string, view: VisibilityView, seq: number): Promise<ServerMessage | null> {
 		if (row.kind === 'view') {
 			const state = this.#viewState(row.unitKeys[0]);

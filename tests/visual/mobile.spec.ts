@@ -78,8 +78,8 @@ test.describe('phone layout', () => {
 			// A tap places the caret and typing works (touch has no hover: the editor must not depend on it). On a page of its own:
 			// the screens must not change.
 			await page.goto(`${W()}/${seed.ids.scratch}`);
-			await page.waitForSelector('[data-flarion-editor] [data-edytor][contenteditable]');
-			await page.locator('[data-flarion-editor] [data-edytor]').tap();
+			await page.waitForSelector('[data-flarion-editor]:not(:has([data-edytor-snapshot])) [data-edytor][contenteditable]');
+			await page.locator('[data-flarion-editor]:not(:has([data-edytor-snapshot])) [data-edytor]').tap();
 			await page.keyboard.type('Typed on a phone.');
 			await expect(page.locator('[data-flarion-editor]')).toContainText('Typed on a phone.');
 		} finally {

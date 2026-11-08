@@ -10,7 +10,7 @@ const SHOTS = 'docs/screens/p1';
 mkdirSync(SHOTS, { recursive: true });
 
 const uid = () => `e${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
-const EDITOR = '[data-flarion-editor] [data-edytor]';
+const EDITOR = '[data-flarion-editor]:not(:has([data-edytor-snapshot])) [data-edytor]';
 
 async function open(browser: Browser, pageId: string, user: string, extra = ''): Promise<{ page: Page; context: BrowserContext }> {
 	const context = await browser.newContext({ viewport: { width: 1280, height: 900 } });

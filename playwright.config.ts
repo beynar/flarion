@@ -1,5 +1,5 @@
 import { defineConfig, devices } from '@playwright/test';
-import { chromiumLaunchOptions } from './tests/e2e/chromium';
+import { chromiumLaunchOptions, waitForHydration } from './tests/e2e/chromium';
 
 /**
  * End-to-end tests run against `pnpm dev` (vite dev + workerd). The server listens on `E2E_PORT` (default
@@ -12,6 +12,9 @@ import { chromiumLaunchOptions } from './tests/e2e/chromium';
  */
 const port = Number(process.env.E2E_PORT ?? 5373);
 const origin = `http://localhost:${port}`;
+
+// The app is server-rendered: tests wait for a page to hydrate after each navigation (tests/e2e/hydration.mjs).
+waitForHydration();
 
 export default defineConfig({
 	// Per suite and port: concurrent runs (distinct ports) must not clean each other's traces and screenshots.

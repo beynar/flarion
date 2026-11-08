@@ -34,6 +34,7 @@
 		favorite = false,
 		offline = false,
 		reconnecting = false,
+		firstConnect = false,
 		pending = 0,
 		presence = [],
 		showPageActions = true,
@@ -51,8 +52,10 @@
 		favorite?: boolean;
 		/** The socket is down for good (no network, or it gave up). */
 		offline?: boolean;
-		/** The socket is reconnecting after having been online. */
+		/** The socket is connecting or reconnecting. */
 		reconnecting?: boolean;
+		/** It has not been online yet (the page came from the server render): the wording says so. */
+		firstConnect?: boolean;
 		/** Mutations not yet confirmed back by the socket. */
 		pending?: number;
 		/** Other people on this page. */
@@ -150,13 +153,15 @@
 				{@attach tooltip({
 					content: offline
 						? 'No connection. You can keep writing in pages; properties and the page tree need a connection.'
-						: 'Reconnecting…',
+						: firstConnect
+							? 'Connecting…'
+							: 'Reconnecting…',
 					position: 'bottom'
 				})}
 			>
 				<Chip variant="soft" color="neutral" size="small">
 					{#snippet prefix()}{@render wifiSlashIcon({ size: 14 })}{/snippet}
-					{offline ? 'Offline' : 'Reconnecting…'}
+					{offline ? 'Offline' : firstConnect ? 'Connecting…' : 'Reconnecting…'}
 				</Chip>
 			</span>
 		{/if}

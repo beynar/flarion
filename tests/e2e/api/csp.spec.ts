@@ -41,7 +41,7 @@ test('a signed-in session runs under the policy without a single violation', asy
 
 	// A page and its editor.
 	await page.getByText('Getting started', { exact: true }).first().click();
-	const editor = page.locator('[data-flarion-editor] [data-edytor]').first();
+	const editor = page.locator('[data-flarion-editor]:not(:has([data-edytor-snapshot])) [data-edytor]').first();
 	await expect(editor).toBeVisible({ timeout: 30_000 });
 	await editor.click();
 	await page.keyboard.type('Hello under CSP');

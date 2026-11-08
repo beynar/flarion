@@ -60,7 +60,7 @@ test('login, editor page, database, Ask AI, search, share dialog and published p
 
 	// A page with the editor (typing, a slash menu).
 	await page.getByText('Getting started', { exact: true }).first().click();
-	const editor = page.locator('[data-flarion-editor] [data-edytor]').first();
+	const editor = page.locator('[data-flarion-editor]:not(:has([data-edytor-snapshot])) [data-edytor]').first();
 	await expect(editor).toBeVisible({ timeout: 30_000 });
 	await editor.click();
 	await page.keyboard.type('Production build, under the policy');

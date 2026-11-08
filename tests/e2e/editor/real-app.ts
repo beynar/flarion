@@ -6,7 +6,7 @@ import { expect, type Browser, type BrowserContext, type Page } from '@playwrigh
 import { deflateSync } from 'node:zlib';
 import { addVirtualAuthenticator } from '../webauthn';
 
-export const EDITOR = '[data-flarion-editor] [data-edytor]';
+export const EDITOR = '[data-flarion-editor]:not(:has([data-edytor-snapshot])) [data-edytor]';
 const stamp = Date.now().toString(36);
 /** Each world is a new pair of accounts: the dev database keeps emails, and two spec files of one run both make one. */
 let worlds = 0;

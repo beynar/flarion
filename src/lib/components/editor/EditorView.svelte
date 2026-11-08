@@ -9,6 +9,7 @@
 		type Block,
 		Edytor,
 		SyncRefusedError,
+		type JSONDoc,
 		commentsController,
 		createCommentsClient,
 		type EdytorInstance,
@@ -52,6 +53,7 @@
 		searchDatabases,
 		client,
 		onRefused,
+		snapshot,
 		edytor = $bindable()
 	}: {
 		workspaceId: string;
@@ -73,6 +75,8 @@
 		/** The `/rpc` client the editor's own calls go through (default: the app's, scoped to the workspace). */
 		client?: Rpc;
 		onRefused: (refusal: SyncRefusedError) => void;
+		/** The document as the server read it: rendered read-only (and on the server) until the room's live view is ready. */
+		snapshot?: JSONDoc;
 		edytor?: EdytorInstance;
 	} = $props();
 
@@ -392,5 +396,6 @@
 		aria-label="Page content"
 		onSyncExpired={refresh}
 		onSyncRefused={onRefused}
+		{snapshot}
 	/>
 </div>

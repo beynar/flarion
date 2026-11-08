@@ -269,6 +269,11 @@ export class PageDO extends DurableObject<Env> {
 		return { doc: this.document.read(), version: String(this.document.lastUpdated() ?? 0) };
 	}
 
+	/** What the server render of a page needs, in one call: the body as JSON and the page's lock as `userId` sees it (`src/server/ssr/page.ts`). */
+	readForRender(userId?: string): { doc: JSONDoc; lock: PageLockState } {
+		return { doc: this.document.read(), lock: this.lockState(userId) };
+	}
+
 	/** What the indexing consumer needs from this page, in one call. */
 	readForIndex(): PageIndexSource {
 		return {

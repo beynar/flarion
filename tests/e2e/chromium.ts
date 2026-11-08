@@ -59,3 +59,12 @@ export function chromiumLaunchOptions(): { executablePath?: string } {
 	}
 	return {};
 }
+
+/**
+ * Makes every Playwright worker wait for hydration after a navigation (`tests/e2e/hydration.mjs`): the app is server-rendered, so a field
+ * typed into before its script ran loses the text. Call it in a config, before `defineConfig`; workers inherit `NODE_OPTIONS`.
+ */
+export function waitForHydration(): void {
+	const flag = `--import=${new URL('./hydration.mjs', import.meta.url).href}`;
+	if (!process.env.NODE_OPTIONS?.includes('hydration.mjs')) process.env.NODE_OPTIONS = `${process.env.NODE_OPTIONS ?? ''} ${flag}`.trim();
+}

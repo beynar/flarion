@@ -29,7 +29,7 @@ async function shot(page: Page, name: string) {
 }
 
 const stamp = Date.now().toString(36);
-const EDITOR = '[data-flarion-editor] [data-edytor]';
+const EDITOR = '[data-flarion-editor]:not(:has([data-edytor-snapshot])) [data-edytor]';
 
 interface Person {
 	name: string;

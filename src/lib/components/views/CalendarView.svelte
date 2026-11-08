@@ -5,6 +5,7 @@
 	month either side.
 -->
 <script lang="ts">
+	import { untrack } from 'svelte';
 	import { EventCalendar, type EventCalendarItem, type EventCalendarItemsChangePayload, type EventCalendarSlotSelectPayload, type EventCalendarRangeChangeInfo } from 'entasis/event-calendar';
 	import { Empty } from 'entasis/empty';
 	import type { ViewData } from '#lib/client/workspace.svelte.ts';
@@ -33,7 +34,7 @@
 		return { ...base, start: d.start as `${number}-${number}-${number}`, end: addDaysIso(last, 1) as `${number}-${number}-${number}`, allDay: true } as EventCalendarItem;
 	}
 
-	let items = $state.raw<EventCalendarItem[]>([]);
+	let items = $state.raw<EventCalendarItem[]>(untrack(() => data.rows.flatMap((r) => toItem(r) ?? [])));
 	$effect.pre(() => {
 		items = data.rows.flatMap((r) => toItem(r) ?? []);
 	});

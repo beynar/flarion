@@ -4,9 +4,12 @@
  *   SCW_PORT=5200 pnpm exec playwright test -c scripts/scw/playwright.config.ts seed
  */
 import { defineConfig, devices } from '@playwright/test';
-import { chromiumLaunchOptions } from '../../tests/e2e/chromium';
+import { chromiumLaunchOptions, waitForHydration } from '../../tests/e2e/chromium';
 
 const port = Number(process.env.SCW_PORT ?? 5200);
+
+// The app is server-rendered: tests wait for a page to hydrate after each navigation (tests/e2e/hydration.mjs).
+waitForHydration();
 
 export default defineConfig({
 	testDir: '.',

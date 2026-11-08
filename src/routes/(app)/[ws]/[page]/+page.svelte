@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { untrack } from 'svelte';
 	import { goto } from '$app/navigation';
 	import { Skeleton } from 'entasis/skeleton';
 	import { page as route } from '$app/state';
@@ -9,14 +10,23 @@
 	import PageHeader from '#lib/components/page-header/PageHeader.svelte';
 	import type { PageHeaderAccess } from '#lib/components/page-header/types.ts';
 	import { rpc } from '#lib/client/rpc.ts';
-	import { isMock, userColor } from '#lib/client/runtime.ts';
+	import { userColor } from '#lib/client/runtime.ts';
 	import { useWorkspace } from '#lib/client/workspace.svelte.ts';
-	import DocumentPlaceholder from '#lib/components/shell/DocumentPlaceholder.svelte';
 	import PropertiesPanel from '#lib/components/properties/PropertiesPanel.svelte';
 	import PageUnavailable from '#lib/components/trash/PageUnavailable.svelte';
 	import ViewHost from '#lib/components/views/ViewHost.svelte';
 
+	let { data } = $props();
+
 	const store = useWorkspace();
+	// The page's header, properties and backlinks (and a database's collection and first window) come from the server render:
+	// seeded before anything below reads the store, on the server and again in the browser, so hydration paints what the HTML had.
+	// A later navigation to another page brings its own seed (empty for a client-side one: the store's socket fills it).
+	store.seed(untrack(() => data.seed));
+	$effect.pre(() => {
+		const seed = data.seed;
+		untrack(() => store.seed(seed));
+	});
 	const ws = $derived(route.params.ws ?? store.workspace.slug);
 	const pageId = $derived(route.params.page ?? '');
 	const entity = $derived(store.page(pageId));
@@ -55,8 +65,9 @@
 	const headerAccess = $derived<PageHeaderAccess>(entity?.access === 'update' ? 'write' : (entity?.access ?? 'read'));
 	const readonly = $derived(!entity || entity.access === 'read' || entity.access === 'comment');
 	const me = $derived({ id: store.user.id, name: store.user.name, color: userColor(store.user.id) });
-	// Mock mode has no page rooms: the static document stands in for the editor.
-	const mock = isMock();
+
+	// The server render's body for this page (only for the page the server rendered: a client-side navigation has none).
+	const body = $derived(data.row?.id === pageId ? data.body : null);
 
 	// The open editor: the history panel compares versions with the page as it is now.
 	let edytor = $state<EdytorInstance>();
@@ -105,13 +116,12 @@
 					fullPage
 				/>
 			</div>
-		{:else if mock}
-			<DocumentPlaceholder />
 		{:else}
 			<Editor
 				workspaceId={store.workspace.id}
 				{pageId}
 				getRoomToken={() => rpc.page.roomToken({ id: pageId })}
+				body={body}
 				user={me}
 				{readonly}
 				access={entity?.access}

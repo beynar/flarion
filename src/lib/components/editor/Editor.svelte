@@ -10,7 +10,8 @@
 <script lang="ts">
 	import { onMount, untrack } from 'svelte';
 	import 'katex/dist/katex.min.css';
-	import type { SyncRefusedError, Uploader, EdytorInstance } from 'edytor';
+	import type { JSONDoc, SyncRefusedError, Uploader, EdytorInstance } from 'edytor';
+	import type { PageLock } from '#lib/shared/schemas.ts';
 	import type { Rpc } from '#lib/client/rpc.ts';
 	import { CLOSE } from '#lib/shared/protocol.ts';
 	import { Alert } from 'entasis/alert';
@@ -45,6 +46,7 @@
 		searchDatabases,
 		fetchLock,
 		client,
+		body,
 		edytor = $bindable()
 	}: {
 		workspaceId: string;
@@ -78,18 +80,29 @@
 		fetchLock?: LockFetcher;
 		/** The `/rpc` client the editor's own calls use (default: the app's). */
 		client?: Rpc;
+		/**
+		 * What the server render read for this page: the document as JSON (edytor renders it as its `snapshot`, in the HTML and while
+		 * hydrating, until the room's live view takes over), the page's lock and a room token. Absent after a client-side navigation.
+		 */
+		body?: { doc: JSONDoc; lock: PageLock; room: RoomToken | null } | null;
 		/** The editor instance, once it exists. */
 		edytor?: EdytorInstance;
 	} = $props();
 
-	let initial = $state<RoomToken>();
+	// The token of the server render, when there is one: the room is dialed without a round trip first.
+	let initial = $state<RoomToken | undefined>(untrack(() => body?.room ?? undefined));
 	let failure = $state<'token' | 'reload' | 'denied' | 'invalid'>();
 	let attempt = $state(0);
+	let seededToken = untrack(() => !!initial);
 
 	// A token before the first dial: `params` is read when the view mounts. Page changes remount (`{#key}`).
 	$effect(() => {
 		void pageId;
 		void attempt;
+		if (seededToken) {
+			seededToken = false;
+			return;
+		}
 		initial = undefined;
 		failure = undefined;
 		let current = true;
@@ -123,7 +136,8 @@
 		else if (refusal.code === CLOSE.FORBIDDEN) failure = 'denied';
 	};
 
-	let mounted = $state(false);
+	// The view mounts as soon as a token is in hand; with the server render's body that is during the render itself.
+	let mounted = $state(untrack(() => !!body));
 	onMount(() => (mounted = true));
 
 	// The page lock lives in the room: read it now and while the page is open. A locked page is read-only for
@@ -131,9 +145,9 @@
 	$effect(() => {
 		const id = pageId;
 		const fetcher = fetchLock ?? rpcLockFetcher;
-		return pageLocks.watch(id, fetcher);
+		return pageLocks.watch(id, fetcher, untrack(() => body?.lock));
 	});
-	const lock = $derived(pageLocks.get(pageId));
+	const lock = $derived(pageLocks.get(pageId) ?? body?.lock);
 	const lockedOut = $derived(!!lock?.locked && !lock.bypass);
 </script>
 
@@ -199,6 +213,7 @@
 				{searchDatabases}
 				{client}
 				onRefused={refused}
+				snapshot={body?.doc}
 				bind:edytor
 			/>
 		{/key}

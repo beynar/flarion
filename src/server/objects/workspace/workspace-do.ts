@@ -114,6 +114,8 @@ import {
 } from './access';
 import { createAuthorizer } from './authorize';
 import type { ExportReadDeps } from './export-read';
+import type { SsrRead, SsrRequest } from './ssr-read';
+import type { SeedWindow } from '../../../lib/shared/seed';
 import { queryViewRows, type QueryViewInput, type QueryViewResult } from '../../engine/view';
 import { revokeGrantRecords, setGrantRecords, toGrant, type GrantInput } from './grants';
 import { syncRooms, type RoomStub } from './room-sync';
@@ -1471,6 +1473,58 @@ export class WorkspaceDO extends DurableObject<Env> {
 			now: Date.now(),
 			bitmaps: this.#options
 		});
+	}
+
+	/**
+	 * The server render's read (`src/server/ssr/`): the snapshots the caller's subscriptions would get from a socket (tree, pages,
+	 * backlinks, a view's first window), the definitions the first screen shows, and the log position they were read at, so the
+	 * browser store starts from them and its socket resumes at `seq` instead of asking for everything again. Every part runs under
+	 * the caller's permissions, like the socket's.
+	 */
+	async ssrRead(actor: Actor, request: SsrRequest): Promise<SsrRead> {
+		await this.#access.ensure(actor);
+		const seq = this.#hub.headSeq();
+		const out: SsrRead = { seq, windows: [] };
+		const ancestors = request.reveal ? this.#hub.ancestorsOf(request.reveal, actor) : [];
+		const windows = await Promise.all(
+			(request.subs ?? []).map(async (entry): Promise<SeedWindow | null> => {
+				const sub = entry.sub.kind === 'tree' && ancestors.length ? { ...entry.sub, parents: [...new Set([...entry.sub.parents, ...ancestors])] } : entry.sub;
+				if (sub.kind !== 'view') {
+					const snapshot = await this.#hub.oneShot(entry.id, sub, actor, seq);
+					return snapshot && snapshot.t === 'snapshot' ? { id: entry.id, sub, snapshot } : null;
+				}
+				try {
+					const result = await this.queryView(actor, {
+						collectionId: sub.collectionId,
+						...(sub.viewId ? { viewId: sub.viewId } : {}),
+						spec: { ...(sub.filter ? { filter: sub.filter } : {}), ...(sub.sorts ? { sorts: sub.sorts as never } : {}), ...(sub.groupBy !== undefined ? { groupBy: sub.groupBy } : {}) },
+						window: { limit: sub.limit },
+						...(sub.props ? { props: sub.props } : {})
+					});
+					const base = { t: 'snapshot' as const, id: entry.id, total: result.total, seq, kind: 'view' as const };
+					return { id: entry.id, sub, snapshot: result.groups ? { ...base, rows: [], groups: result.groups } : { ...base, rows: result.rows } };
+				} catch {
+					return null;
+				}
+			})
+		);
+		for (const window of windows) if (window) out.windows.push(window);
+		if (request.properties) out.properties = await this.readProperties(actor);
+		if (request.teamspaces) {
+			const list = await this.teamspaces(actor);
+			const ranks: Record<string, string> = {};
+			await Promise.all(
+				list
+					.filter((t) => t.myRole !== null)
+					.map(async (t) => {
+						const mine = (await this.teamspaceMembers(actor, t.id)).find((m) => m.userId === actor.userId);
+						if (mine) ranks[t.id] = mine.rank;
+					})
+			);
+			out.teamspaces = { list, ranks };
+		}
+		if (request.collection) out.collection = await this.readCollection(actor, request.collection);
+		return out;
 	}
 
 	// ───────────────────────── teamspaces ─────────────────────────

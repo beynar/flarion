@@ -235,7 +235,7 @@ export const workspaceIdOf = (page: Page, slug: string): Promise<string> =>
 		return body.json.workspaces.find((w) => w.slug === slug)!.id;
 	}, slug);
 
-const EDITOR = '[data-flarion-editor] [data-edytor]';
+const EDITOR = '[data-flarion-editor]:not(:has([data-edytor-snapshot])) [data-edytor]';
 
 /** Types `text` as the body of a page, through the real editor. */
 export async function writeBody(page: Page, slug: string, pageId: string, text: string) {

@@ -105,6 +105,9 @@ export function buildCsp(options: CspOptions): string {
 	return text.join('; ');
 }
 
+/** The header `hooks.server.ts` hands the request's nonce to the Worker's `withCsp` in; removed before the response leaves. */
+export const NONCE_HEADER = 'x-flarion-csp-nonce';
+
 /** 128 random bits, base64 (the alphabet a CSP nonce allows). */
 export function newNonce(): string {
 	return btoa(String.fromCharCode(...crypto.getRandomValues(new Uint8Array(16))));
@@ -135,8 +138,10 @@ export async function withCsp(
 	response: Response
 ): Promise<Response> {
 	if (!response.headers.get('content-type')?.toLowerCase().startsWith('text/html')) return response;
-	const nonce = newNonce();
+	// The nonce SvelteKit's hook already rendered into the page (entasis's Theme), else a fresh one.
+	const nonce = response.headers.get(NONCE_HEADER) ?? newNonce();
 	const headers = new Headers(response.headers);
+	headers.delete(NONCE_HEADER);
 	headers.set(
 		'content-security-policy',
 		buildCsp({

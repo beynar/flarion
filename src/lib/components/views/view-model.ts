@@ -176,6 +176,49 @@ export function viewSubscription(input: SubscriptionInput): Subscription {
 	};
 }
 
+/** Rows a view window holds at first, by layout (per column for a board). */
+export const VIEW_LIMITS = { table: 100, list: 100, gallery: 60, board: 25, calendar: 500, timeline: 500 } as const;
+
+/** The date range a calendar or timeline asks for when nothing has moved it: a window around today. */
+export function defaultRange(now = Date.now()): { from: string; to: string } {
+	return { from: addDaysIso(isoDay(now), -45), to: addDaysIso(isoDay(now), 75) };
+}
+
+/**
+ * The `view` subscription the host (`ViewHost.svelte`) holds for a view: its columns, the layout's window size, the title search
+ * and the date range of a calendar or timeline. One function for the browser and the server render, which reads the first window
+ * under the very same subscription (so the store's seeded window and the host's later `subscribe` have the same id and shape).
+ * Null until the collection and a view are known.
+ */
+export function hostSubscription(input: {
+	collectionId: string;
+	collection: CollectionDef | null | undefined;
+	view: ViewDef | null | undefined;
+	properties: readonly PropertyDef[];
+	localFilter: FilterGroup | null;
+	search?: string;
+	range?: { from: string; to: string } | null;
+}): Subscription | null {
+	const { view, collection } = input;
+	if (!view || !collection) return null;
+	const columns = visibleColumns(view, collection, input.properties);
+	const dates = dateProps(view, input.properties);
+	const ranged = (view.type === 'calendar' || view.type === 'timeline') && dates.start;
+	const r = input.range ?? (ranged ? defaultRange() : null);
+	const extra: FilterGroup[] = [];
+	const q = searchFilter(input.search ?? '');
+	if (q) extra.push(q);
+	if (ranged && r && dates.start) extra.push(rangeFilter(dates.start.id, dates.end?.id ?? null, r.from, r.to));
+	return viewSubscription({
+		collectionId: input.collectionId,
+		view,
+		localFilter: input.localFilter,
+		extraFilter: extra.length ? { and: extra } : null,
+		props: neededProps(view, columns, [dates.start?.id, dates.end?.id]),
+		limit: VIEW_LIMITS[view.type]
+	});
+}
+
 /** Every property a view's rows must carry: its columns and what its layout reads. */
 export function neededProps(view: ViewDef, columns: readonly ColumnSpec[], extra: readonly (string | null | undefined)[] = []): string[] {
 	const o = optionsOfView(view);

@@ -243,6 +243,7 @@
 				{favorite}
 				offline={store.status === 'offline'}
 				reconnecting={store.status === 'connecting' && store.ready}
+				firstConnect={!store.wasOnline}
 				pending={store.pending}
 				presence={activePageId ? store.othersOn(activePageId) : []}
 				{showPageActions}

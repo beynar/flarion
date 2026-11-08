@@ -70,12 +70,16 @@ class PageLocks {
 		for (const [pageId, { fetcher }] of this.#watched) void this.refresh(pageId, fetcher);
 	}
 
-	/** Reads now and when the tab comes back, until the returned function is called. */
-	watch(pageId: string, fetcher: LockFetcher = rpcLockFetcher): () => void {
+	/**
+	 * Reads now and when the tab comes back, until the returned function is called. `known` is a lock the server render just read:
+	 * it is taken as the first answer (no read now) unless a newer one is held.
+	 */
+	watch(pageId: string, fetcher: LockFetcher = rpcLockFetcher, known?: PageLock): () => void {
 		const held = this.#watched.get(pageId);
 		if (held) held.holders++;
 		else this.#watched.set(pageId, { fetcher, holders: 1 });
-		void this.refresh(pageId, fetcher);
+		if (known && !this.#states.has(pageId)) this.#states.set(pageId, known);
+		else void this.refresh(pageId, fetcher);
 		const onVisible = () => document.visibilityState === 'visible' && void this.refresh(pageId, fetcher);
 		document.addEventListener('visibilitychange', onVisible);
 		return () => {

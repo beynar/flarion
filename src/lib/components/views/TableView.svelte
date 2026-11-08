@@ -37,7 +37,7 @@
 	const reorder = $derived(env.editable && env.manualOrder);
 
 	// The rows the table shows: a local copy, so a drag can reorder them before the server confirms.
-	let items = $state.raw<ViewRow[]>([]);
+	let items = $state.raw<ViewRow[]>(untrack(() => data.rows));
 	$effect.pre(() => {
 		items = data.rows;
 	});

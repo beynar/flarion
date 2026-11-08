@@ -4,6 +4,7 @@
 	the left lists the titles; pages without a date are counted below.
 -->
 <script lang="ts">
+	import { untrack } from 'svelte';
 	import { GanttChart, type GanttTask, type GanttTasksChange } from 'entasis/gantt-chart';
 	import { Empty } from 'entasis/empty';
 	import type { ViewData } from '#lib/client/workspace.svelte.ts';
@@ -33,7 +34,7 @@
 		} as GanttTask;
 	}
 
-	let tasks = $state.raw<GanttTask[]>([]);
+	let tasks = $state.raw<GanttTask[]>(untrack(() => data.rows.flatMap((r) => toTask(r) ?? [])));
 	$effect.pre(() => {
 		tasks = data.rows.flatMap((r) => toTask(r) ?? []);
 	});

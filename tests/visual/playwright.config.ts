@@ -13,9 +13,12 @@
  * differently, so regenerate them there (`pnpm test:visual:update`) before trusting a diff.
  */
 import { defineConfig } from '@playwright/test';
-import { chromiumLaunchOptions } from '../e2e/chromium';
+import { chromiumLaunchOptions, waitForHydration } from '../e2e/chromium';
 
 const port = Number(process.env.E2E_PORT ?? 5973);
+
+// The app is server-rendered: tests wait for a page to hydrate after each navigation (tests/e2e/hydration.mjs).
+waitForHydration();
 
 export default defineConfig({
 	outputDir: `../../test-results/visual-${port}`,

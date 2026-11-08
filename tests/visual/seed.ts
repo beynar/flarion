@@ -200,8 +200,8 @@ export async function seed(browser: Browser): Promise<Seed> {
 
 	// The launch plan's body, typed in the real editor; the same page is published.
 	await ada.page.goto(`/${slug}/${launchPlan}`);
-	await ada.page.waitForSelector('[data-flarion-editor] [data-edytor][contenteditable]');
-	await ada.page.locator('[data-flarion-editor] [data-edytor]').click();
+	await ada.page.waitForSelector('[data-flarion-editor]:not(:has([data-edytor-snapshot])) [data-edytor][contenteditable]');
+	await ada.page.locator('[data-flarion-editor]:not(:has([data-edytor-snapshot])) [data-edytor]').click();
 	await typeLines(ada.page, LAUNCH_PLAN);
 	await expect.poll(() => ada.page.locator('[data-flarion-editor]').innerText()).toContain('Brief support');
 	const grant = await call<{ token?: string }>('page/grants/set', { pageId: launchPlan, subjectKind: 'public', subjectId: null, level: 'read' });

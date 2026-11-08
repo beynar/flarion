@@ -12,6 +12,8 @@ export interface PageRoomApi {
 	read(): Promise<JSONDoc>;
 	/** The body with its version (published pages): the room's `read()` and `String(lastUpdated() ?? 0)`. */
 	readPublished(): Promise<{ doc: JSONDoc; version: string }>;
+	/** The body and the page's lock as `userId` sees it, for the server render of the page. */
+	readForRender(userId?: string): Promise<{ doc: JSONDoc; lock: PageLockState }>;
 	seedFrom(json: JSONDoc): Promise<{ seeded: boolean }>;
 	lockState(userId?: string): Promise<PageLockState>;
 	listHistory(): Promise<HistoryEntry[]>;

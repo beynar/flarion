@@ -3,6 +3,7 @@
 	drag into place under manual order.
 -->
 <script lang="ts">
+	import { untrack } from 'svelte';
 	import { SortableList } from 'entasis/sortable-list';
 	import { Button } from 'entasis/button';
 	import { Empty } from 'entasis/empty';
@@ -14,7 +15,7 @@
 
 	let { env, data }: { env: ViewEnv; data: ViewData } = $props();
 
-	let items = $state.raw<ViewRow[]>([]);
+	let items = $state.raw<ViewRow[]>(untrack(() => data.rows));
 	$effect.pre(() => {
 		items = data.rows;
 	});

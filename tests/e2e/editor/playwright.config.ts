@@ -7,9 +7,12 @@
  * `E2E_CHROMIUM` points at a Chromium build when the one this Playwright version wants is not installed.
  */
 import { defineConfig } from '@playwright/test';
-import { chromiumLaunchOptions } from '../chromium';
+import { chromiumLaunchOptions, waitForHydration } from '../chromium';
 
 const port = Number(process.env.E2E_PORT ?? 5273);
+
+// The app is server-rendered: tests wait for a page to hydrate after each navigation (tests/e2e/hydration.mjs).
+waitForHydration();
 
 export default defineConfig({
 	// Per suite and port: concurrent runs (distinct ports) must not clean each other's traces and screenshots.

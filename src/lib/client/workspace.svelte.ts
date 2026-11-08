@@ -70,6 +70,9 @@ import type { ArchivedTeamspace, Member, Teamspace, TeamspaceMember, Workspace }
 import type { CollectionDef, ViewDef } from '#lib/shared/definitions.ts';
 import { GROUP_EMPTY, type FilterGroup, type GroupBySpec } from '#lib/shared/filter-ast.ts';
 import { compareRank, placeAt, rankAfter } from '#lib/shared/sort-keys.ts';
+import { PAGE_SET_ID, TREE_ID, subKey } from '#lib/shared/sub-key.ts';
+import type { StoreSeed } from '#lib/shared/seed.ts';
+import { writeExpandedCookie, writePrefsCookie } from '#lib/client/ui-cookies.ts';
 
 // ───────────────────────────── types ─────────────────────────────
 
@@ -191,18 +194,7 @@ const SYSTEM_TITLE = TITLE_PROP_ID;
 
 const key = (p: string | null) => p ?? ROOT;
 
-/** A subscription id within the protocol's 40 characters. */
-export function subKey(prefix: string, id: string): string {
-	const k = `${prefix}:${id}`;
-	if (k.length <= 40) return k;
-	let h1 = 5381;
-	let h2 = 52711;
-	for (let i = 0; i < id.length; i++) {
-		h1 = (h1 * 33) ^ id.charCodeAt(i);
-		h2 = (h2 * 31) ^ id.charCodeAt(i);
-	}
-	return `${prefix}:${(h1 >>> 0).toString(36)}${(h2 >>> 0).toString(36)}${id.length}`;
-}
+export { subKey };
 
 function entityFromTree(row: TreeRow, prev?: PageEntity): PageEntity {
 	return {
@@ -322,6 +314,8 @@ export class WorkspaceStore {
 	/** The collection definitions behind them. */
 	readonly collections = new SvelteMap<string, CollectionDef>();
 	status = $state<SocketStatus>('connecting');
+	/** The socket has been online at least once (a page from the server render is "connecting", not "reconnecting"). */
+	wasOnline = $state(false);
 	/** The log position applied so far, null before the first snapshot. */
 	seq = $state<number | null>(null);
 	/** The tree is on screen (from the cache or the server). */
@@ -389,6 +383,15 @@ export class WorkspaceStore {
 	#started = false;
 	#disposed = false;
 	#resumedMode: 'replay' | 'snapshot' | null = null;
+	/** Seeded by the server render (`seed`): the cache is skipped, the first registry and directory reads are already here. */
+	#seeded = false;
+	/** The registry and directory came with the seed and nothing has been committed since (`welcome` checks): refreshing them is a no-op. */
+	#seedFresh = false;
+	#seededSeq: number | null = null;
+	/** Windows the seed made that no component has subscribed to yet: the first `subscribe` of the same id claims one without a message. */
+	#unclaimed = new Set<string>();
+	/** The first `hello` was built: from here a `subscribe` must reach the server. */
+	#helloSent = false;
 
 	constructor(options: WorkspaceStoreOptions) {
 		this.#o = options;
@@ -404,7 +407,8 @@ export class WorkspaceStore {
 		if (this.#started || this.#disposed) return;
 		this.#started = true;
 		this.#loadPrefs();
-		const cache = this.#cache();
+		// Seeded by the server: its tree is fresher than the browser's cache, which would only make a stale first paint.
+		const cache = this.#seeded ? null : this.#cache();
 		const snapshot = cache ? await cache.load(this.workspace.id) : null;
 		if (this.#disposed) return;
 		if (snapshot) this.#restore(snapshot);
@@ -426,6 +430,7 @@ export class WorkspaceStore {
 			onMessage: (m) => this.receive(m),
 			onStatus: (s) => {
 				this.status = s;
+				if (s === 'online') this.wasOnline = true;
 			},
 			onFatal: (action, code, reason) => this.#fatal(action, code, reason),
 			reauth: this.#o.reauth
@@ -435,8 +440,10 @@ export class WorkspaceStore {
 		if (typeof document !== 'undefined') {
 			document.addEventListener('visibilitychange', this.#onVisibility);
 		}
-		void this.refreshProperties();
-		void this.refreshDirectory();
+		if (!this.#seeded) {
+			void this.refreshProperties();
+			void this.refreshDirectory();
+		}
 	}
 
 	#onVisibility = (): void => {
@@ -455,6 +462,11 @@ export class WorkspaceStore {
 		if (this.#cacheTimer) this.#clock.clearTimeout(this.#cacheTimer);
 		if (this.#registryTimer) this.#clock.clearTimeout(this.#registryTimer);
 		if (this.#directoryTimer) this.#clock.clearTimeout(this.#directoryTimer);
+	}
+
+	/** True while the server renders: nothing may schedule work or read the network then (the render answers one request). */
+	get #renderingOnServer(): boolean {
+		return typeof window === 'undefined';
 	}
 
 	get #clock(): Clock {
@@ -490,7 +502,9 @@ export class WorkspaceStore {
 
 	// ───────────────────────────── registry and directory ─────────────────────────────
 
-	async refreshProperties(): Promise<void> {
+	async refreshProperties(force = false): Promise<void> {
+		// What the server render read a moment ago (`seed`) is as fresh as a fetch, until a commit says otherwise (`welcome`).
+		if (this.#seedFresh && !force) return;
 		const version = this.#defVersion;
 		try {
 			const list = await this.#rpc.property.list();
@@ -502,7 +516,8 @@ export class WorkspaceStore {
 		}
 	}
 
-	async refreshDirectory(): Promise<void> {
+	async refreshDirectory(force = false): Promise<void> {
+		if (this.#seedFresh && !force) return;
 		const [members, teamspaces] = await Promise.allSettled([
 			this.#rpc.workspace.members.list(),
 			this.#rpc.workspace.teamspaces.list()
@@ -553,19 +568,19 @@ export class WorkspaceStore {
 	}
 
 	#scheduleDirectoryRefresh(): void {
-		if (this.#directoryTimer || this.#disposed) return;
+		if (this.#directoryTimer || this.#disposed || this.#renderingOnServer) return;
 		this.#directoryTimer = this.#clock.setTimeout(() => {
 			this.#directoryTimer = null;
-			void this.refreshDirectory();
+			void this.refreshDirectory(true);
 		}, 150);
 	}
 
 	/** Debounced registry refresh: another client created a property or an option. */
 	#scheduleRegistryRefresh(): void {
-		if (this.#registryTimer || this.#disposed) return;
+		if (this.#registryTimer || this.#disposed || this.#renderingOnServer) return;
 		this.#registryTimer = this.#clock.setTimeout(() => {
 			this.#registryTimer = null;
-			void this.refreshProperties();
+			void this.refreshProperties(true);
 		}, 150);
 	}
 
@@ -589,9 +604,12 @@ export class WorkspaceStore {
 				this.#send({ t: 'subscribe', id, sub });
 			}
 		} else {
+			// A window the server render seeded under this id and subscription is claimed without a message: the socket's `hello` holds
+			// it (with `lastSeq`), so the server replays what happened since instead of sending the snapshot again.
+			const seeded = this.#unclaimed.delete(id) && !this.#helloSent && JSON.stringify(this.windows.get(id)?.sub) === JSON.stringify(sub);
 			this.#subs.set(id, { sub, count: 1 });
 			this.#openWindow(id, sub);
-			this.#send({ t: 'subscribe', id, sub });
+			if (!seeded) this.#send({ t: 'subscribe', id, sub });
 		}
 		let released = false;
 		return () =>
@@ -670,6 +688,18 @@ export class WorkspaceStore {
 	}
 
 	#hello(): { lastSeq: number | null; subs: SubscriptionEntry[]; extra: ClientMessage[] } {
+		this.#helloSent = true;
+		// Seeded windows nobody subscribed to (the page changed before they were used) are not held by the server: drop them.
+		if (this.#unclaimed.size) {
+			for (const id of this.#unclaimed) {
+				const w = this.windows.get(id);
+				if (w && !this.#subs.has(id)) {
+					this.windows.delete(id);
+					this.#gc(new Set(w.ids));
+				}
+			}
+			this.#unclaimed.clear();
+		}
 		const entries = (ws: WindowState[]) => ws.map((w) => ({ id: w.id, sub: this.#subs.get(w.id)?.sub ?? w.sub }));
 		const all = [...this.windows.values()].filter((w) => this.#subs.has(w.id));
 		const extra: ClientMessage[] = [];
@@ -699,12 +729,14 @@ export class WorkspaceStore {
 		if (this.#expanded.has(id)) return;
 		this.#expanded.add(id);
 		this.expanded = new Set([...this.#expanded].filter((x): x is string => x !== null));
+		writeExpandedCookie(this.workspace.id, this.expanded);
 		this.#scheduleTree();
 	}
 
 	collapse(id: string): void {
 		if (!this.#expanded.delete(id)) return;
 		this.expanded = new Set([...this.#expanded].filter((x): x is string => x !== null));
+		writeExpandedCookie(this.workspace.id, this.expanded);
 		this.#scheduleTree();
 	}
 
@@ -724,7 +756,7 @@ export class WorkspaceStore {
 	}
 
 	#scheduleTree(): void {
-		if (this.#treeTimer) return;
+		if (this.#treeTimer || this.#renderingOnServer) return;
 		this.#treeTimer = this.#clock.setTimeout(() => {
 			this.#treeTimer = null;
 			this.#syncTreeNow(true);
@@ -762,6 +794,14 @@ export class WorkspaceStore {
 		switch (msg.t) {
 			case 'welcome':
 				this.#awaitingWindow.clear();
+				// The first welcome of a store the server render seeded: if the log moved on since the render read it, a definition may
+				// have changed in between (pushes only reach connected tabs), so the registry, the directory and the collections are read again.
+				if (!this.#welcomed && this.#seedFresh && this.#seededSeq !== null && msg.seq > this.#seededSeq) {
+					this.#seedFresh = false;
+					this.#scheduleCollectionsRefresh();
+					this.#scheduleRegistryRefresh();
+					this.#scheduleDirectoryRefresh();
+				}
 				// A reconnect: definition changes pushed while the socket was down (the log replays page and
 				// value changes, not the registry or the directory) are fetched again.
 				if (this.#welcomed) {
@@ -1739,7 +1779,7 @@ export class WorkspaceStore {
 	}
 
 	#scheduleCollectionsRefresh(): void {
-		if (this.#collectionsTimer || this.#disposed || (this.collections.size === 0 && this.#missingCollections.size === 0)) return;
+		if (this.#collectionsTimer || this.#disposed || this.#renderingOnServer || (this.collections.size === 0 && this.#missingCollections.size === 0)) return;
 		this.#collectionsTimer = this.#clock.setTimeout(() => {
 			this.#collectionsTimer = null;
 			for (const id of new Set([...this.collections.keys(), ...this.#missingCollections])) void this.loadCollection(id, true);
@@ -1922,7 +1962,7 @@ export class WorkspaceStore {
 	watchPages(ids: string[]): () => void {
 		const list = [...new Set(ids)].slice(0, 50);
 		if (!list.length) return () => {};
-		return this.subscribe('pg:set', { kind: 'page', pageIds: list });
+		return this.subscribe(PAGE_SET_ID, { kind: 'page', pageIds: list });
 	}
 
 	/** Pages above `id` that no subscription holds yet get a `page` subscription of their own. */
@@ -2179,9 +2219,11 @@ export class WorkspaceStore {
 		if (!s) return;
 		try {
 			const fav = JSON.parse(s.getItem(`${this.#prefKey}.fav`) ?? '[]');
-			if (Array.isArray(fav)) this.favorites = fav.filter((x): x is string => typeof x === 'string');
+			if (Array.isArray(fav) && (fav.length || !this.favorites.length)) this.favorites = fav.filter((x): x is string => typeof x === 'string');
 			const rec = JSON.parse(s.getItem(`${this.#prefKey}.recent`) ?? '[]');
-			if (Array.isArray(rec)) this.recent = rec.filter((x) => x && typeof x.id === 'string' && typeof x.at === 'number').slice(0, MAX_RECENT);
+			if (Array.isArray(rec) && (rec.length || !this.recent.length)) this.recent = rec.filter((x) => x && typeof x.id === 'string' && typeof x.at === 'number').slice(0, MAX_RECENT);
+			// The cookie the next server render reads is kept in step (a first visit after the cookie existed finds none).
+			writePrefsCookie(this.workspace.id, this.favorites, this.recent);
 		} catch {
 			// corrupt preferences: start empty
 		}
@@ -2190,6 +2232,7 @@ export class WorkspaceStore {
 	#savePref(name: 'fav' | 'recent', value: unknown): void {
 		try {
 			this.#storage()?.setItem(`${this.#prefKey}.${name}`, JSON.stringify(value));
+			writePrefsCookie(this.workspace.id, this.favorites, this.recent);
 		} catch {
 			// quota or private mode
 		}
@@ -2215,6 +2258,67 @@ export class WorkspaceStore {
 	toggleFavorite(id: string): void {
 		this.favorites = this.isFavorite(id) ? this.favorites.filter((f) => f !== id) : [id, ...this.favorites];
 		this.#savePref('fav', this.favorites);
+	}
+
+	// ───────────────────────────── seed (server render) ─────────────────────────────
+
+	/**
+	 * Starts the store from what the server render read (`StoreSeed`, `src/server/ssr/`): the snapshots a socket would have sent
+	 * for the first screen, applied as such, plus the definitions around them. Called by the layout and the page before anything
+	 * renders (on the server for the HTML, and in the browser for hydration, with the same data, so both render the same markup).
+	 * The socket's first `hello` then carries the seeded windows with the log position they were read at, and the server replays
+	 * only what happened since: no snapshot is fetched twice. A window the store already holds at the same position or later is
+	 * left alone (a client-side navigation brings the next page's seed to a store that is live).
+	 */
+	seed(seed: StoreSeed): void {
+		untrack(() => this.#seed(seed));
+	}
+
+	#seed(seed: StoreSeed): void {
+		const live = this.#started;
+		if (!live) this.#seeded = true;
+		if (seed.properties) this.#setRegistry(seed.properties);
+		if (seed.members) this.members = seed.members;
+		if (seed.teamspaces) {
+			this.teamspaces = seed.teamspaces.list;
+			this.teamspaceRanks = seed.teamspaces.ranks;
+		}
+		if (seed.collection && !this.collections.has(seed.collection.collection.id)) {
+			this.collections.set(seed.collection.collection.id, seed.collection.collection);
+			this.views.set(seed.collection.collection.id, seed.collection.views);
+		}
+		if (seed.prefs && !this.recent.length && !this.favorites.length) {
+			this.favorites = seed.prefs.favorites;
+			this.recent = seed.prefs.recent;
+		}
+		if (seed.expanded && !live) {
+			this.#expanded = new Set<string | null>([null, ...seed.expanded]);
+			this.expanded = new Set(seed.expanded);
+		}
+		let min: number | null = null;
+		for (const { id, sub, snapshot } of seed.windows ?? []) {
+			const held = this.windows.get(id);
+			if (held && held.status === 'ready' && held.seq !== null && held.seq >= snapshot.seq) continue;
+			if (snapshot.kind === 'tree') {
+				const sub2: Subscription = { kind: 'tree', parents: [...this.#expanded] };
+				this.#subs.set(TREE_ID, { sub: sub2, count: 1 });
+				this.windows.set(TREE_ID, { id: TREE_ID, kind: 'tree', sub: sub2, status: 'pending', ids: [], rows: new Map(), total: 0, seq: null });
+			} else {
+				this.windows.set(id, { id, kind: sub.kind, sub, status: 'pending', ids: [], rows: new Map(), total: 0, seq: null });
+				this.#unclaimed.add(id);
+			}
+			this.#applySnapshot(snapshot);
+			min = min === null ? snapshot.seq : Math.min(min, snapshot.seq);
+		}
+		if (!live && min !== null) {
+			// `#applySnapshot` moved the position to the newest snapshot: the socket resumes from the oldest, and a window newer than that
+			// drops the replayed diffs it already holds (`window.seq`).
+			this.seq = min;
+			this.#seededSeq = Math.max(this.#seededSeq ?? 0, min);
+			this.#seedFresh = true;
+		}
+		if (live && min !== null) this.#seededSeq = null;
+		this.stale = false;
 	}
 
 	// ───────────────────────────── cache ─────────────────────────────
@@ -2270,8 +2374,6 @@ export class WorkspaceStore {
 		});
 	}
 }
-
-const TREE_ID = 'tree';
 
 // ───────────────────────────── helpers ─────────────────────────────
 

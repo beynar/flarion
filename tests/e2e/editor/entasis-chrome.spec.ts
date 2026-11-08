@@ -13,7 +13,7 @@ const SHOTS = 'docs/screens/entasis';
 mkdirSync(SHOTS, { recursive: true });
 
 const uid = () => `x${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
-const EDITOR = '[data-flarion-editor] [data-edytor]';
+const EDITOR = '[data-flarion-editor]:not(:has([data-edytor-snapshot])) [data-edytor]';
 
 async function open(browser: Browser, scheme: 'light' | 'dark', extra = '') {
 	const context = await browser.newContext({ viewport: { width: 1100, height: 760 }, colorScheme: scheme });
