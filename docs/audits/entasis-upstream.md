@@ -48,3 +48,20 @@ and the 1px row hairline both claimed 36), panels at 9px (`radius: 0.75` gives e
 21. `Tree`: no ARIA pattern for rows that hold buttons beside the item (axe `aria-required-children` on `role="tree"` with buttons in its rows). The sidebar's custom tree had the same finding and no longer does: each row is a `role="group"` that holds the buttons and the `role="treeitem"` link (with `aria-level` and `aria-expanded`), and `tests/visual/a11y.spec.ts` has no exception left.
 
 edytor: a to-do's checkbox gets its `aria-label` a moment after the block renders (axe's `label` rule fails if it runs in that window; the visual suite waits 800ms). The exported HTML's checkbox has no accessible name (the published page adds one in `src/server/share/route.ts`, `nameCheckboxes`).
+
+**Server rendering (SSR) of the app: what entasis 0.16.0 and edytor 7.0.4 needed (2026-11-08)**
+Everything renders on the server now; these are the limits met, with what the app does about each.
+22. `Theme` writes its boot `<script>` and token `<style>` with `{@html}`; the markup depends on the `nonce` prop. Rendered without it and then hydrated with one (a CSP nonce
+    the Worker stamps afterwards), Svelte warns `hydration_html_changed` and keeps the server value. The app makes the nonce before the render (`hooks.server.ts`) and gives it
+    to `<Theme nonce>` through page data, so both renders agree. Upstream: a way to ask `Theme` for the nonce itself (a context, or reading the request) would remove the hand-off.
+23. The code and diff components (`@pierre/diffs`, `@pierre/highlights`, shiki) put every grammar and theme behind dynamic imports (about 320 modules, 14 MB in the server build),
+    and `highlights` plus the inlined oniguruma WebAssembly add 600 KB; a Worker uploads every module and pays about 45 ms of start-up per MB. The app never highlights on the
+    server, so `scripts/postbuild.mjs` empties the grammar and theme tables and the inlined wasm. Upstream: separate entry points (`entasis/code`) or a way to choose the languages
+    and themes at build time, and keep the WebAssembly out of a bundle that does not use it.
+24. `Sidebar` reads its resized width (`resizable.storageKey`, `localStorage`) when it mounts: a server render always draws the default width, so a person who resized it sees
+    the sidebar change width after hydration. A cookie (or a prop for the initial width) would let the server draw it.
+25. `DataTable` with `virtualize` draws `min(rows, viewport / rowHeight + overscan)` rows without a viewport, which is what makes its server render usable (the first screenful of rows);
+    that works, but the rows are in the HTML only when `items` is set before the first render: a table fed through `$effect` (as the app's views did) renders no rows on the server.
+26. edytor: `<Edytor snapshot={doc}>` server-renders a room-backed document natively (read-only, the plugins' own markup) and swaps in the live view in one update, which is what the
+    app uses. Two things to know: the snapshot subtree is also a `[data-edytor]` with `role="textbox"` (a test or a script that looks for "the editor" must exclude
+    `[data-edytor-snapshot]` or wait for `contenteditable="true"`), and a click or keystroke before the room answers lands on the read-only view and is lost.

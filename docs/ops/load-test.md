@@ -520,3 +520,34 @@ What the numbers say about what remains, with the evidence:
 
 Tests added or changed: `tests/workers/scale/group-commit.test.ts`, `tests/workers/scale/page-cache.test.ts`, the burst step and `stats.memory` of the live fuzz (`tests/workers/live/harness.ts`), `tests/workers/scale/sql-trace.test.ts` (tighter guard, page cache counters),
 `tests/workers/scale/location.test.ts` and `tests/unit/server/location-hint.test.ts` (a forced hint, the parser), plus the session and estate tests above. A 30 s timeout on `tests/workers/socket/route.test.ts`'s 401 test (a request without a usable cookie cache loads better-auth in a cold test isolate).
+
+## Server rendering (SSR) of every page (2026-11-08)
+
+Every route is rendered by SvelteKit on the Worker and hydrated in the browser (CLAUDE.md "SSR"). What it costs, measured against the same build before the change
+(the merge of `test/scw-kit3-miniflare`, `113decf`), same machine, same week. Staging numbers are from a laptop in France; "server time" is `time_starttransfer` minus the TLS handshake.
+
+| | before (client-rendered) | after (server-rendered) |
+| --- | ---: | ---: |
+| Worker as built (`split worker`) | entry 7 KB, 180 chunks, 4,850 KB | entry 7 KB, 310 chunks, 8,790 KB |
+| `wrangler deploy` upload | 5,020 KiB (gzip 1,524) | 8,960 KiB (gzip 2,838) |
+| `Worker Startup Time` (staging) / `wrangler check startup` `Active` | 2 ms / 20 ms | 3 ms / under 1 ms |
+| `/healthz` plain, server time p50 (14 requests) | 79 to 83 ms | 33 to 87 ms (noise) |
+| `/healthz` with `Upgrade: websocket`, server time p50 (14 requests, fresh isolates) | **337 to 346 ms** | **488 to 490 ms** (a first build with the shiki grammars and a second copy of better-auth: 565 ms, 9,960 KiB) |
+| first content on screen, real browser, staging: home / a document / a database | 1.93 to 1.96 s / 0.85 to 1.36 s / 0.90 to 1.37 s | 0.34 to 1.47 s / 0.41 to 1.35 s / 0.31 to 0.86 s |
+| `/rpc` calls a page makes while it loads | 5 to 8 (`me`, `property.list`, `members.list`, `teamspaces.list`, `teamspaces.members.list`, `collection.get`, `page.roomToken`, `page.lock.get`) | 1 (`search.visit`) |
+| socket on load | `hello` with no position, then a snapshot of every subscription | `hello` at the seeded `seq`, `resumed: replay`, `head`; no snapshot, no `subscribe` |
+| SSR page TTFB on staging, warm (6 requests each) | (CSR shell: 90 ms) | home 135 to 250, document 250 to 460, database 175 to 420, search 160 to 260, trash 150 to 260, settings 180 to 235 ms |
+| SSR page TTFB, `wrangler dev` of the build, warm | | 6 to 25 ms (home 7, document 14 to 23, database 11 to 27, search 8, trash 7, settings 8; `/login` 2) |
+| SSR page TTFB, `vite dev` | | 45 to 60 ms |
+
+The cold page is slower than the warm one: the first page request of an isolate loads the SvelteKit chunk (about 4 MB of rendering code) and may wake a Workspace and a Page object (1.0 to 1.9 s seen on staging for the first request after a deploy).
+
+**The regression**: a socket dial's server time grew by about 145 ms (43%). The model of this file holds (about 45 ms per MB uploaded, evaluated or not): the script went from 5.0 to 8.96 MiB because it now carries the
+server build of every page (entasis, edytor's components, charts, katex). `/ws` and `/rpc` evaluate nothing more (the entry is still 7 KB, SvelteKit is a lazily loaded chunk, `Worker Startup Time` is unchanged) but they are served from the same script.
+What was done to keep it down: SvelteKit's loads share the Worker's own copy of the session check, the D1 directory, better-auth and the room (`server/ssr/server.ts`; a first build inlined a second copy of better-auth, 770 KB), the shiki
+grammar and theme tables and the inlined oniguruma wasm are not uploaded (14 MB; they came with entasis's code components, `scripts/postbuild.mjs`), and the `(dev)` routes are stubbed.
+**What would remove it**: serving `/ws`, `/rpc` and `/rooms` from a Worker of their own (a service binding in front, or a route by path) so that the dial's script stays at 5 MB; it is a deploy-shape change (two Workers per environment, the Durable Object classes
+owned by one of them) and was not done here. Cheaper steps, in order: build SvelteKit's chunks without `keepNames` (500 KB, not checked for what depends on function names), load the SloDashboard's chart on the client only (about 300 KB), and shrink the 1.1 MB
+the ORM is in twice (`viborm/migrations`).
+
+Hydration: the browser tests wait for `<html data-hydrated="true">` (`tests/e2e/hydration.mjs`); a page is live only after its script ran.
