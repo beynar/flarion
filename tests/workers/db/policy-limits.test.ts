@@ -2,6 +2,7 @@ import { runInDurableObject } from 'cloudflare:test';
 import { expect, test } from 'vitest';
 import { createClient } from 'viborm';
 import { createMigrationClient } from 'viborm/migrations';
+import { SQLiteAdapter, type DatabaseAdapter } from 'viborm/adapters';
 import type { QueryExecutionContext, QueryResult } from 'viborm/driver';
 import { DurableObjectSqliteDriver } from '../../../src/server/db/do-sqlite-driver';
 import { actorFacts, grantSubjectKey, joinedPolicy, policy, sketchPolicy, type ActorInput } from '../../../src/server/db/policy';
@@ -223,19 +224,44 @@ test('policy (actor facts): the largest reads and the write checks fit the platf
 
 test('joinedPolicy (teamspace rows): fits too, with less headroom', () => fitsLimits(joinedPolicy, 90));
 
-test("the plan's sketch breaches SQLite's expression depth on a move (the reason for the compact policies)", async () => {
+// The plan's sketch used to breach SQLite's expression depth on a move; that was viborm's DEFAULT SQL form, not the
+// sketch (viborm maintainers' review, 2026-11-08). The driver now asks for `deepExpressions: false`, and the sketch
+// moves a page on workerd. The default form is kept below as the reference that still fails.
+test("the plan's sketch moves a page now that the adapter is shallow (deepExpressions: false)", async () => {
 	await workspace(async (ctx) => {
 		const sketch = sketchPolicy(ctx.base as never) as Governed;
 		const owner = sketch.$as(actorFor(ctx.state.storage, actorInputs['teamspace owner']));
-		const failure = await owner.page.update({ where: { id: 'p3' }, data: { parentId: 'p2' } }).catch((e: Error) => e);
-		expect(failure).toBeInstanceOf(Error);
-		const statement = ctx.driver.statements.find((s) => s.error);
-		expect(statement?.error).toMatch(/maximum depth 100/);
-		expect(statement?.params).toBeLessThanOrEqual(LIMITS.params);
-		// ...and it needs 97 of 100 bound values to ask four actions of one row.
+		await ctx.measure('sketch move', () => owner.page.update({ where: { id: 'p3' }, data: { parentId: 'p2' } }), () => 1);
+		const move = ctx.results.at(-1)!;
+		expect(move.error).toBeUndefined();
+		expect(move.statements).toBe(1);
+		expect(move.maxParams).toBeLessThanOrEqual(LIMITS.params);
+		expect(move.maxBytes).toBeLessThanOrEqual(LIMITS.bytes);
+		// ...but it still needs 97 of 100 bound values to ask four actions of one row (no headroom).
 		const member = sketch.$as(actorFor(ctx.state.storage, actorInputs.member));
 		await ctx.measure('sketch can x4', () => member.page.can(['read', 'comment', 'update', 'full'], { id: ctx.seeded.deep }));
+		expect(ctx.results.at(-1)!.error).toBeUndefined();
 		expect(ctx.results.at(-1)!.maxParams).toBeGreaterThan(90);
+	});
+});
+
+/** viborm's default SQL form (deep expressions), as the driver was configured before 2026-11-08. */
+class DeepDriver extends MeasuringDriver {
+	override readonly adapter: DatabaseAdapter = new SQLiteAdapter({ temporaryObjects: false });
+}
+
+test("with viborm's default (deep) SQL form the plan's sketch still breaches the expression depth on a move", async () => {
+	const stub = testEnv.TEST_SQL.getByName('spike-deep-' + crypto.randomUUID());
+	await runInDurableObject(stub, async (_i: unknown, state: DurableObjectState) => {
+		const driver = new DeepDriver(state.storage);
+		const base = makeBase(driver);
+		const migrations = createMigrationClient(base, { tables: [...WORKSPACE_TABLES] });
+		await migrations.push({ consent: (await migrations.push({ dryRun: true })).consent });
+		seed(state.storage);
+		const owner = (sketchPolicy as unknown as (b: never) => Governed)(base as never).$as(actorFor(state.storage, actorInputs['teamspace owner']));
+		const failure = await owner.page.update({ where: { id: 'p3' }, data: { parentId: 'p2' } }).catch((e: Error) => e);
+		expect(failure).toBeInstanceOf(Error);
+		expect(driver.statements.find((s) => s.error)?.error).toMatch(/maximum depth 100/);
 	});
 });
 

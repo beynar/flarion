@@ -160,8 +160,11 @@ function hidePlatformTables(sql: string): string {
 }
 
 export class DurableObjectSqliteDriver extends Driver<DurableObjectStorage, DurableObjectStorage> {
-	// DO SQLite refuses temporary objects (SQLITE_AUTH), as D1 does.
-	readonly adapter: DatabaseAdapter = new SQLiteAdapter({ temporaryObjects: false });
+	// DO SQLite refuses temporary objects (SQLITE_AUTH), as D1 does. `deepExpressions: false` keeps viborm's
+	// generated SQL shallow: workerd caps SQLite's expression depth at 100, and with the default (deep) form the
+	// plan's policy sketch breached it on a move. Not `sharedRelationBodies` (CTE sharing): about +5-10 % CPU for
+	// `deepExpressions: false` against +30-45 % for the shared bodies (viborm maintainers' review, 2026-11-08).
+	readonly adapter: DatabaseAdapter = new SQLiteAdapter({ temporaryObjects: false, deepExpressions: false });
 	readonly maxBindParametersPerStatement: number | undefined = DO_MAX_BOUND_PARAMETERS;
 	readonly result: DriverResultParser = sqliteResultParser;
 	readonly supportsTransactions = true;
