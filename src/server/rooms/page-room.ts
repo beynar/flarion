@@ -9,7 +9,6 @@ import type { PageLockState } from '../objects/page/page-do';
 import { roomName } from './names';
 
 export interface PageRoomApi {
-	recordIdentity(workspaceId: string, pageId: string): Promise<void>;
 	read(): Promise<JSONDoc>;
 	/** The body with its version (published pages): the room's `read()` and `String(lastUpdated() ?? 0)`. */
 	readPublished(): Promise<{ doc: JSONDoc; version: string }>;
@@ -39,12 +38,10 @@ export interface PageRoomApi {
 }
 
 /**
- * The room of `workspaceId`/`pageId`, told who it is first (a stub does not always carry the object's name, see
- * `recordPageMeta`). Idempotent. The stub comes back inside an object, never as the awaited value itself: a stub is
- * thenable over RPC, and the dev server's platform proxy cannot carry one across a promise.
+ * The room of `workspaceId`/`pageId`. The stub comes back inside an object, never as the awaited value itself: a stub is
+ * thenable over RPC, so returning it from an async function would try to resolve it.
  */
 export async function openPageRoom(env: Pick<Env, 'PAGE'>, workspaceId: string, pageId: string): Promise<{ room: PageRoomApi }> {
 	const room = env.PAGE.getByName(roomName(workspaceId, pageId)) as unknown as PageRoomApi;
-	await room.recordIdentity(workspaceId, pageId);
 	return { room };
 }

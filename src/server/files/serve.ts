@@ -10,16 +10,9 @@
  */
 import { FILE_URL_TTL_SECONDS } from './constants';
 
-/**
- * Under `vite dev` the Worker runs in Node and reaches R2 through a platform proxy that can only carry bytes,
- * not streams. There (and only there) bodies are buffered; workerd, staging and production stream.
- */
-export const buffersBodies = (env: Pick<Env, 'ENVIRONMENT'>) => env.ENVIRONMENT === 'development';
-
-/** The body to hand R2: a stream, or its bytes under `vite dev`. */
-export async function uploadBody(env: Pick<Env, 'ENVIRONMENT'>, request: Request): Promise<ReadableStream | ArrayBuffer> {
-	if (!request.body) return new ArrayBuffer(0);
-	return buffersBodies(env) ? request.arrayBuffer() : request.body;
+/** The body to hand R2: the request's stream (an empty one when there is no body). Streams in `vite dev` too, which runs the Worker in workerd. */
+export function uploadBody(request: Request): ReadableStream | ArrayBuffer {
+	return request.body ?? new ArrayBuffer(0);
 }
 
 /** Types shown inline: raster images, video and audio. Everything else downloads. */
@@ -162,7 +155,7 @@ async function respond(env: Env, request: Request, object: R2ObjectBody, wanted:
 	}
 	headers.set('content-length', String(length));
 	if (request.method === 'HEAD') return new Response(null, { status, headers });
-	return new Response(buffersBodies(env) ? await object.arrayBuffer() : object.body, { status, headers });
+	return new Response(object.body, { status, headers });
 }
 
 const notFound = () => new Response('Not found', { status: 404, headers: { 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' } });

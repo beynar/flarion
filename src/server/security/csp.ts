@@ -127,7 +127,7 @@ export function injectNonce(html: string, nonce: string): string {
  * The Worker's last step for a document SvelteKit rendered (`src/worker.ts`, around `next()`): a fresh nonce stamped into
  * the markup, and the policy header carrying it. Anything that is not HTML (assets, JSON) passes through untouched.
  * It runs here and not in a SvelteKit hook because the Worker always has its `env` (`FILES_ORIGIN`); SvelteKit's own
- * `platform` is empty under `vite dev`.
+ * server code only has `cloudflare:workers` (no `event.platform`).
  */
 export async function withCsp(
 	request: Pick<Request, 'url'>,

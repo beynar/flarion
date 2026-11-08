@@ -32,7 +32,13 @@ export interface VectorIndex {
 	): Promise<{ matches: { id: string; score: number }[] }>;
 }
 
-export const vectorIndexOf = (env: Pick<Env, 'VECTORS'>): VectorIndex | null => (env.VECTORS as unknown as VectorIndex | undefined) ?? null;
+/**
+ * The Vectorize index, or null when there is none. Miniflare has no local Vectorize: in development the binding exists (it
+ * is in wrangler.jsonc) but every call throws `Binding VECTORS needs to be run remotely`, and `remote: true` would point
+ * dev at the production index, so development runs without vectors (full-text search only), as before.
+ */
+export const vectorIndexOf = (env: Pick<Env, 'VECTORS'> & { ENVIRONMENT?: string }): VectorIndex | null =>
+	env.ENVIRONMENT === 'development' ? null : ((env.VECTORS as unknown as VectorIndex | undefined) ?? null);
 
 export async function upsertVectors(index: VectorIndex, vectors: Parameters<VectorIndex['upsert']>[0]): Promise<void> {
 	for (const part of chunks(vectors, MUTATION_BATCH)) await index.upsert(part);

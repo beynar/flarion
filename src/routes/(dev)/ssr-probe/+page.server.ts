@@ -22,6 +22,7 @@ export const load = async ({ request, url }) => {
 	const started = Date.now();
 	const [page, tree] = await Promise.all([pageId ? workspace.getPage(actor, pageId) : null, workspace.exportTree(actor, null, 50)]);
 	return {
+		ping: await workspace.ping(),
 		user: session.name,
 		role,
 		title: page?.title ?? null,

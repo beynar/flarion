@@ -102,7 +102,7 @@ async function putFile(request: Request, env: Env, file: FileRecord): Promise<Re
 	const length = declaredLength(request);
 	if (length instanceof Response) return length;
 	if (length !== file.size) return reply(400, `Expected ${file.size} bytes, received a body of ${length}`);
-	await env.FILES.put(file.r2Key, await uploadBody(env, request), {
+	await env.FILES.put(file.r2Key, uploadBody(request), {
 		httpMetadata: { contentType: file.type },
 		customMetadata: { name: file.name, pageId: file.pageId, uploadedBy: file.createdBy }
 	});
@@ -131,7 +131,7 @@ async function putPart(request: Request, env: Env, file: FileRecord, partNumber:
 	if (length instanceof Response) return length;
 	if (length === 0 || length > MULTIPART_PART_BYTES * 2) return reply(400, 'Invalid part size');
 	if (!request.body) return reply(400, 'Missing part body');
-	const part = await env.FILES.resumeMultipartUpload(file.r2Key, file.uploadId).uploadPart(partNumber, await uploadBody(env, request));
+	const part = await env.FILES.resumeMultipartUpload(file.r2Key, file.uploadId).uploadPart(partNumber, uploadBody(request));
 	return Response.json({ partNumber: part.partNumber, etag: part.etag }, { headers: { 'cache-control': 'no-store' } });
 }
 

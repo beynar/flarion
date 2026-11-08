@@ -106,7 +106,7 @@ importers:
         specifier: ^4.7.8
         version: 4.7.8(picomatch@4.0.7)(svelte@5.57.3)(typescript@6.0.3)
       sveltekit-cloudflare-worker:
-        specifier: github:beynar/sveltekit-cloudflare-worker#b6bc029
+        specifier: github:beynar/sveltekit-cloudflare-worker#b6bc029490747eb7a662bb344206bb934fdf4560
         version: https://codeload.github.com/beynar/sveltekit-cloudflare-worker/tar.gz/b6bc029490747eb7a662bb344206bb934fdf4560(@sveltejs/adapter-cloudflare@8.0.2(@sveltejs/kit@3.1.1(@sveltejs/vite-plugin-svelte@7.3.1(svelte@5.57.3)(vite@8.3.6(@types/node@26.6.6)(esbuild@0.28.2)(jiti@2.7.0)(yaml@2.9.1)))(svelte@5.57.3)(typescript@6.0.3)(vite@8.3.6(@types/node@26.6.6)(esbuild@0.28.2)(jiti@2.7.0)(yaml@2.9.1)))(wrangler@4.158.0(@cloudflare/workers-types@5.20261107.1)(@types/node@26.6.6)))(@sveltejs/kit@3.1.1(@sveltejs/vite-plugin-svelte@7.3.1(svelte@5.57.3)(vite@8.3.6(@types/node@26.6.6)(esbuild@0.28.2)(jiti@2.7.0)(yaml@2.9.1)))(svelte@5.57.3)(typescript@6.0.3)(vite@8.3.6(@types/node@26.6.6)(esbuild@0.28.2)(jiti@2.7.0)(yaml@2.9.1)))(vite@8.3.6(@types/node@26.6.6)(esbuild@0.28.2)(jiti@2.7.0)(yaml@2.9.1))(wrangler@4.158.0(@cloudflare/workers-types@5.20261107.1)(@types/node@26.6.6))
       tailwindcss:
         specifier: 4.3.5

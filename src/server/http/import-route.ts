@@ -32,7 +32,7 @@ export const handleImportUpload: RouteHandler = async (request, env) => {
 	if (length > MAX_IMPORT_BYTES) return reply(413, 'The file is larger than 50 MB');
 	const uploadId = crypto.randomUUID();
 	const name = (url.searchParams.get('name') ?? 'import.csv').replace(/[\u0000-\u001f\u007f/\\]/g, '_').slice(0, 255);
-	await env.FILES.put(importKey(caller.actor.workspaceId, uploadId), await uploadBody(env, request), {
+	await env.FILES.put(importKey(caller.actor.workspaceId, uploadId), uploadBody(request), {
 		httpMetadata: { contentType: 'text/csv' },
 		customMetadata: { name, uploadedBy: caller.actor.userId }
 	});
