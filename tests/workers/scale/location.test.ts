@@ -20,7 +20,8 @@ describe('location hint at workspace creation', () => {
 		// Everything after `init` (member syncs, renames) reaches the existing object without a hint.
 		expect(first.slice(1).every((c) => c.options === undefined)).toBe(true);
 		expect(world.workspaces.inits.map((i) => i.workspaceId)).toContain(created.id);
-		expect(world.workspaces.inits.find((i) => i.workspaceId === created.id)).not.toHaveProperty('locationHint');
+		// `init` receives the hint too: the object keeps it to place its socket shards next to itself.
+		expect(world.workspaces.inits.find((i) => i.workspaceId === created.id)).toHaveProperty('locationHint', 'weur');
 	});
 
 	test('without geography (local dev, tests) the object is created without a hint', async () => {

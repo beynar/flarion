@@ -42,7 +42,8 @@ async function deliver(env: Pick<Env, 'WORKSPACE'>, workspaceId: string, job: Ou
 	if (job.kind === 'init') {
 		// The first call that reaches the object places it: near the team that created the workspace.
 		const { locationHint, ...args } = job.payload;
-		await workspaceIdentity(env, workspaceId, locationHint).init(args);
+		// The object keeps the hint: the socket shards it creates later are placed with it, next to the object.
+		await workspaceIdentity(env, workspaceId, locationHint).init({ ...args, locationHint });
 		return;
 	}
 	const rpc = workspaceIdentity(env, workspaceId);

@@ -21,10 +21,14 @@
 		"bindings": [
 			{ "name": "WORKSPACE", "class_name": "WorkspaceDO" },
 			{ "name": "PAGE", "class_name": "PageDO" },
+			{ "name": "SOCKET_SHARD", "class_name": "SocketShardDO" },
 			{ "name": "TEST_SQL", "class_name": "TestSqlDO" }
 		]
 	},
-	"migrations": [{ "tag": "v1", "new_sqlite_classes": ["WorkspaceDO", "PageDO", "TestSqlDO"] }],
+	"migrations": [
+		{ "tag": "v1", "new_sqlite_classes": ["WorkspaceDO", "PageDO", "TestSqlDO"] },
+		{ "tag": "v2", "new_sqlite_classes": ["SocketShardDO"] }
+	],
 	"r2_buckets": [{ "binding": "FILES", "bucket_name": "flarion-files-test" }],
 	"kv_namespaces": [{ "binding": "CACHE", "id": "test" }],
 	"queues": {

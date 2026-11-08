@@ -53,6 +53,7 @@ export const scheduled: WorkerScheduled<Env> = async (controller, env, ctx) => (
 
 export { WorkspaceDO } from './server/objects/workspace/workspace-do';
 export { PageDO } from './server/objects/page/page-do';
+export { SocketShardDO } from './server/objects/workspace/socket-shard';
 
 // The Workflows are declared here, as thin classes that load their implementation (`server/workflows/*.ts`, which the tests
 // use directly) when a run starts: those modules pull in the export renderer, the zip writer and the D1 client, which no

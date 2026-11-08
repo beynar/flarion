@@ -116,6 +116,14 @@ a call to the object (what `/rpc/mutate` does after authenticating) and the scri
 path (Worker, session, membership), the client's network and cold probes; what it adds: the probe's own isolates (a few ms of timer
 and clock granularity, and their CPU: at 200 tabs it reads about 50 to 90 ms above what a laptop measures at p95).
 
+`inside.ts` also takes `--shards N --local M` (how many socket shards and how many sockets the Workspace DO keeps for itself, set before the tabs dial: `--shards 0` is
+the single-object path), `--echo N` (instead of writes, N bare `head` frames to every tab: the delivery alone, no commit and no storage wait; read the `edit-to-head` line) and the
+environment variable `LOAD_TIMELINE=1` (a line per two seconds of the write phase, and latency per kind of write). It prints, besides the lines above: `edit-to-diff incl. merged` (a write whose diff was merged into
+a later frame counts at the time of that frame; **the verdict takes the stricter of the two lines**), the latency of the tabs **held by the object and by each shard** (the 101 carries `x-flarion-shard`), per
+write the first tab, the median tab and the spread, the idle round trip to the object and through it to every shard, and the data center the object and each shard run in (`object runs in MXP; shards in ...`).
+**Where the object lands decides much of a run**: hosts differ by up to 2.5x in CPU, and an object that lands in the data center the load generators run in (MRS from here) competes with them.
+Compare runs of one day and read the data center line before the numbers.
+
 ### Flags
 
 | Flag | Default | Meaning |
@@ -256,6 +264,12 @@ Staging, `https://flarion-staging.beynar.workers.dev`, from France (Cloudflare c
 | 2026-11-08 | same | 200 | 20 | 500 / 8 | laptop | 64 / 164 / 412 ms (minus RTT 20: 44 / 144 / 392) | 64 / 163 ms | 0 | 0 | 466 ms (nothing warm) |
 | 2026-11-08 | same | 1,000 | 20 | 500 / 8 | laptop | 12.8 s to 17 s: not measurable (the 1,000 connections stall this client) | 5 s to 14 s; 503 "busy" on 627 of 1,200 in the last run | up to 627 | | 237 ms (max 264; open 164, hello 71) in one run, 5.2 s in the last |
 | 2026-11-08 | final | 1,000 | 20 | 500 / 8 | in-DC | 71 to 97 / 179 to 423 / 242 to 822 ms (five runs) | commit call 96 to 111 / 200 to 426 ms | 0 of 600, five runs | 0 | |
+| 2026-11-08 (second pass) | before: one object holds every socket | 1,000 | 20 | 500 / 8 | in-DC | 76 to 90 / 182 to 350 / 251 to 510 ms (three runs of 20 to 30 s) | commit call 98 to 109 / 192 to 359 ms | 0 of 400 to 600 | 0 | |
+| 2026-11-08 (second pass) | 4 socket shards, 32 to 64 sockets kept, governed client cached, fan-outs merged under load | 1,000 | 20 | 500 / 8 | in-DC | best p50 66 to 75, p95 157 and 165 ms; typical 72 to 96 / 250 to 360 ms; 5 of 22 runs saturated (commit call p50 of seconds) | commit call 44 to 63 / 106 to 215 ms when not saturated | 0 of 600 to 1,200 when not saturated, up to 893 failed (`overloaded`) when saturated | 0, or 165,472 in the one saturated 60 s run | |
+| 2026-11-08 (second pass) | same, three consecutive official runs of 60 s | 1,000 | 20 | 500 / 8 | in-DC | **80 / 263 / 575 ms** (object MXP); then 23.4 s / 35.1 s (saturated, object in CDG); then 7.6 s / 10.8 s (saturated, 893 of 1,200 writes refused) | commit call 55 / 144 ms; 17.0 s; 4.6 s | 0; 0; 893 | 0; 165,472; 0 | |
+| 2026-11-08 (second pass) | A/B on one deployment, `--shards 4 --local 64` then `--shards 0`, twice | 1,000 | 20 | 500 / 8 | in-DC | shards 185 / 700 and 77 / 522 ms; direct 84 / 268 ms and a saturated run (13.4 s / 14.0 s) | | 0 | 0 | |
+| 2026-11-08 (second pass) | bare delivery, `--echo 200`, 20 per second, no commit | 1,000 | 20 | 500 / 8 | in-DC | direct 34 / 98 ms (object MXP), 86 / 222 ms (object MRS); 4 shards 14 / 50 ms; 8 shards 24 / 82 ms | | | | |
+| 2026-11-08 (second pass) | cold probes from the laptop, `run.ts --cold-probes 5 --cold-idle 20` | 10 | 2 | 50 / 5 | laptop | | | | | first window p50 593 to 674 ms, max 745 to 997 ms (open 530 to 600, hello to snapshot 65) |
 
 The server side of the 1,000-tab runs, whatever the client saw: the Worker's `/rpc/mutate` took 54 ms at p50 and 190 ms at the maximum (`wrangler tail`, a 1,000-tab run at 5 writes a second), a
 commit with its fan-out to 1,000 tabs (15,000 frames a second from inside) leaves no queue behind it, and the object's CPU per commit at 200 tabs went from 40 ms
@@ -272,12 +286,17 @@ on a server socket, so the object cannot see one): see "What is left".
 
 ## What is left
 
-- **The 150 ms line at 1,000 tabs and 20 writes a second** is 179 to 423 ms at p95 from inside Cloudflare (p50 71 to 97 ms). Candidates, in order of what they would buy: a second object that
-  holds a share of the sockets and receives each commit's frames to send (the fan-out's CPU divides, the commit's cost does not); fewer frames per commit (a view that touches 87% of the
-  tabs per write is this test's choice, not a property of the product); a front Worker for `/ws`, `/rpc` and the objects without the SvelteKit app (the dial).
+- **The 150 ms line at 1,000 tabs and 20 writes a second is not met.** Second pass (docs/spikes/p4-scale.md "Second pass"): the best runs reach a p95 of 157 to 183 ms (p50 66 to 75), a typical run 250 to 360
+  ms, and a quarter to a third of the runs saturate the object's thread completely (a slow host: one `setProp` commit costs 19 to 25 ms of CPU against 9 to 11 ms on a fast one, then 20 commits a second with the
+  fan-out of 17,000 frames are more than it can do). Socket shards (`SOCKET_SHARDS`, off by default, on in staging) halve the delivery of a bare fan-out at p95 but add a 15 to 19 ms hop and land in
+  other data centers than the object; measured on real writes they are not better (A/B above). What would move the line: a commit and a view maintenance that cost a third of the CPU (the ORM and
+  policy layers are 0.15 to 0.4 ms a call and a commit makes a few dozen; the maintenance of every touched unit goes through the query compiler each time: cache the compiled SQL per filter
+  shape and registry generation), group commits (several queued writes in one transaction), and a smaller script so that no isolate pays 350 ms to start.
 - **Slow consumers.** An acknowledged `seq` in the client's `ping` would let the object skip a tab that lags by hundreds of commits (it would be marked stale and resynchronized like a hidden
   tab of an overloaded object, `WorkspaceSocketApi.resync`) instead of queueing frames toward it.
-- **The cold first window** is 164 to 264 ms when an isolate is warm (any tab connected or a dial a moment ago) and 450 to 700 ms when none is: the floor is the script's size (above).
+- **The cold first window** is 164 to 264 ms when an isolate is warm and 450 to 997 ms when none is (593 to 674 ms at p50 in the second pass; the object's own wake is 35 to 66 ms of CPU and the
+  snapshot 65 ms). A WebSocket upgrade that the Worker answers by itself takes 335 to 607 ms on staging against 140 to 190 for a plain request: the floor is the size of the script (above), so 300 ms is not
+  reachable without separate modules for the app's rendering and for the object implementations.
 - `roaring.wasm` is instantiated by every object wake (`ensureRoaring` in the constructor); making it lazy would save a few milliseconds of a cold wake and was not worth the risk of mixed modes.
 
 Local smoke on the development server, for reference (2026-11-08, 10 tabs, 5 writes/s, 5 views, 50 rows): edit-to-diff

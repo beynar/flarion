@@ -58,15 +58,26 @@
 			{
 				"name": "PAGE",
 				"class_name": "PageDO"
+			},
+			{
+				"name": "SOCKET_SHARD",
+				"class_name": "SocketShardDO"
 			}
 		]
 	},
+	// Environments inherit `migrations`: v2 adds the socket shards (docs/spikes/p4-scale.md "Socket shards") everywhere.
 	"migrations": [
 		{
 			"tag": "v1",
 			"new_sqlite_classes": [
 				"WorkspaceDO",
 				"PageDO"
+			]
+		},
+		{
+			"tag": "v2",
+			"new_sqlite_classes": [
+				"SocketShardDO"
 			]
 		}
 	],
@@ -193,7 +204,9 @@
 				"TURNSTILE_SITE_KEY": "1x00000000000000000000AA",
 				"FILES_ORIGIN": "https://flarion-staging.beynar.workers.dev",
 				"CF_ACCOUNT_ID": "6886250e2aff0047919a1ed731a55c64",
-				"METRICS_DATASET": "flarion_metrics_staging"
+				"METRICS_DATASET": "flarion_metrics_staging",
+				"SOCKET_SHARDS": "4",
+				"SOCKET_LOCAL_MAX": "64"
 			},
 			"d1_databases": [
 				{
@@ -212,9 +225,28 @@
 					{
 						"name": "PAGE",
 						"class_name": "PageDO"
+					},
+					{
+						"name": "SOCKET_SHARD",
+						"class_name": "SocketShardDO"
 					}
 				]
 			},
+			"migrations": [
+				{
+					"tag": "v1",
+					"new_sqlite_classes": [
+						"WorkspaceDO",
+						"PageDO"
+					]
+				},
+				{
+					"tag": "v2",
+					"new_sqlite_classes": [
+						"SocketShardDO"
+					]
+				}
+			],
 			"r2_buckets": [
 				{
 					"binding": "FILES",
@@ -362,9 +394,28 @@
 					{
 						"name": "PAGE",
 						"class_name": "PageDO"
+					},
+					{
+						"name": "SOCKET_SHARD",
+						"class_name": "SocketShardDO"
 					}
 				]
 			},
+			"migrations": [
+				{
+					"tag": "v1",
+					"new_sqlite_classes": [
+						"WorkspaceDO",
+						"PageDO"
+					]
+				},
+				{
+					"tag": "v2",
+					"new_sqlite_classes": [
+						"SocketShardDO"
+					]
+				}
+			],
 			"r2_buckets": [
 				{
 					"binding": "FILES",

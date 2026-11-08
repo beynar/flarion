@@ -12,7 +12,7 @@ import { workspaceStubWithHint, type LocationHint } from '../objects/workspace/l
 import type { WorkspaceRole } from './session';
 
 export interface WorkspaceIdentityRpc {
-	init(args: { workspaceId: string; name: string; ownerId: string; ownerName: string }): Promise<unknown>;
+	init(args: { workspaceId: string; name: string; ownerId: string; ownerName: string; locationHint?: string }): Promise<unknown>;
 	syncMember(args: { userId: string; role: WorkspaceRole | null; name?: string }): Promise<unknown>;
 	rename(args: { name: string }): Promise<unknown>;
 	getMemberRole(userId: string): Promise<WorkspaceRole | null>;

@@ -10,7 +10,7 @@
  * grows). After EVERY step each window every connected client holds, rebuilt by applying the diffs it received,
  * must equal what `queryView` (the engine's `runQuery`, ANDed with the actor's visibility set) answers now.
  */
-import { evictDurableObject } from 'cloudflare:test';
+import { env as testEnvironment, evictDurableObject } from 'cloudflare:test';
 import { vi } from 'vitest';
 import { andFilters, GROUP_EMPTY, validateFilter, type FilterGroup, type FilterNode, type GroupBySpec, type SortSpec } from '../../../src/lib/shared/filter-ast';
 import type { Op } from '../../../src/lib/shared/ops';
@@ -193,6 +193,8 @@ class Client {
 // ───────────────────────────── the run ─────────────────────────────
 
 export interface FuzzOptions {
+	/** Run every socket through this many socket shards (`SocketShardDO`) instead of the Workspace DO itself; evictions then hit the shards too. */
+	shards?: number;
 	steps?: number;
 	pages?: number;
 	subsPerSocket?: number;
@@ -226,6 +228,7 @@ export async function runFuzz(seed: number, options: FuzzOptions = {}): Promise<
 	const ws = await createWorkspace(`fz${seed}`);
 	const owner = ws.owner;
 	const stub = ws.stub;
+	if (options.shards) await stub.configureShards({ count: options.shards, localMax: 0 });
 	const trace: string[] = [];
 	const stats: FuzzStats = { steps: 0, checks: 0, ops: {}, reconnects: 0, replays: 0, evictions: 0, failedBatches: 0, windowOps: 0 };
 	const note = (line: string) => {
@@ -531,8 +534,15 @@ export async function runFuzz(seed: number, options: FuzzOptions = {}): Promise<
 		} else if (roll < 0.88) {
 			count('evict');
 			stats.evictions++;
-			note('evict the Workspace DO');
-			await evictDurableObject(stub);
+			if (options.shards && r.bool(0.5)) {
+				const shard = r.int(0, options.shards - 1);
+				note(`evict shard ${shard}`);
+				// A shard that already slept (evicted twice in a row, or holding no socket) is not running: nothing to evict.
+				await evictDurableObject((testEnvironment as unknown as Env).SOCKET_SHARD.getByName(`${ws.id}:${shard}`)).catch(() => undefined);
+			} else {
+				note('evict the Workspace DO');
+				await evictDurableObject(stub);
+			}
 		} else {
 			count('write');
 			const w = await randomWrite(await pagesNow());

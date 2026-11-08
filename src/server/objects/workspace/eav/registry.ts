@@ -100,6 +100,14 @@ export function loadEavRegistry(db: WorkspaceDb): Promise<EavRegistry> {
 	return registry;
 }
 
+/**
+ * Tells the cache that `db` (a transaction that has just begun) sees `registry`: a transaction object is new for every commit, so
+ * without this each one reads the property table again, through the policy's client, before its first op.
+ */
+export function primeRegistry(db: WorkspaceDb, registry: EavRegistry): void {
+	cache.set(db, { gen: generation, registry: Promise.resolve(registry) });
+}
+
 export function invalidateRegistry(): void {
 	generation++;
 }

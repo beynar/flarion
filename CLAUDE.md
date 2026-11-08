@@ -237,3 +237,11 @@ itself on `E2E_PORT` and reuses when one is already there. Three Playwright conf
   a miss (`requireWorkspaceInObject`, `authenticateUpgrade`). A busy object answers 503 `SERVICE_UNAVAILABLE` (not 500) and the store retries the same `mid`.
 - **Load tool**: sockets live in worker threads (`scripts/load/tabs-worker.ts`, `ws` package), the minted cookie carries better-auth's `session_data` cache,
   and the report prints the client's own round trip and `edit-to-diff` minus it (docs/ops/load-test.md).
+- **Socket shards** (`SocketShardDO`, `shard-router.ts`; `SOCKET_SHARDS` and `SOCKET_LOCAL_MAX` vars, 0 = off, on in staging only; `WorkspaceDO.configureShards` overrides per workspace): a shard holds a share of the
+  hibernatable sockets and does the `ws.send` loop; the Workspace DO stays the only writer and sends one `[text, ids]` batch per shard per turn (`RemoteSocket` has the surface of a `WebSocket`, so the
+  live loop does not know). A shard finds the Workspace DO by `attachment.actor.workspaceId`, never by `ctx.id.name` (it is undefined under `vite dev`). Anything new that sends to sockets must go through
+  `#send`/`socket.ws`, never `transport.sockets()`. The live fuzz has a shard mode (`tests/workers/live/fuzz-shards.test.ts`); the P1/P3 e2e gates pass with `SOCKET_SHARDS=2 SOCKET_LOCAL_MAX=0` in `.dev.vars`.
+  Measured: shards halve the delivery of a bare fan-out but not the p95 of real writes (docs/spikes/p4-scale.md "Second pass"); the 1,000-tab p95 and the 300 ms cold window are not met.
+- **Commits cost CPU per ORM call**: build the policy client once per facts (`AccessService.governed` caches), give a transaction the registry (`primeRegistry`), and remember that `Date.now()` and `performance.now()` do not advance inside
+  synchronous code on Cloudflare: read CPU from `wrangler tail` (`cpuTime`) with a diagnostic RPC that repeats the work, not from timers in the object.
+

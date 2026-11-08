@@ -164,16 +164,38 @@ describe('overload governor', () => {
 		late.ws.close();
 	});
 
-	test('without overload every commit has its own fan-out', async () => {
+	test('a commit with nothing waiting behind it has its own fan-out', async () => {
 		const ws = await seed();
 		const a = await tab(ws, 'owner-1');
 		await ws.stub.liveStats({ resetPerf: true, stale: false });
-		// Few and quick: neither six queued tasks nor 150 ms of commit-and-fan-out, so the governor stays out of it.
+		// One at a time: no commit ever waits behind another, so none is merged (the governor is not involved either way).
 		const N = 4;
-		await Promise.all(Array.from({ length: N }, (_, i) => ws.stub.apply(ws.owner, batch([{ op: 'setProp', page: `r${i}`, prop: 'amount', value: 100 + i } as Op]))));
+		for (let i = 0; i < N; i++) await ws.stub.apply(ws.owner, batch([{ op: 'setProp', page: `r${i}`, prop: 'amount', value: 100 + i } as Op]));
 		const stats = await ws.stub.liveStats({ stale: false });
 		expect(stats.perf.fanOuts).toBe(N);
 		expect(stats.governor.merged).toBe(0);
+		expect(stats.governor.overloaded).toBe(false);
+		a.ws.close();
+	});
+
+	test('commits that cluster share fan-outs without any overload, and every socket ends exact', async () => {
+		const ws = await seed();
+		const a = await tab(ws, 'owner-1');
+		await ws.stub.liveStats({ resetPerf: true, stale: false });
+		// Five: fewer than the six queued tasks that would make the governor call it an overload.
+		const N = 5;
+		const busy = ws.stub.holdQueue(100);
+		await new Promise((r) => setTimeout(r, 15));
+		const seqs = await Promise.all(Array.from({ length: N }, (_, i) => ws.stub.apply(ws.owner, batch([{ op: 'setProp', page: `r${i}`, prop: 'amount', value: 200 + i } as Op]))));
+		await busy;
+		const last = Math.max(...seqs.map((s) => s.seq));
+		await a.log.wait((m) => (m.t === 'diff' || m.t === 'head') && m.seq === last);
+		const stats = await ws.stub.liveStats({ stale: true });
+		expect(stats.governor.overloaded).toBe(false);
+		expect(stats.perf.fanOuts).toBeLessThan(N);
+		expect(stats.governor.merged).toBeGreaterThan(0);
+		expect(stats.stale).toEqual([]);
+		expect(windowOf(a.log.messages)).toEqual(await truth(ws));
 		a.ws.close();
 	});
 });

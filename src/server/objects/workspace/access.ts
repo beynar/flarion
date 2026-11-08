@@ -159,6 +159,7 @@ export class AccessService {
 	/** Bumped by every commit: an entry read across a commit is read again. */
 	#epoch = 0;
 	readonly #facts = new Map<string, PolicyActor>();
+	readonly #clients = new WeakMap<PolicyActor, Governed>();
 	#clock = 0;
 	/** Source of `Entry.rev`. */
 	#revs = 0;
@@ -216,7 +217,18 @@ export class AccessService {
 	/** The client every call of this actor runs on: `db.$as(facts)`. Null when the user holds no membership. */
 	governed(actor: AccessActor): Governed | null {
 		const resolved = this.resolve(actor);
-		return resolved ? this.#governed.$as(this.facts(resolved)) : null;
+		return resolved ? this.#governedFor(this.facts(resolved)) : null;
+	}
+
+	/**
+	 * `$as(facts)` builds a client (it snapshots the facts, binds the policy's controls and wraps every model): about half of a
+	 * property edit's CPU time when it ran per call. The facts of an actor are one cached object until they change, so the client
+	 * is kept with them, and the per-client caches (the property registry) live as long as it does.
+	 */
+	#governedFor(facts: PolicyActor): Governed {
+		let client = this.#clients.get(facts);
+		if (!client) this.#clients.set(facts, (client = this.#governed.$as(facts)));
+		return client;
 	}
 
 	/** True for owners and admins (full access to everything). */

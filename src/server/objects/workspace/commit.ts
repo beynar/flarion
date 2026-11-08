@@ -3,9 +3,9 @@
  * live typing), the mutation id is recorded for idempotent retries, and the page counters advance.
  * Everything rolls back together when anything throws.
  */
-import type { WorkspaceClient, WorkspaceTx } from '../../db/workspace.client';
+import type { WorkspaceClient, WorkspaceDb, WorkspaceTx } from '../../db/workspace.client';
 import { appendChanges, type LogRow } from './changelog';
-import { invalidateRegistry, type ChangeRecord } from './eav';
+import { invalidateRegistry, loadEavRegistry, primeRegistry, type ChangeRecord } from './eav';
 import type { PageOpEnv } from './page-ops';
 
 export interface CommitEnv extends PageOpEnv {
@@ -39,7 +39,10 @@ const NEXT_PAGE_NUM = 'nextPageNum';
 
 export async function runCommit(db: WorkspaceClient, input: CommitInput): Promise<CommitResult> {
 	try {
+		// Read once per client (cached), handed to the transaction: its ops would each read it again otherwise.
+		const registry = await loadEavRegistry(db as unknown as WorkspaceDb);
 		return await db.$transaction(async (tx) => {
+			primeRegistry(tx as unknown as WorkspaceDb, registry);
 			const key = input.mid ? `${input.actorId}:${input.mid}` : null;
 			if (key) {
 				const done = await tx.mutation.findUnique({ where: { key } });

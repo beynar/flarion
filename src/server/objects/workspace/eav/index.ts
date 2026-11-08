@@ -188,7 +188,7 @@ export async function readValues(db: WorkspaceDb, pageIds: string[]): Promise<Ma
 }
 
 export { EavError, isEavError } from './errors';
-export { TITLE_NUM, loadEavRegistry, type EavRegistry } from './registry';
+export { TITLE_NUM, loadEavRegistry, primeRegistry, type EavRegistry } from './registry';
 export { selectivity, valueCountOf, totalCountOf } from './counts';
 export { defaultsForView, defaultsForCollection, deriveDefaults, type ViewDefaults } from './defaults';
 export { ensureEavLayout } from './layout';

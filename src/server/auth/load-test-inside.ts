@@ -34,6 +34,10 @@ interface InsideInput {
 	 */
 	role?: 'leader' | 'follower';
 	holdMs?: number;
+	/** Set before the tabs dial (they are placed when they dial): how many socket shards and how many sockets the object keeps. */
+	shards?: { count: number; localMax: number };
+	/** Instead of writes: `n` echoes (a bare `head` to every tab) at `writesPerSec`, to measure the delivery alone. */
+	echo?: number;
 }
 
 interface Tab {
@@ -41,6 +45,7 @@ interface Tab {
 	frameTimes: number[];
 	frameDiffs: number[];
 	snapshots: number;
+	shard: number;
 	ws: WebSocket | null;
 	settledAt: number;
 }
@@ -66,6 +71,7 @@ export function runInside(env: Env, input: InsideInput): Response {
 			};
 			const tabs: Tab[] = [];
 			let measuring = false;
+			if (input.shards) await (stub as unknown as { configureShards(s: { count: number; localMax: number }): Promise<void> }).configureShards(input.shards);
 			const dialOne = async (index: number): Promise<{ openMs: number; snapshotMs: number }> => {
 				const actor = input.actors[index % input.actors.length];
 				const started = Date.now();
@@ -81,7 +87,7 @@ export function runInside(env: Env, input: InsideInput): Response {
 				const ws = response.webSocket;
 				if (response.status !== 101 || !ws) throw new Error(`upgrade answered ${response.status}`);
 				ws.accept();
-				const tab: Tab = { frameSeqs: [], frameTimes: [], frameDiffs: [], snapshots: 0, ws, settledAt: 0 };
+				const tab: Tab = { frameSeqs: [], frameTimes: [], frameDiffs: [], snapshots: 0, shard: Number(response.headers.get('x-flarion-shard') ?? -1), ws, settledAt: 0 };
 				tabs[index] = tab;
 				const opened = Date.now();
 				return await new Promise((resolve, reject) => {
@@ -123,7 +129,7 @@ export function runInside(env: Env, input: InsideInput): Response {
 				measuring = true;
 				await sleep(input.holdMs ?? 30_000);
 				measuring = false;
-				const frames = tabs.filter(Boolean).map((tab) => ({ s: tab.frameSeqs, t: tab.frameTimes, d: tab.frameDiffs }));
+				const frames = tabs.filter(Boolean).map((tab) => ({ s: tab.frameSeqs, t: tab.frameTimes, d: tab.frameDiffs, h: tab.shard }));
 				for (const tab of tabs) {
 					try {
 						tab?.ws?.close(1000, 'done');
@@ -135,6 +141,19 @@ export function runInside(env: Env, input: InsideInput): Response {
 				return;
 			}
 			await sleep(1800);
+			// Idle round trips: a call to the object, and one that goes on to every shard (no write is in flight yet).
+			const probe = stub as unknown as { ping(): Promise<string>; shardStats(): Promise<unknown> };
+			const plain: number[] = [];
+			const viaShards: number[] = [];
+			for (let i = 0; i < 8; i++) {
+				let t = Date.now();
+				await probe.ping();
+				plain.push(Date.now() - t);
+				t = Date.now();
+				await probe.shardStats().catch(() => null);
+				viaShards.push(Date.now() - t);
+			}
+			line({ progress: 'rpc', plain, viaShards });
 
 			measuring = true;
 			const writer = { userId: input.writer.userId, sessionId: 'inside', workspaceId: input.workspaceId, role: 'owner', name: input.writer.name };
@@ -145,11 +164,27 @@ export function runInside(env: Env, input: InsideInput): Response {
 			const interval = 1000 / Math.max(0.1, input.writesPerSec);
 			const inflight: Promise<void>[] = [];
 			let next = Date.now();
+			if (input.echo) {
+				const echoer = stub as unknown as { diagEcho(seq: number): Promise<number> };
+				const gap = 1000 / Math.max(0.1, input.writesPerSec);
+				let at = Date.now();
+				for (let k = 0; k < input.echo; k++) {
+					const t0 = Date.now();
+					inflight.push(echoer.diagEcho(1_000_000_000 + k).then(() => void sent.push({ t0, seq: 1_000_000_000 + k, rtt: Date.now() - t0 } as { t0: number; seq: number })));
+					at += gap;
+					const wait = at - Date.now();
+					if (wait > 0) await sleep(wait);
+					else at = Date.now();
+				}
+			}
+			let index = -1;
 			for (const write of input.writes) {
+				index++;
+				const at = index;
 				const t0 = Date.now();
 				inflight.push(
 					stub.apply(writer, { mid: write.mid, ops: write.ops, appVersion: input.appVersion }).then(
-						(r) => void (sent.push({ t0, seq: r.seq }), rtts.push(Date.now() - t0)),
+						(r) => void (sent.push({ t0, seq: r.seq, rtt: Date.now() - t0, i: at } as { t0: number; seq: number }), rtts.push(Date.now() - t0)),
 						(error: Error) => void (failed++, (firstError ||= String(error?.message ?? error).slice(0, 200)))
 					)
 				);
@@ -188,7 +223,8 @@ export function runInside(env: Env, input: InsideInput): Response {
 					// already closed
 				}
 			}
-			line({ result: { tabs: tabs.filter(Boolean).length, open: summarize(open), snapshots: summarize(snapshot), writes: { ok: sent.length, failed, firstError, rtt: summarize(rtts), sent }, editToDiff: summarize(diff), delivered: summarize(delivered), missing } });
+			const shards = await (stub as unknown as { shardStats(): Promise<unknown> }).shardStats().catch(() => null);
+			line({ result: { rpc: { plain, viaShards }, shards, tabs: tabs.filter(Boolean).length, open: summarize(open), snapshots: summarize(snapshot), writes: { ok: sent.length, failed, firstError, rtt: summarize(rtts), sent }, editToDiff: summarize(diff), delivered: summarize(delivered), missing } });
 		} catch (error) {
 			line({ error: error instanceof Error ? (error.stack ?? error.message) : String(error) });
 		} finally {

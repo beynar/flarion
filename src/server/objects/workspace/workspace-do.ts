@@ -75,10 +75,13 @@ import { Presence } from './presence';
 import {
 	ACTOR_HEADER,
 	AttachmentTooLargeError,
+	assertAttachmentSize,
 	decodeActorHeader,
 	HibernatableSocketTransport,
 	type SocketHandle
 } from './socket';
+import { RemoteSocket, ShardRouter, type ShardStub } from './shard-router';
+import { coloOf, SHARD_ATTACHMENT_HEADER, shardName, type ShardAttachment } from './socket-shard';
 import { RAW_STREAM, WorkspaceSocketApi } from './socket-api';
 import { SocketDirectory } from './socket-directory';
 import { socketRouter, type SocketContext } from './socket-router';
@@ -172,6 +175,8 @@ export interface InitArgs {
 	name: string;
 	ownerId: string;
 	ownerName: string;
+	/** Where the object was asked to be created (`location.ts`): kept so the shards of its sockets are placed in the same region. */
+	locationHint?: string;
 }
 
 export interface SyncMemberArgs {
@@ -192,6 +197,11 @@ const TRASH_CLOSE_REASON = 'moved to Trash';
 /** Rooms called at once. */
 const ROOM_BATCH = 16;
 
+/** Sockets the Workspace DO holds itself before it hands new ones to shards (`SOCKET_SHARDS`): small workspaces never leave it. */
+const DEFAULT_LOCAL_SOCKETS = 48;
+const MAX_SHARDS = 16;
+const SHARD_SETTING = 'socket_shards';
+
 /** Protocol frames start with a string `t`; oRPC's have a numeric one. */
 const PROTOCOL_FRAME = /^\s*\{\s*"t"\s*:\s*"/;
 /** Protocol frames that read no live unit: they run in the queue but do not make it send held fan-outs first. */
@@ -201,6 +211,7 @@ const QUIET_FRAME = /^\s*\{\s*"t"\s*:\s*"(?:ping|presence|unsubscribe|notificati
 
 const META_INITIALIZED = 'initialized';
 const META_WORKSPACE = 'workspace';
+const META_LOCATION_HINT = 'location_hint';
 
 export class WorkspaceDO extends DurableObject<Env> {
 	/** Number of instances constructed in this isolate: tests use it to prove a re-create after eviction. */
@@ -236,6 +247,14 @@ export class WorkspaceDO extends DurableObject<Env> {
 	#backupRelease: (() => void) | null = null;
 	/** Live sockets with their actors, read from the attachments once per wake (see `socket-directory.ts`). */
 	#directory: SocketDirectory<WorkspaceSocketActor> | null = null;
+	/** Sockets held by shards (`socket-shard.ts`), by socket id; the `shard_socket` table is their record across hibernation. */
+	readonly #remotes = new Map<string, RemoteSocket>();
+	#remotesLoaded = false;
+	readonly #router: ShardRouter;
+	/** Sockets per shard (for placing the next one). */
+	readonly #shardCounts: number[] = [];
+	#placement: { count: number; localMax: number } | null = null;
+	#hint: DurableObjectLocationHint | null | undefined;
 
 	constructor(ctx: DurableObjectState, env: Env) {
 		super(ctx, env);
@@ -252,6 +271,11 @@ export class WorkspaceDO extends DurableObject<Env> {
 			// Bitmaps are an accelerator: without the WASM module (or with `BITMAPS=off`) the engine keeps its SQL paths.
 			if (env.BITMAPS === 'off') setRoaringEnabled(false);
 			await ensureRoaring();
+		});
+		this.#router = new ShardRouter({
+			stubOf: (index) => this.#shardStub(index) as unknown as ShardStub,
+			onDead: (_index, ids) => this.#remotesGone(ids),
+			onFailure: (index, error) => this.#shardFailed(index, error)
 		});
 		this.#hub = new LiveHub({
 			sql: ctx.storage.sql,
@@ -288,7 +312,180 @@ export class WorkspaceDO extends DurableObject<Env> {
 	// ───────────────────────── sockets ─────────────────────────
 
 	#sockets(): SocketDirectory<WorkspaceSocketActor> {
-		return (this.#directory ??= new SocketDirectory(this.#transport.sockets()));
+		if (this.#directory) return this.#directory;
+		this.#loadRemotes();
+		const remote = [...this.#remotes.values()].map((r) => ({ ws: r as unknown as WebSocket, socketId: r.socketId, actor: r.deserializeAttachment().actor as unknown as WorkspaceSocketActor }));
+		return (this.#directory = new SocketDirectory([...this.#transport.sockets(), ...remote]));
+	}
+
+	// ───────────────────────── socket shards ─────────────────────────
+
+	/** Shard `index` of this workspace, created next to the object (the hint the workspace was created with) the first time it is reached. */
+	#shardStub(index: number): DurableObjectStub<import('./socket-shard').SocketShardDO> {
+		const name = shardName(this.ctx.id.name ?? '', index);
+		this.#hint ??= this.#readHint();
+		return this.#hint ? this.env.SOCKET_SHARD.getByName(name, { locationHint: this.#hint }) : this.env.SOCKET_SHARD.getByName(name);
+	}
+
+	#readHint(): DurableObjectLocationHint | null {
+		const row = this.ctx.storage.sql.exec<{ value: string }>('SELECT value FROM meta WHERE key = ?', META_LOCATION_HINT).toArray()[0];
+		try {
+			return row ? (JSON.parse(row.value) as DurableObjectLocationHint) : null;
+		} catch {
+			return null;
+		}
+	}
+
+	/** The remote sockets recorded before this wake (the table is created the first time it is needed). */
+	#loadRemotes(): void {
+		if (this.#remotesLoaded) return;
+		this.#remotesLoaded = true;
+		const sql = this.ctx.storage.sql;
+		sql.exec('CREATE TABLE IF NOT EXISTS shard_socket (socket_id TEXT PRIMARY KEY, shard INTEGER NOT NULL, actor TEXT NOT NULL) WITHOUT ROWID');
+		for (const row of sql.exec<{ socket_id: string; shard: number; actor: string }>('SELECT socket_id, shard, actor FROM shard_socket').toArray()) {
+			if (this.#remotes.has(row.socket_id)) continue;
+			try {
+				this.#remotes.set(row.socket_id, this.#remoteSocket(row.shard, { socketId: row.socket_id, shard: row.shard, actor: JSON.parse(row.actor) }));
+				this.#shardCounts[row.shard] = (this.#shardCounts[row.shard] ?? 0) + 1;
+			} catch {
+				sql.exec('DELETE FROM shard_socket WHERE socket_id = ?', row.socket_id);
+			}
+		}
+	}
+
+	#remoteSocket(shard: number, attachment: ShardAttachment): RemoteSocket {
+		return new RemoteSocket(this.#router, shard, attachment, (value) => {
+			this.ctx.storage.sql.exec('UPDATE shard_socket SET actor = ? WHERE socket_id = ?', JSON.stringify((value as ShardAttachment).actor), attachment.socketId);
+		});
+	}
+
+	/** Where new sockets go: the shard count and how many sockets the object keeps for itself (the env vars, or a setting stored by `configureShards`). */
+	#shardPlacement(): { count: number; localMax: number } {
+		if (this.#placement) return this.#placement;
+		const vars = this.env as { SOCKET_SHARDS?: string; SOCKET_LOCAL_MAX?: string };
+		let count = Number(vars.SOCKET_SHARDS ?? 0);
+		let localMax = Number(vars.SOCKET_LOCAL_MAX ?? DEFAULT_LOCAL_SOCKETS);
+		if (this.env.SOCKET_SHARD) {
+			const row = this.ctx.storage.sql.exec<{ value: string }>('SELECT value FROM meta WHERE key = ?', SHARD_SETTING).toArray()[0];
+			if (row) {
+				try {
+					const setting = JSON.parse(row.value) as { count?: number; localMax?: number };
+					if (typeof setting.count === 'number') count = setting.count;
+					if (typeof setting.localMax === 'number') localMax = setting.localMax;
+				} catch {
+					// a malformed setting is ignored
+				}
+			}
+		} else count = 0;
+		return (this.#placement = { count: Number.isFinite(count) ? Math.max(0, Math.min(MAX_SHARDS, Math.floor(count))) : 0, localMax: Number.isFinite(localMax) ? Math.max(0, localMax) : DEFAULT_LOCAL_SOCKETS });
+	}
+
+	/** Diagnostics for the load tool: sends `{ t: 'head', seq }` to every tab with a stream, as a fan-out does (no commit, no derivation). */
+	async diagEcho(seq: number): Promise<number> {
+		const head: ServerMessage = { t: 'head', seq };
+		let n = 0;
+		for (const socketId of this.#hub.streamSockets()) if (this.#send(socketId, head)) n++;
+		return n;
+	}
+
+	/** Diagnostics: where the object and its shards run, and how many sockets and batches each holds. */
+	async shardStats(): Promise<{ colo: string; shards: { sockets: number; pushes: number; colo: string }[] }> {
+		const count = Math.max(this.#shardCounts.length, this.#shardPlacement().count);
+		const shards = await Promise.all(Array.from({ length: count }, (_, i) => this.#shardStub(i).stats()));
+		return { colo: await coloOf(), shards };
+	}
+
+	/** Operators and tests: how many shards take new sockets and how many the object keeps (`null`: back to the environment's values). Applies to sockets opened after. */
+	async configureShards(setting: { count: number; localMax?: number } | null): Promise<void> {
+		const sql = this.ctx.storage.sql;
+		if (setting === null) sql.exec('DELETE FROM meta WHERE key = ?', SHARD_SETTING);
+		else sql.exec('INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value', SHARD_SETTING, JSON.stringify({ count: setting.count, localMax: setting.localMax ?? 0 }));
+		this.#placement = null;
+	}
+
+	/** Hands an upgrade to the least loaded shard and keeps a record of the socket it accepts. */
+	async #acceptRemote(actor: WorkspaceSocketActor, count: number): Promise<Response> {
+		this.#sockets();
+		let shard = 0;
+		for (let i = 1; i < count; i++) if ((this.#shardCounts[i] ?? 0) < (this.#shardCounts[shard] ?? 0)) shard = i;
+		const attachment: ShardAttachment = { socketId: crypto.randomUUID(), shard, actor: actor as unknown as ShardAttachment['actor'] };
+		assertAttachmentSize(attachment);
+		// The place is taken before the call: dials that arrive together must not all pick the same shard.
+		this.#shardCounts[shard] = (this.#shardCounts[shard] ?? 0) + 1;
+		let response: Response;
+		try {
+			response = await this.#shardStub(shard).fetch('https://shard.internal/', {
+				headers: { Upgrade: 'websocket', [SHARD_ATTACHMENT_HEADER]: encodeURIComponent(JSON.stringify(attachment)) }
+			});
+		} catch (error) {
+			this.#shardCounts[shard]--;
+			throw error;
+		}
+		if (response.status !== 101) {
+			this.#shardCounts[shard]--;
+			return response;
+		}
+		const remote = this.#remoteSocket(shard, attachment);
+		this.#remotes.set(attachment.socketId, remote);
+		if (String(this.env.ENVIRONMENT) === 'development') console.debug(`[workspace] socket ${attachment.socketId.slice(0, 8)} is held by shard ${shard}`);
+		this.ctx.storage.sql.exec('INSERT OR REPLACE INTO shard_socket (socket_id, shard, actor) VALUES (?, ?, ?)', attachment.socketId, shard, JSON.stringify(actor));
+		this.#sockets().add({ ws: remote as unknown as WebSocket, socketId: attachment.socketId, actor });
+		// Which shard holds the socket, for whoever looks at the 101 (the load tool groups its latencies by it).
+		return new Response(null, { status: 101, webSocket: response.webSocket, headers: { 'x-flarion-shard': String(shard) } });
+	}
+
+	#dropRemote(socketId: string): void {
+		const remote = this.#remotes.get(socketId);
+		if (!remote) return;
+		remote.gone = true;
+		this.#remotes.delete(socketId);
+		this.#shardCounts[remote.shard] = Math.max(0, (this.#shardCounts[remote.shard] ?? 1) - 1);
+		this.ctx.storage.sql.exec('DELETE FROM shard_socket WHERE socket_id = ?', socketId);
+	}
+
+	/** A client frame, forwarded by the shard that holds the socket: handled as if the socket were this object's own. */
+	async shardFrame(shard: number, attachment: ShardAttachment, data: string | ArrayBuffer): Promise<void> {
+		if (this.#destroyed) return;
+		this.#sockets();
+		let remote = this.#remotes.get(attachment.socketId);
+		if (!remote) {
+			// The object lost its record (or never had it): the frame carries the identity.
+			remote = this.#remoteSocket(shard, attachment);
+			this.#remotes.set(attachment.socketId, remote);
+			this.#shardCounts[shard] = (this.#shardCounts[shard] ?? 0) + 1;
+			this.ctx.storage.sql.exec('INSERT OR REPLACE INTO shard_socket (socket_id, shard, actor) VALUES (?, ?, ?)', attachment.socketId, shard, JSON.stringify(attachment.actor));
+			this.#sockets().add({ ws: remote as unknown as WebSocket, socketId: attachment.socketId, actor: attachment.actor as unknown as WorkspaceSocketActor });
+		}
+		return this.webSocketMessage(remote as unknown as WebSocket, data);
+	}
+
+	/** The shard says a socket closed. */
+	async shardClosed(shard: number, attachment: ShardAttachment, code: number, reason: string): Promise<void> {
+		this.#sockets();
+		const remote = this.#remotes.get(attachment.socketId) ?? new RemoteSocket(this.#router, shard, attachment);
+		remote.gone = true;
+		this.webSocketClose(remote as unknown as WebSocket, code, reason);
+		this.#dropRemote(attachment.socketId);
+	}
+
+	/** Sockets a shard could not reach: closed there. */
+	#remotesGone(ids: readonly string[]): void {
+		for (const id of ids) {
+			const remote = this.#remotes.get(id);
+			if (!remote) continue;
+			remote.gone = true;
+			this.webSocketClose(remote as unknown as WebSocket, 1006, 'gone');
+			this.#dropRemote(id);
+		}
+	}
+
+	/** A batch did not reach its shard: what the shard held cannot be served by this object any more, so its sockets are told to reconnect. */
+	#shardFailed(index: number, error: unknown): void {
+		console.error(`[workspace] shard ${index} failed, its sockets reconnect:`, error instanceof Error ? (error.stack ?? error.message) : error);
+		this.#router.reset(index);
+		const ids = [...this.#remotes.values()].filter((r) => r.shard === index).map((r) => r.socketId);
+		void Promise.resolve((this.#shardStub(index) as unknown as ShardStub).closeAll?.(CLOSE.TRY_AGAIN, 'resync')).catch(() => undefined);
+		this.#remotesGone(ids);
 	}
 
 	/** A live socket by id (a fan-out looks up every socket: no attachment is read for it). */
@@ -335,6 +532,8 @@ export class WorkspaceDO extends DurableObject<Env> {
 		try {
 			// The actor's visibility set is built before the socket is served, so every handler can read it synchronously.
 			await this.#access.ensure(actor);
+			const placement = this.#shardPlacement();
+			if (placement.count > 0 && this.#sockets().size - this.#remotes.size >= placement.localMax) return await this.#acceptRemote(actor, placement.count);
 			const accepted = this.#transport.acceptSocket(actor);
 			this.#sockets().add(accepted.handle);
 			return accepted.response;
@@ -416,6 +615,7 @@ export class WorkspaceDO extends DurableObject<Env> {
 		const socket = this.#transport.handle(ws);
 		if (!socket) return;
 		this.#directory?.remove(socket.socketId);
+		this.#dropRemote(socket.socketId);
 		this.#hidden.delete(socket.socketId);
 		this.#stale.delete(socket.socketId);
 		this.#known.delete(socket.socketId);
@@ -548,10 +748,12 @@ export class WorkspaceDO extends DurableObject<Env> {
 					backlinkTargets: options.backlinkTargets?.(),
 					actorIds: [actorId]
 				};
-				// Overloaded, and more work waiting behind this commit that only wrote property values: its fan-out is merged
-				// with the next one (a socket gets one diff for several commits, tagged with the last `seq`). The writes are
-				// all committed; only the pushes are shared. The last task of the queue sends what was held back.
-				const mergeable = this.#governor.overloaded && this.#queued > 1 && !options.definition && commit.rows.length > 0 && commit.rows.every((r) => COALESCABLE_KINDS.has(r.kind));
+				// More work waiting behind this commit and it only wrote property values: its fan-out is merged with the next
+				// one (a socket gets one diff for several commits, tagged with the last `seq`), whether the object is overloaded
+				// or just busy: writes that cluster cost one derivation and one frame per socket instead of several, which is what
+				// keeps the queue short at 1,000 tabs. The writes are all committed and answered; only the pushes are shared. The
+				// last task of the queue sends what was held back.
+				const mergeable = this.#queued > 1 && !options.definition && commit.rows.length > 0 && commit.rows.every((r) => COALESCABLE_KINDS.has(r.kind));
 				if (mergeable) {
 					this.#pendingFanOut.push(info);
 					this.#merged++;
@@ -643,7 +845,7 @@ export class WorkspaceDO extends DurableObject<Env> {
 		console.error('[workspace] fan-out failed, resyncing sockets:', error instanceof Error ? (error.stack ?? error.message) : error);
 		const streaming = new Set(this.#hub.streamSockets());
 		this.#hub.clearRegistry();
-		for (const socket of this.#transport.sockets()) {
+		for (const socket of this.#sockets().all()) {
 			if (streaming.has(socket.socketId)) socket.ws.close(CLOSE.TRY_AGAIN, 'resync');
 		}
 	}
@@ -736,6 +938,7 @@ export class WorkspaceDO extends DurableObject<Env> {
 	async init(args: InitArgs): Promise<{ created: boolean; teamspaceId: string | null }> {
 		const done = await this.#db.meta.findUnique({ where: { key: META_INITIALIZED } });
 		if (done) return { created: false, teamspaceId: typeof done.value === 'string' ? done.value : null };
+		if (args.locationHint) this.ctx.storage.sql.exec('INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value', META_LOCATION_HINT, JSON.stringify(args.locationHint));
 		let teamspaceId = '';
 		let created = false;
 		await this.#commit(this.#db, args.ownerId, async (tx, env) => {
@@ -808,7 +1011,7 @@ export class WorkspaceDO extends DurableObject<Env> {
 			});
 		if (removed) {
 			// The user lost access: close their sockets with FORBIDDEN so they do not reconnect.
-			for (const socket of this.#transport.sockets()) {
+			for (const socket of this.#sockets().all()) {
 				if (socket.actor.userId === args.userId) socket.ws.close(CLOSE.FORBIDDEN, 'removed from the workspace');
 			}
 		}
@@ -834,7 +1037,7 @@ export class WorkspaceDO extends DurableObject<Env> {
 		} else {
 			await upsert(this.#db);
 		}
-		for (const socket of this.#transport.sockets()) {
+		for (const socket of this.#sockets().all()) {
 			if (socket.actor.userId !== args.userId) continue;
 			if (removed) {
 				continue;
@@ -1836,7 +2039,7 @@ export class WorkspaceDO extends DurableObject<Env> {
 	 */
 	async destroy(): Promise<void> {
 		this.#destroyed = true;
-		for (const socket of this.#transport.sockets()) {
+		for (const socket of this.#sockets().all()) {
 			try {
 				socket.ws.close(CLOSE.WORKSPACE_GONE, 'workspace deleted');
 			} catch {
@@ -1877,14 +2080,18 @@ export class WorkspaceDO extends DurableObject<Env> {
 		governor: { overloaded: boolean; average: number; triggers: number; merged: number; hidden: number; stale: number };
 		/** The option index: loaded properties, builds since the wake, bytes in the WASM heap (null when bitmaps are off). */
 		bitmaps: { loaded: number[]; builds: number; bytes: number; drift: Drift[] } | null;
+		/** Sockets held by shards, per shard, and the batches and frames the shards were sent since the wake. */
+		shards: { sockets: number[]; local: number; batches: number; sends: number };
 	}> {
 		const perf = { ...fanOutPerf };
 		if (options.resetPerf) resetFanOutPerf();
 		const bitmaps = OptionIndex.available()
 			? { loaded: this.#options.loadedProps, builds: this.#options.builds, bytes: this.#options.bytes(), drift: options.stale === false ? [] : await this.#options.drift(this.#db) }
 			: null;
+		this.#sockets();
 		return {
 			perf,
+			shards: { sockets: [...this.#shardCounts].map((n) => n ?? 0), local: this.#sockets().size - this.#remotes.size, batches: this.#router.batches, sends: this.#router.sends },
 			governor: { overloaded: this.#governor.overloaded, average: this.#governor.average, triggers: this.#governor.triggers, merged: this.#merged, hidden: this.#hidden.size, stale: this.#stale.size },
 			bitmaps,
 			units: this.#hub.unitCount(),
@@ -2004,7 +2211,7 @@ export class WorkspaceDO extends DurableObject<Env> {
 		this.#access.reset();
 		this.#hub.clearRegistry();
 		this.#hub.reader.invalidate();
-		for (const socket of this.#transport.sockets()) {
+		for (const socket of this.#sockets().all()) {
 			try {
 				socket.ws.close(CLOSE.TRY_AGAIN, 'resync');
 			} catch {

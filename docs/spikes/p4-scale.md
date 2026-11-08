@@ -296,6 +296,63 @@ so the gap was in what the profile did not exercise. Causes, with the evidence f
 A hypothesis that did not survive: a ceiling of about 8,500 frames a second per object, measured with a bench that only sent. It was the client path; from inside Cloudflare one object
 delivers 15,000 frames a second to 1,000 tabs with no queue, so the egress budget that was built on it was removed.
 
+## Second pass: the 1,000-tab p95, socket shards, cold start
+
+The first pass left the edit-to-diff p95 at 179 to 423 ms from inside Cloudflare (target 150) and the cold first window at 450 to 700 ms (target 300). This pass
+measured where the tail comes from before changing anything, then changed what the measurements pointed at. Tools: `scripts/load/inside.ts` (new flags and lines, see
+`docs/ops/load-test.md`), and throwaway RPCs on the Workspace DO (removed again) whose CPU time was read from `wrangler tail`, because `Date.now()` and
+`performance.now()` do not advance inside synchronous code on Cloudflare, so a phase timer inside the object reads zero.
+
+### What the measurements say
+
+| | measured on staging |
+| --- | --- |
+| Where the object runs | A different data center almost every run (MXP, CDG, FRA, LHR, MRS) and so is each shard. The same JavaScript costs 236 ms on the laptop, 555 ms on an MXP host and 857 ms on an MRS host: **hosts differ by 1.5x to 2.5x**. |
+| CPU of one `setProp` commit, 10 tabs | 9 to 11 ms on a fast host, 19 to 25 ms on a slow one (`wrangler tail`, `cpuTime` of 100 commits back to back). One ORM read is 0.14 to 0.4 ms, one raw statement 34 microseconds. |
+| Where that CPU goes (10 tabs, 8 views) | Preamble (client, registry, validation) 0.03 ms; an empty commit 1.2 ms; authorization 1 to 1.5 ms; the op and the commit's own rows about 3 ms; **the fan-out (view maintenance 3 to 8 ms, derivation 2 to 6 ms, sends about 0) is 70 to 75% of the CPU**. Nothing in it dominates. |
+| Storage | `storage.sync()` after a write takes 17 to 22 ms (the output gate holds every frame and the RPC answer for that long). An async `storage.transaction()` does not wait for it (0 ms), so the commit queue is not held by storage. |
+| Delivery alone (`--echo`: a bare `head` to 1,000 tabs, no commit, no gate) | One object holding every socket: p50 34 / p95 98 ms (object in MXP) and 86 / 222 ms (object in MRS, the data center the load generators run in). Four shards: p50 14 / p95 50 ms. So delivering 1,000 frames from one thread is worth about 50 ms at p95 on its own. |
+| A call between two objects | 15 to 19 ms round trip, even when both run in the same data center. A shard adds that hop to every frame it sends. |
+| Frames held by the object itself vs by a shard (1,000 tabs, 20 writes/s) | Object: p50 8 to 44 ms. Shard: p50 59 to 103 ms. The shards of one workspace land in different data centers (FRA, MXP, MRS, CDG, LHR in the same run), so their latencies differ by 30 ms and the slowest decides the tail. |
+| Capacity of the commit thread | 10 tabs: 30 writes/s is fine (p95 81 ms), 40 to 60 writes/s on a slow host queues for seconds (`Durable Object is overloaded`). At 1,000 tabs and 20 writes/s a slow host is already past what it sustains: **about a quarter to a third of the runs of this pass saturated completely** (commit call p50 of seconds: 5 of 22 with shards, 2 of 6 without). |
+
+In short: the p95 is the sum of a commit that costs 10 to 25 ms of CPU on one thread, a 20 ms durability wait before any frame leaves, one or two 8 ms hops, and the
+fan-out of 17,000 frames a second. On a fast host that fits in about 150 to 180 ms at p95 (best runs: 157 and 165 ms with shards, 182 ms without); on a slow one the thread is saturated at 20
+commits a second. The remaining work is in the commit and the view maintenance themselves (hundreds of ORM calls and policy snapshots per second), not in the sends.
+
+### What changed
+
+- **`SocketShardDO`** (`socket-shard.ts`, `shard-router.ts`; the plan's "a workspace that outgrows one object shards ..." applied to fan-out). The Workspace DO stays the single source of
+  truth for writes, subscriptions, windows, presence and visibility; a shard holds a share of the hibernatable sockets and does the `ws.send` loop. Past `SOCKET_LOCAL_MAX`
+  sockets (default 48; small workspaces never leave the object) a dial is forwarded to the least loaded of `SOCKET_SHARDS` shards (0 = off; also `configureShards`, stored in `meta`).
+  Client frames go to the Workspace DO through `shardFrame` (pings are answered by the shard), the Workspace DO sends **one batch per shard per turn** (`push`: `[text, [socket ids]]`
+  entries, so a commit's frame, encoded once, is listed once with the sockets of that shard), and a shard tells it when a socket closed (`shardClosed`). Order: one batch in flight per shard,
+  what accumulates leaves together; one frame in flight per socket from the shard. Hibernation: the shard keeps nothing but the sockets and their attachments (`{ socketId, shard, actor }`);
+  the Workspace DO records its remote sockets in a `shard_socket` table and rebuilds them (and `RemoteSocket` facades with the same surface as a `WebSocket`, so the live loop, the oRPC
+  transport and the access code do not know the difference) when it wakes. Role changes, removals, renames and `resync` reach shard sockets through the same `close` and
+  `serializeAttachment`. The shards are placed in the region the workspace was created with (`init` stores the hint). `wrangler.jsonc` has a `v2` migration with `SocketShardDO`
+  (environments inherit `migrations`; each environment also lists them), `wrangler.test.jsonc` too.
+- **Tests**: `tests/workers/socket/shards.test.ts` (placement, order, closes, role change, removal, oRPC `hello`, hibernation of both sides) and
+  `tests/workers/live/fuzz-shards.test.ts` (the live fuzz with every socket held by 3 shards, evicting the Workspace DO and the shards; 60 seeds passed, the plain fuzz 40).
+  `pnpm exec playwright test` P1 and P3 gates pass with `SOCKET_SHARDS=2 SOCKET_LOCAL_MAX=0` in `.dev.vars` (every socket on a shard).
+- **The policy client is built once per set of actor facts** (`AccessService.governed`; `$as(facts)` snapshots the facts and wraps every model: it was about half of `apply`'s CPU in a
+  local profile) and **a commit's transaction is handed the property registry** (`primeRegistry`: each transaction object is new, so each op read the property table again through the
+  policy's client). In production this took a commit from 10.5 to 9.3 ms (fast host); the local profile had promised more, and a profile taken through the inspector inflates allocation-heavy code.
+- **Fan-outs merge whenever work waits behind the commit**, not only when the governor says overloaded (value-only commits; `mergeCommits`): writes that cluster cost one derivation and one frame per socket.
+  `inside.ts` judges the p95 on the stricter of "frames for exactly this write" and "diff frames including merged ones".
+- Not done: answering the RPC before the fan-out (it would not move the collaborators' latency: the answer and the frames wait for the same storage confirmation); value-only diffs are already
+  one `update` op per cell; heads are already withheld past 64 recipients (the writer's tabs excepted).
+
+### Cold first window
+
+`run.ts` cold probes against staging after this pass: first window p50 593 to 674 ms, max 745 to 997 ms (`dial to open` 530 to 600 ms, `hello to snapshot` 65 ms). The server side of a
+dial (the Worker's event 120 to 150 ms of CPU on a fresh isolate, the object's wake 35 to 66 ms of CPU) is a third of it. The rest is isolates starting: a WebSocket upgrade that the Worker
+answers by itself (`/healthz` with `Upgrade: websocket`, no object involved) takes 335 to 607 ms on staging against 140 to 190 ms for a plain request, and the object's own isolate pays the same
+parse of the same 5.6 MB script when it is cold. A front Worker is excluded, and the script is one bundle (`_user-worker.js` 7.3 MB before minification: 2.9 MB of entasis, 0.5 MB of charts,
+the SvelteKit server and the rest of the rendering of the app, although the app's routes have `ssr = false`). **300 ms from a cold object is not reachable with this script**: even a
+perfect object wake leaves about 350 ms of Worker isolate start-up plus four client round trips. What would get there: a script whose `/ws` path is a few hundred kilobytes (the app's
+server rendering and the Durable Object implementations loaded as separate modules on first use: a change of the build, not of the code), measured at 66 to 100 ms for a 1 KB script in the first pass.
+
 ## Deviations
 
 - The plan expected bitmaps "keyed per (prop, option) ... persisted or rebuilt on wake" for the engine and the live loop: the option index
@@ -303,3 +360,6 @@ delivers 15,000 frames a second to 1,000 tabs with no queue, so the egress budge
 - `roaring-wasm` needs a patch and a build step (above); a package that ships a precompiled-module entry point would not.
 - `engine/sources.ts` (the Databases track's) got the materialized probes; its API is unchanged.
 - Protocol additions: client `visibility`, server `quota`.
+- Fan-out sharding (second pass): the plan shards the property index by type or tag when a workspace outgrows one object; here the object stays whole and only its sockets are sharded
+  (`SocketShardDO`, "Second pass" above), because the measured limit was the delivery of 17,000 frames a second, not the data. Off by default (`SOCKET_SHARDS`), on in staging: it cut the delivery
+  of a bare fan-out by half at p95 but its hop, and the data centers the shards land in, cost as much in the p95 of real writes, so it is not turned on in production.

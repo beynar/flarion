@@ -35,7 +35,7 @@ export {};
 declare namespace Cloudflare {
 	interface GlobalProps {
 		mainModule: typeof import('./worker');
-		durableNamespaces: 'WorkspaceDO' | 'PageDO';
+		durableNamespaces: 'WorkspaceDO' | 'PageDO' | 'SocketShardDO';
 	}
 	interface Env {
 		CACHE: KVNamespace;
@@ -66,6 +66,7 @@ declare namespace Cloudflare {
 		METRICS_DATASET: 'flarion_metrics';
 		WORKSPACE: DurableObjectNamespace<import('./worker').WorkspaceDO>;
 		PAGE: DurableObjectNamespace<import('./worker').PageDO>;
+		SOCKET_SHARD: DurableObjectNamespace<import('./worker').SocketShardDO>;
 		IMPORT: Workflow<
 			Parameters<import('./worker').ImportWorkflow['run']>[0]['payload']
 		>;
