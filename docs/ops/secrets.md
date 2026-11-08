@@ -16,6 +16,11 @@ API-token pepper are Worker secrets, rotated with a two-key overlap."
 | `ANALYTICS_API_TOKEN` | Reading Analytics Engine for the SLO dashboard and alerts | | replace |
 | `ALERT_EMAIL` (secret or var) | Where the alert cron mails | | replace |
 | `ADMIN_KEY`, `LOAD_TEST_KEY` | Recovery routes and the staging load test (`docs/ops/restore.md`, `load-test.md`) | | replace |
+| `ADMIN_EMAILS` (var or secret) | Narrows the SLO dashboard to these people | | replace |
+
+`scripts/deploy.sh` requires the first three secrets of the table (`BETTER_AUTH_SECRET`, `ROOM_TOKEN_KEY`, `API_TOKEN_PEPPER`) and warns about
+the optional ones it does not find, as a secret or as a var in `wrangler.jsonc`: `TURNSTILE_SECRET`, `ADMIN_KEY`, `LOAD_TEST_KEY`,
+`ANALYTICS_API_TOKEN`, `ALERT_EMAIL`, `ADMIN_EMAILS`. The app runs without any of them and says what to set.
 
 A previous key is verified, never signed with. The procedure is the same each time:
 
@@ -85,3 +90,11 @@ scripts only with the nonce, `FILES_ORIGIN` in `img-src`, `media-src` and `conne
 players in `frame-src`, the app's own `ws:`/`wss:` origin in `connect-src`. Published pages (`share/route.ts`) and the API
 reference (`/v1/docs`, which allows the pinned Scalar build on jsDelivr) send their own. A new third-party origin must be
 added to `buildCsp` (and its test), or it is blocked.
+
+`vite dev` relaxes `style-src` (inline `<style>` elements are allowed there), so the policy is checked on the production build:
+`pnpm build && pnpm exec playwright test -c tests/e2e/prod/playwright.config.ts` serves the built Worker with `wrangler dev` over HTTPS
+(`tests/e2e/prod/serve.mjs`: `ENVIRONMENT=staging`, which sends the same policy as production and accepts the local Turnstile test
+secret; user files on another origin) and drives login, the editor, a database, quick find, Ask AI, the share dialog and a published page,
+failing on any `securitypolicyviolation` event or "Refused to" message. It found one: edytor's comments plugin adds a `<style>` to `<head>`
+at run time with no nonce, which production would block (the comment highlight would not paint). `stampStyleNonce()` (`src/lib/client/csp.ts`,
+called by the root layout) now stamps the document's nonce on every `<style>` the page creates.

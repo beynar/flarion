@@ -7,7 +7,8 @@
 	import { plusIcon } from 'entasis/icons/plus';
 	import { caretLeftIcon } from 'entasis/icons/caretLeft';
 	import type { PropertyDef, PropertyType } from '#lib/shared/property-types.ts';
-	import { CREATABLE_TYPES, suggestName, typeLabel } from './helpers.ts';
+	import AiConfigForm from './AiConfigForm.svelte';
+	import { CREATABLE_TYPES, aiConfigValid, aiSourceCandidates, defaultAiConfig, normalizeAiConfig, suggestName, typeLabel, type AiConfig } from './helpers.ts';
 	import { TYPE_ICONS } from './icons.ts';
 
 	/**
@@ -22,9 +23,10 @@
 	}: {
 		/** Registry properties not shown on this page. */
 		existing: readonly PropertyDef[];
-		/** Every property name in the workspace, for the default name of a new one. */
-		names: readonly { name: string }[];
-		onCreate: (type: PropertyType, name: string) => void;
+		/** Every property in the workspace: the default name of a new one, and the sources an AI property can read. */
+		names: readonly Pick<PropertyDef, 'id' | 'name' | 'type'>[];
+		/** `config` is set for types that ask for one (AI); the others start from their defaults. */
+		onCreate: (type: PropertyType, name: string, config?: Record<string, unknown>) => void;
 		onAttach: (def: PropertyDef) => void;
 	} = $props();
 
@@ -32,6 +34,8 @@
 	let search = $state('');
 	let step = $state<{ type: PropertyType } | null>(null);
 	let name = $state('');
+	let aiConfig = $state<AiConfig>(defaultAiConfig());
+	const canCreate = $derived(!!name.trim() && (step?.type !== 'ai' || aiConfigValid(aiConfig)));
 
 	$effect(() => {
 		if (!open) {
@@ -59,11 +63,12 @@
 			const type = value.slice(5) as PropertyType;
 			step = { type };
 			name = suggestName(type, names);
+			aiConfig = defaultAiConfig();
 		}
 	}
 	function create(close: () => void) {
-		if (!step || !name.trim()) return;
-		onCreate(step.type, name.trim());
+		if (!step || !canCreate) return;
+		onCreate(step.type, name.trim(), step.type === 'ai' ? normalizeAiConfig(aiConfig) : undefined);
 		close();
 	}
 </script>
@@ -102,7 +107,10 @@
 					{@render icon({ size: 14 })}
 					{typeLabel(step.type)}
 				</div>
-				<Button type="submit" size="small" disabled={!name.trim()}>Create property</Button>
+				{#if step.type === 'ai'}
+					<AiConfigForm config={aiConfig} candidates={aiSourceCandidates(names)} onChange={(c) => (aiConfig = c)} />
+				{/if}
+				<Button type="submit" size="small" disabled={!canCreate}>Create property</Button>
 			</form>
 		{:else}
 			<div class="w-[260px]" data-testid="add-property-menu">

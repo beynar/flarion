@@ -8,7 +8,8 @@
 	import { trashIcon } from 'entasis/icons/trash';
 	import { focusInput } from '#lib/components/pickers/focus.ts';
 	import type { PropertyDef } from '#lib/shared/property-types.ts';
-	import { NUMBER_FORMATS, typeLabel } from './helpers.ts';
+	import AiConfigForm from './AiConfigForm.svelte';
+	import { NUMBER_FORMATS, aiConfigValid, aiSourceCandidates, normalizeAiConfig, typeLabel, type AiConfig } from './helpers.ts';
 	import { TYPE_ICONS } from './icons.ts';
 
 	/**
@@ -18,12 +19,15 @@
 	let {
 		def,
 		editable,
+		siblings = [],
 		onRename,
 		onConfig,
 		onDelete
 	}: {
 		def: PropertyDef;
 		editable: boolean;
+		/** The workspace's properties: an AI property lists some of them as sources. */
+		siblings?: readonly PropertyDef[];
 		onRename: (name: string) => void;
 		onConfig: (config: Record<string, unknown>) => void;
 		onDelete: () => void;
@@ -33,9 +37,17 @@
 	let draft = $state('');
 	const icon = $derived(TYPE_ICONS[def.type]);
 
+	let aiDraft = $state<AiConfig | null>(null);
+
 	$effect(() => {
 		if (open) {
 			draft = def.name;
+			aiDraft = def.type === 'ai' ? { ...(def.config as AiConfig) } : null;
+		} else if (aiDraft) {
+			// An AI property's settings are written once, when the menu closes: each change makes every row run again.
+			const next = normalizeAiConfig(aiDraft);
+			aiDraft = null;
+			if (aiConfigValid(next) && JSON.stringify(next) !== JSON.stringify(normalizeAiConfig(def.config as AiConfig))) onConfig({ ...next });
 		}
 	});
 
@@ -113,6 +125,10 @@
 							onValueChange={(v) => v && onConfig({ ...def.config, format: v })}
 							triggerAttrs={{ 'data-testid': 'number-format' }}
 						/>
+					{/if}
+					{#if def.type === 'ai' && aiDraft}
+						<AiConfigForm config={aiDraft} candidates={aiSourceCandidates(siblings, def.id)} onChange={(c) => (aiDraft = c)} />
+						<p class="px-1 text-xs text-[color:var(--app-text-tertiary)]">Changing these settings writes every row again.</p>
 					{/if}
 					<Separator />
 					<Button

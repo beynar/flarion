@@ -5,11 +5,13 @@
  */
 import {
 	SELECT_COLORS,
+	aiSourcesOf,
 	defaultConfig,
 	defaultStatusConfig,
 	formatUniqueId,
 	isDateValue,
 	isEmptyValue,
+	type ConfigInputOf,
 	type PropValue,
 	type PropertyDef,
 	type PropertyType,
@@ -51,7 +53,7 @@ export const TYPE_META: Record<PropertyType, TypeMeta> = {
 	last_edited_by: { label: 'Last edited by', creatable: true, readOnly: true },
 	formula: { label: 'Formula', creatable: false, readOnly: true },
 	rollup: { label: 'Rollup', creatable: false, readOnly: true },
-	ai: { label: 'AI', creatable: false, readOnly: true }
+	ai: { label: 'AI', creatable: true, readOnly: true }
 };
 
 export const typeLabel = (type: PropertyType): string => TYPE_META[type].label;
@@ -71,6 +73,7 @@ export const CREATABLE_TYPES: readonly PropertyType[] = [
 	'email',
 	'phone',
 	'relation',
+	'ai',
 	'unique_id',
 	'created_time',
 	'created_by',
@@ -89,11 +92,48 @@ export function shortId(prefix: string, rand: () => number = Math.random): strin
 	return `${prefix}${s}`;
 }
 
-/** A new property of `type` with its default config (a status property gets the three default groups). */
-export function newPropertyDef(type: PropertyType, name: string, id: string = shortId('prop_')): PropertyDef {
-	const config = type === 'status' ? defaultStatusConfig() : defaultConfig(type);
-	return { id, name: name.trim(), type, config } as PropertyDef;
+/**
+ * A new property of `type` with its default config (a status property gets the three default groups, an AI property a
+ * summary), or with `config` when the caller collected one (the AI property's form).
+ */
+export function newPropertyDef(type: PropertyType, name: string, id: string = shortId('prop_'), config?: Record<string, unknown>): PropertyDef {
+	const own = config ?? (type === 'status' ? defaultStatusConfig() : type === 'ai' ? defaultAiConfig() : defaultConfig(type));
+	return { id, name: name.trim(), type, config: own } as PropertyDef;
 }
+
+// ───────────────────────────── AI properties ─────────────────────────────
+
+/** The config as written (the schema's input: `sources` is the legacy name of `sourceProps`, never written). */
+export type AiConfig = ConfigInputOf<'ai'>;
+
+export const AI_KIND_ITEMS: readonly { value: AiConfig['kind']; label: string }[] = [
+	{ value: 'summary', label: 'Summary' },
+	{ value: 'keywords', label: 'Keywords' },
+	{ value: 'translation', label: 'Translation' },
+	{ value: 'custom', label: 'Custom prompt' }
+];
+
+export const defaultAiConfig = (): AiConfig => ({ kind: 'summary', sourceProps: [] });
+
+/** The property types whose values may be quoted to the model (the server's `SOURCE_TYPES`; the title is always sent). */
+const AI_SOURCE_TYPES = new Set<PropertyType>(['text', 'url', 'email', 'phone', 'number', 'select', 'status', 'multi_select', 'date', 'checkbox', 'ai']);
+
+/** The properties an AI property can list as sources: plain values of the page itself, never itself. */
+export const aiSourceCandidates = (defs: readonly Pick<PropertyDef, 'id' | 'name' | 'type'>[], selfId?: string): { id: string; name: string }[] =>
+	defs.filter((d) => d.id !== selfId && AI_SOURCE_TYPES.has(d.type)).map((d) => ({ id: d.id, name: d.name }));
+
+/** A config as the form edits it, reduced to what its kind reads (a stale prompt is not kept on a summary). */
+export function normalizeAiConfig(config: AiConfig): AiConfig {
+	const out: AiConfig = { kind: config.kind, sourceProps: [...aiSourcesOf({ sourceProps: config.sourceProps, sources: config.sources })] };
+	const language = config.language?.trim();
+	const prompt = config.prompt?.trim();
+	if (config.kind === 'translation' && language) out.language = language;
+	if (config.kind === 'custom' && prompt) out.prompt = prompt;
+	return out;
+}
+
+/** A custom prompt needs its prompt; every other kind is complete as it is (a translation falls back to English). */
+export const aiConfigValid = (config: AiConfig): boolean => config.kind !== 'custom' || !!config.prompt?.trim();
 
 /** The name a new property starts with: its type label, made unique among `existing`. */
 export function suggestName(type: PropertyType, existing: readonly { name: string }[]): string {

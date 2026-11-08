@@ -109,8 +109,8 @@
 		void env.updateView({ columns: { columns: withColumnShown(env.view, env.collection, env.properties, prop, false), options: env.view.columns.options } }).catch(() => undefined);
 	}
 
-	function addProperty(type: PropertyType, name: string) {
-		const def = newPropertyDef(type, name);
+	function addProperty(type: PropertyType, name: string, config?: Record<string, unknown>) {
+		const def = newPropertyDef(type, name, undefined, config);
 		void (async () => {
 			try {
 				await env.store.createProperty(def);

@@ -1,6 +1,7 @@
 import type { WorkerScheduled } from 'sveltekit-cloudflare-worker';
 import { drainOutbox, pruneOutbox, reconcileMemberships } from './auth/outbox';
 import { SWEEP_CRON, sweepUncommittedUploads } from './files/sweep';
+import { sweepExports } from './export/sweep';
 import { ALERT_CRON, evaluateAlerts } from './admin/alerts';
 import { reconcileGuests } from './share/guests';
 import { reconcilePublicShares } from './share/public-links';
@@ -8,7 +9,7 @@ import { startPurgeWorkflows } from './workflows/purge';
 import { startBackupWorkflows } from './workflows/backup';
 import { finishPendingRestores } from './backup/restore';
 
-/** "0 3 * * *": daily purge + nightly reconcile/backups. "0 4 * * SUN": weekly upload sweep. */
+/** "0 3 * * *": daily purge + nightly reconcile/backups. "0 4 * * SUN": weekly upload sweep and export retention. */
 export const NIGHTLY_CRON = '0 3 * * *';
 
 type Env = App.Platform['env'];
@@ -62,5 +63,13 @@ export const scheduled: WorkerScheduled<Env> = async (controller, env, ctx) => {
 				.catch((error) => console.error('[cron] alerts failed:', error instanceof Error ? (error.stack ?? error.message) : error))
 		);
 	}
-	if (controller.cron === SWEEP_CRON) ctx.waitUntil(sweepUncommittedUploads(env).then((r) => console.log('[cron] upload sweep:', JSON.stringify(r))));
+	if (controller.cron === SWEEP_CRON) {
+		ctx.waitUntil(sweepUncommittedUploads(env).then((r) => console.log('[cron] upload sweep:', JSON.stringify(r))));
+		// Finished export archives are kept 7 days (the job record's TTL): then the zip goes.
+		ctx.waitUntil(
+			sweepExports(env)
+				.then((r) => console.log('[cron] export sweep:', JSON.stringify(r)))
+				.catch((error) => console.error('[cron] export sweep failed:', error instanceof Error ? (error.stack ?? error.message) : error))
+		);
+	}
 };

@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import {
 	CREATABLE_TYPES,
+	aiConfigValid,
+	aiSourceCandidates,
+	defaultAiConfig,
+	normalizeAiConfig,
 	TYPE_META,
 	calendarDate,
 	composeDate,
@@ -50,6 +54,32 @@ describe('type catalogue', () => {
 		const status = newPropertyDef('status', 'Stage');
 		expect(optionsOf(status).map((o) => o.id)).toEqual(['not_started', 'in_progress', 'done']);
 		expect(parsePropertyConfig('status', status.config).ok).toBe(true);
+	});
+
+	it('offers the AI type with a config of its own', () => {
+		expect(CREATABLE_TYPES).toContain('ai');
+		const def = newPropertyDef('ai', 'Summary');
+		expect(def.config).toEqual(defaultAiConfig());
+		const custom = newPropertyDef('ai', 'Pitch', 'prop_pitch', normalizeAiConfig({ kind: 'custom', prompt: ' One line pitch ', language: 'French', sourceProps: ['prop_a'] }));
+		expect(custom.config).toEqual({ kind: 'custom', prompt: 'One line pitch', sourceProps: ['prop_a'] });
+		expect(parsePropertyConfig('ai', custom.config).ok).toBe(true);
+		// A kind keeps only what it reads; the legacy `sources` name is read, written as `sourceProps`.
+		expect(normalizeAiConfig({ kind: 'translation', language: ' Spanish ', prompt: 'x', sources: ['prop_b'] })).toEqual({ kind: 'translation', language: 'Spanish', sourceProps: ['prop_b'] });
+		expect(aiConfigValid({ kind: 'custom', prompt: '  ' })).toBe(false);
+		expect(aiConfigValid({ kind: 'custom', prompt: 'Go' })).toBe(true);
+		expect(aiConfigValid({ kind: 'translation' })).toBe(true);
+	});
+
+	it('lists as AI sources the plain properties of the page, never itself, relations or rollups', () => {
+		const defs = [
+			{ id: 'a', name: 'Notes', type: 'text' },
+			{ id: 'b', name: 'Related', type: 'relation' },
+			{ id: 'c', name: 'Total', type: 'rollup' },
+			{ id: 'd', name: 'Summary', type: 'ai' },
+			{ id: 'e', name: 'Stage', type: 'status' }
+		] as const;
+		expect(aiSourceCandidates(defs, 'd').map((d) => d.id)).toEqual(['a', 'e']);
+		expect(aiSourceCandidates(defs).map((d) => d.id)).toEqual(['a', 'd', 'e']);
 	});
 
 	it('suggests a unique name', () => {

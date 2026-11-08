@@ -4,9 +4,12 @@
 	import { Toaster } from 'entasis/toast';
 	import { setButtonTheme } from 'entasis/button';
 	import { designTokens } from '#lib/design/generated/design-tokens.ts';
-	import { cspNonce } from '#lib/client/csp.ts';
+	import { cspNonce, stampStyleNonce } from '#lib/client/csp.ts';
 
 	let { children } = $props();
+
+	// Run-time stylesheets of libraries (edytor's comment highlight) need the document's nonce under the production policy.
+	stampStyleNonce();
 
 	// Notion's buttons are 28px (24px small). entasis shares `--control-height-*` between buttons
 	// and inputs (32px), so the button height is a component override that reads the token variable.

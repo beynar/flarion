@@ -1449,9 +1449,18 @@ export class WorkspaceDO extends DurableObject<Env> {
 		await aiFailed(this.#db, propId, pageId, Date.now());
 	}
 
-	/** Whether each AI property of these pages waits for the model (`pending`) or kept an old value (`stale`). */
-	async aiPropertyMarkers(pageIds: string[]): Promise<AiMarker[]> {
-		return readAiMarkers(this.#db, pageIds);
+	/**
+	 * Whether each AI property of these pages waits for the model (`pending`) or kept an old value (`stale`). With an
+	 * `actor` (the `ai.markers` call) the pages must be ones they can read; others are left out.
+	 */
+	async aiPropertyMarkers(pageIds: string[], options: { actor?: Actor } = {}): Promise<AiMarker[]> {
+		let ids = pageIds;
+		if (options.actor) {
+			const allowed: string[] = [];
+			for (const id of pageIds) if (await this.#access.pageAccess(options.actor, id)) allowed.push(id);
+			ids = allowed;
+		}
+		return readAiMarkers(this.#db, ids);
 	}
 
 	// ───────────────────────── CSV imports (Databases track, see ../../import) ─────────────────────────

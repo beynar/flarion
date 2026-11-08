@@ -74,10 +74,14 @@
 		if (!popoverOpen) view = 'pick';
 	});
 
-	/** Opens the editor of this cell. */
+	/**
+	 * Opens the editor of this cell. Idempotent: the panel calls it for a property just created, which can land after the
+	 * user already opened the cell (a second `startEditing` would reset what they typed).
+	 */
 	export async function open() {
 		if (!canEdit) return;
 		if (type === 'checkbox') return;
+		if (editing || popoverOpen) return;
 		if (inline) startEditing();
 		else popoverOpen = true;
 		await tick();

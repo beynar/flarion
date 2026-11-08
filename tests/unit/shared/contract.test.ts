@@ -113,7 +113,8 @@ describe('private contract: routers of the plan', () => {
 					yield { type: 'done' as const };
 				}),
 				ask: {} as never,
-				regenerate: {} as never
+				regenerate: {} as never,
+				markers: {} as never
 			},
 			files: {} as never,
 			import: {} as never,

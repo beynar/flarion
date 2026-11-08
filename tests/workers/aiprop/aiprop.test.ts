@@ -238,6 +238,14 @@ describe('ai.regenerate', () => {
 		await expect(regenerateAiProperty(context(ws), { pageId: 'nope', propId: AI }, recorder().model)).rejects.toThrow();
 	});
 
+	it('markers for a caller leave out pages they cannot read', async () => {
+		const ws = await world('ai-markers-access');
+		const stranger = actorOf(ws.id, 'nobody-here', 'guest');
+		await ws.stub.syncMember({ userId: stranger.userId, role: 'guest', name: 'Guest' });
+		expect((await ws.stub.aiPropertyMarkers(['a', 'b'], { actor: ws.owner })).map((m) => [m.pageId, m.pending])).toEqual([['a', true], ['b', true]]);
+		expect(await ws.stub.aiPropertyMarkers(['a', 'b'], { actor: stranger })).toEqual([]);
+	});
+
 	it('writes a computed value that formulas can read', async () => {
 		const ws = await world('ai-formula');
 		await ws.stub.apply(ws.owner, batch([{ op: 'createProperty', property: { id: 'len', name: 'Summary length', type: 'formula', config: { expression: 'length(prop("Summary"))', resultType: 'number' } } as never }]));

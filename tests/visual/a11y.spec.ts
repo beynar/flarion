@@ -13,27 +13,13 @@ import { reach, SCREENS, type Screen } from './screens';
 
 const TAGS = ['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa', 'wcag22aa'];
 
-/**
- * The one known exception: the sidebar's page tree. Its rows hold buttons (expand, more, add) beside the `treeitem` link, which
- * axe's `aria-required-children` reads as foreign children of the `tree`. The pattern that satisfies it (a treegrid, or the row
- * as the treeitem) would drop `role="treeitem"` from the links, which the other suites select by (`getByRole('treeitem')`), and
- * entasis' own `Tree` cannot do ids, drag and drop or lazy children (docs/audits/entasis-audit.md section 5). Everything else in
- * the sidebar is still audited, and so is every other node this rule reports.
- */
-const isSidebarTree = (target: string) => /^section\[aria-label="(Teamspaces|Shared|Private)"\] > \.list-none/.test(target);
-
 async function audit(page: import('@playwright/test').Page, withContrast: boolean) {
 	// Some names are set a moment after the content (an editor's to-do labels): let them land.
 	await page.waitForTimeout(800);
 	const builder = new AxeBuilder({ page }).withTags(TAGS);
 	if (!withContrast) builder.disableRules(['color-contrast']);
 	const { violations } = await builder.analyze();
-	return violations
-		.map((violation) =>
-			violation.id === 'aria-required-children' ? { ...violation, nodes: violation.nodes.filter((node) => !isSidebarTree(node.target.join(' '))) } : violation
-		)
-		.filter((violation) => violation.nodes.length > 0)
-		.map((violation) => ({
+	return violations.map((violation) => ({
 		rule: violation.id,
 		impact: violation.impact,
 		help: violation.help,

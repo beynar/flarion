@@ -195,7 +195,7 @@ itself on `E2E_PORT` and reuses when one is already there. Three Playwright conf
   and RPCs (`seed.ts`: two people, a teamspace, a database with six views, a published page, trash), then `screens.spec.ts` compares
   **20 screens x 2 themes** (`__screenshots__/<screen>-<theme>.png`), `metrics.spec.ts` asserts computed row heights, font sizes and radii
   equal `notion.tokens.ts`, `a11y.spec.ts` runs axe (WCAG 2.0-2.2 A/AA) on the same 20 screens in both themes, with all rules in High
-  contrast and every rule but `color-contrast` in Standard (the one exception: the sidebar's page tree, see the spec's header), and
+  contrast and every rule but `color-contrast` in Standard (no other exception: the sidebar's page tree is `tree` > row `group` > `treeitem`, so its buttons are legal), and
   `mobile.spec.ts` checks the phone layout (390px, touch) and photographs 8 phone screens (`mobile-*-light.png`, in addition to the 40). Rendering is pinned (bundled Inter, clock at 2026-11-15 UTC, reduced motion, no
   caret, masks over times and ids); the baselines were made with Chromium on macOS, so regenerate them on another platform.
   Commands: `E2E_PORT=5873 pnpm test:visual` (all), `... pnpm test:visual screens|metrics|a11y` (one), `pnpm test:visual:update` (rewrite the
@@ -203,3 +203,18 @@ itself on `E2E_PORT` and reuses when one is already there. Three Playwright conf
   after the last `pnpm add` (a stale Vite cache answers `504 Outdated Optimize Dep`).
 - **Phones** (< 768px): the sidebar is an overlay (entasis `Sidebar` offcanvas), dialogs collapse to bottom sheets (entasis `Dialog`), the Ask
   AI panel is full screen, the table scrolls sideways, the board snaps column by column.
+
+## Integration notes (P4 integration)
+- **Production CSP is checked on the built Worker**, not under `vite dev`: `pnpm build` then
+  `PROD_PORT=8790 pnpm exec playwright test -c tests/e2e/prod/playwright.config.ts` (`wrangler dev`, HTTPS, `ENVIRONMENT=staging`; see docs/ops/secrets.md).
+  Libraries that add `<style>` elements at run time get the nonce from `stampStyleNonce()` (`#lib/client/csp.ts`, root layout).
+- **AI properties in the UI**: `ai` is in "Add a property" with its settings (`AiConfigForm.svelte`: kind, language, prompt, source properties; also in the
+  property's own menu, written when it closes since every change recomputes every row). `AiPropertyStatus.svelte` shows "Outdated"/"Updating" from the
+  new `ai.markers` call (pending and stale markers of one page, readable pages only) and a "Regenerate" button (`ai.regenerate`). There is no push for
+  markers: they are read on open, on a value change and after a regenerate, and re-read every 35 s (at most 8 times) while a change is pending.
+- **Export zips are kept 7 days**: the weekly cron (`0 4 * * SUN`) runs `sweepExports` (`server/export/sweep.ts`) over `exports/` in R2.
+- **Sidebar tree ARIA** (axe-clean, no exception): `tree` > `li role=none` > row > `div role=treeitem tabindex=0` that holds the buttons, the
+  page link (`tabindex=-1`, Enter on the item follows it) and the actions; children are a `role=group` list. The buttons are 24 px targets with a
+  -2px margin (WCAG 2.5.8). Tests still select `getByRole('treeitem')` inside `tree-row`.
+- **A new property opens its own editor** (`PropertiesPanel` focuses it): tests wait for that editor instead of clicking the cell, and
+  `PropertyEditor.open()` is idempotent. A click that lands after the auto-open used to close the select popover (the old `p2-app` flake under load).

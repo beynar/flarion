@@ -316,7 +316,7 @@
 			void nudge(id, event.key === 'ArrowUp' ? -1 : 1);
 		} else if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
 			event.preventDefault();
-			const items = [...(nav?.querySelectorAll<HTMLElement>('[role="treeitem"]') ?? [])];
+			const items = [...(nav?.querySelectorAll<HTMLElement>('[data-page-id] [role="treeitem"]') ?? [])];
 			items[items.indexOf(el) + (event.key === 'ArrowDown' ? 1 : -1)]?.focus();
 		} else if (event.key === 'ArrowRight' && store.page(id)?.hasChildren) {
 			event.preventDefault();
@@ -327,6 +327,10 @@
 		} else if (event.key === 'F2') {
 			event.preventDefault();
 			startRename(id);
+		} else if (event.key === 'Enter') {
+			// The item holds the link (out of the tab order): Enter follows it.
+			event.preventDefault();
+			row.querySelector<HTMLAnchorElement>('a[data-testid="tree-link"]')?.click();
 		}
 	}
 </script>
@@ -337,7 +341,7 @@
 		color="neutral"
 		size="small"
 		squared
-		class="size-5! min-h-0! shrink-0 rounded-[4px] p-0! text-[color:var(--app-text-tertiary)]"
+		class="size-6! -mx-0.5 min-h-0! shrink-0 rounded-[4px] p-0! text-[color:var(--app-text-tertiary)]"
 		tip={store.canEdit ? label : 'Offline: pages can be added when you reconnect'}
 		{label}
 		position="bottom"
@@ -357,7 +361,7 @@
 		color="neutral"
 		size="small"
 		squared
-		class="size-5! min-h-0! shrink-0 rounded-[4px] p-0! text-[color:var(--app-text-tertiary)]"
+		class="size-6! -mx-0.5 min-h-0! shrink-0 rounded-[4px] p-0! text-[color:var(--app-text-tertiary)]"
 		tip="Delete, duplicate and more"
 		{label}
 		position="bottom"
@@ -396,9 +400,16 @@
 	{@const active = page.id === activeId}
 	{@const mark = drop?.id === page.id && drop.ok ? drop : null}
 	<li role="none">
+		<!--
+			axe's `aria-required-children` lets a `tree` own nothing but `treeitem`s (groups and role-less boxes are looked
+			through), so the row's expand, "more" and "add" buttons must sit inside a treeitem. The treeitem is therefore the
+			box that holds the whole row content (`tabindex="0"`, the keyboard target: arrows, F2, Enter, Shift+F10), and the page link
+			inside it is a plain link out of the tab order (Enter on the item follows it). The row's buttons are 24 px targets with a -2px
+			margin (WCAG 2.5.8 weighs them against the treeitem around them), so the row keeps its 20 px rhythm. The children list below is a `group`.
+		-->
 		<!-- svelte-ignore a11y_no_static_element_interactions -->
 		<div
-			class="group/row relative flex items-center gap-0.5 rounded-[var(--app-radius-control)] pr-1 text-[color:var(--app-text-sidebar)] hover:bg-[color:var(--app-hover)] {active
+			class="group/row relative flex items-center rounded-[var(--app-radius-control)] pr-1 text-[color:var(--app-text-sidebar)] hover:bg-[color:var(--app-hover)] {active
 				? 'bg-[color:var(--app-active)] text-[color:var(--app-text)]'
 				: ''} {dragId === page.id ? 'opacity-40' : ''}"
 			style="height: var(--app-row-height); padding-left: {pad(depth)}"
@@ -407,63 +418,74 @@
 			use:pageRow={{ id: page.id, onDragStart: () => (dragId = page.id), onDragEnd: () => (dragId = null) }}
 		>
 			{#if mark}{@render indicator(mark, depth)}{/if}
-			{#if page.hasChildren}
-				<Button
-					variant="ghost"
-					color="neutral"
-					size="small"
-					squared
-					class="size-5! min-h-0! shrink-0 rounded-[4px] p-0! text-[color:var(--app-text-tertiary)]"
-					label={state === 'collapsed' ? `Expand ${page.title || 'Untitled'}` : `Collapse ${page.title || 'Untitled'}`}
-					expanded={state !== 'collapsed'}
-					onclick={() => store.toggle(page.id)}
-				>
-					<span class="transition-transform duration-100 {state !== 'collapsed' ? 'rotate-90' : ''}">
-						{@render caretRightIcon({ size: 12 })}
+			<!-- svelte-ignore a11y_no_noninteractive_tabindex -->
+			<div
+				role="treeitem"
+				tabindex="0"
+				aria-label={page.title || 'Untitled'}
+				aria-level={depth + 1}
+				aria-expanded={page.hasChildren ? state !== 'collapsed' : undefined}
+				aria-selected={active}
+				aria-current={active ? 'page' : undefined}
+				class="flex h-full min-w-0 flex-1 items-center gap-0.5 rounded-[var(--app-radius-control)] outline-offset-[-2px] focus-visible:outline-2 focus-visible:outline-[color:var(--app-accent)]"
+			>
+				{#if page.hasChildren}
+					<Button
+						variant="ghost"
+						color="neutral"
+						size="small"
+						squared
+						class="size-6! -mx-0.5 min-h-0! shrink-0 rounded-[4px] p-0! text-[color:var(--app-text-tertiary)]"
+						label={state === 'collapsed' ? `Expand ${page.title || 'Untitled'}` : `Collapse ${page.title || 'Untitled'}`}
+						expanded={state !== 'collapsed'}
+						onclick={() => store.toggle(page.id)}
+					>
+						<span class="transition-transform duration-100 {state !== 'collapsed' ? 'rotate-90' : ''}">
+							{@render caretRightIcon({ size: 12 })}
+						</span>
+					</Button>
+				{:else}
+					<span class="size-5 shrink-0" aria-hidden="true"></span>
+				{/if}
+				{#if renamingId === page.id}
+					<span class="flex h-full min-w-0 flex-1 items-center gap-1.5">
+						{@render pageIcon(page)}
+						<div class="min-w-0 flex-1" {@attach focusInput}>
+							<TextInput
+								size="small"
+								bind:value={renameValue}
+								theme={{ inputContainer: { base: 'h-5! min-h-0! rounded-[3px]! border-[color:var(--app-accent)]! bg-[color:var(--app-page)]! px-1!' } }}
+								inputAttrs={{
+									'aria-label': 'Page name',
+									'data-testid': 'tree-rename',
+									onblur: commitRename,
+									onkeydown: (e) => {
+										if (e.key === 'Enter') commitRename();
+										else if (e.key === 'Escape') renamingId = null;
+									}
+								}}
+							/>
+						</div>
 					</span>
-				</Button>
-			{:else}
-				<span class="size-5 shrink-0" aria-hidden="true"></span>
-			{/if}
-			{#if renamingId === page.id}
-				<span class="flex h-full min-w-0 flex-1 items-center gap-1.5">
-					{@render pageIcon(page)}
-					<div class="min-w-0 flex-1" {@attach focusInput}>
-						<TextInput
-							size="small"
-							bind:value={renameValue}
-							theme={{ inputContainer: { base: 'h-5! min-h-0! rounded-[3px]! border-[color:var(--app-accent)]! bg-[color:var(--app-page)]! px-1!' } }}
-							inputAttrs={{
-								'aria-label': 'Page name',
-								'data-testid': 'tree-rename',
-								onblur: commitRename,
-								onkeydown: (e) => {
-									if (e.key === 'Enter') commitRename();
-									else if (e.key === 'Escape') renamingId = null;
-								}
-							}}
-						/>
-					</div>
+				{:else}
+					<a
+						href={`/${ws}/${page.id}`}
+						tabindex="-1"
+						draggable="false"
+						class="flex h-full min-w-0 flex-1 items-center gap-1.5 text-sm no-underline"
+						style="color: inherit"
+						data-testid="tree-link"
+					>
+						{@render pageIcon(page)}
+						<span class="truncate {page.title ? '' : 'text-[color:var(--app-text-tertiary)]'}" data-testid="tree-title">{page.title || 'Untitled'}</span>
+					</a>
+				{/if}
+				<PresenceAvatars users={store.othersOn(page.id)} max={2} size="tiny" />
+				<span class="hidden items-center group-hover/row:flex group-focus-within/row:flex [@media(hover:none)]:flex">
+					{@render more(`More actions for ${page.title || 'Untitled'}`, { kind: 'page', id: page.id })}
+					{@render add(`Add a page inside ${page.title || 'Untitled'}`, { parentId: page.id })}
 				</span>
-			{:else}
-				<a
-					href={`/${ws}/${page.id}`}
-					role="treeitem"
-					aria-selected={active}
-					aria-current={active ? 'page' : undefined}
-					draggable="false"
-					class="flex h-full min-w-0 flex-1 items-center gap-1.5 text-sm no-underline"
-					style="color: inherit"
-				>
-					{@render pageIcon(page)}
-					<span class="truncate {page.title ? '' : 'text-[color:var(--app-text-tertiary)]'}" data-testid="tree-title">{page.title || 'Untitled'}</span>
-				</a>
-			{/if}
-			<PresenceAvatars users={store.othersOn(page.id)} max={2} size="tiny" />
-			<span class="hidden items-center group-hover/row:flex group-focus-within/row:flex [@media(hover:none)]:flex">
-				{@render more(`More actions for ${page.title || 'Untitled'}`, { kind: 'page', id: page.id })}
-				{@render add(`Add a page inside ${page.title || 'Untitled'}`, { parentId: page.id })}
-			</span>
+			</div>
 		</div>
 		{#if state !== 'collapsed'}
 			<ul role="group" class="m-0 list-none p-0">
@@ -471,6 +493,7 @@
 					{@render node(child, depth + 1)}
 				{:else}
 					<li
+						role="none"
 						class="flex items-center text-xs text-[color:var(--app-text-tertiary)]"
 						style="height: var(--app-row-height); padding-left: {pad(depth + 1)}"
 					>
@@ -555,8 +578,15 @@
 						{@const roots = store.teamspaceRoots(ts.id)}
 						{@const key = `ts:${ts.id}`}
 						<li role="none" data-testid="teamspace" data-teamspace-id={ts.id}>
-							<!-- svelte-ignore a11y_no_static_element_interactions -->
+							<!-- The header is the teamspace's treeitem (its buttons must sit inside one, see the page rows). -->
+							<!-- svelte-ignore a11y_no_noninteractive_tabindex -->
 							<div
+								role="treeitem"
+								tabindex="-1"
+								aria-label={ts.name}
+								aria-level="1"
+								aria-expanded={open(key)}
+								aria-selected="false"
 								class="group/ts relative flex items-center gap-0.5 rounded-[var(--app-radius-control)] pr-1 text-[color:var(--app-text-sidebar)] hover:bg-[color:var(--app-hover)] {sectionDrop?.key === key && sectionDrop.ok ? 'bg-[color:var(--app-active)]' : ''}"
 								style="height: var(--app-row-height); padding-left: 6px; {sectionDrop?.key === key && sectionDrop.ok ? 'box-shadow: inset 0 0 0 2px var(--app-accent)' : ''}"
 								data-testid="section-header"
@@ -589,7 +619,7 @@
 									{#each roots as page (page.id)}
 										{@render node(page, 1)}
 									{:else}
-										<li class="flex items-center text-xs text-[color:var(--app-text-tertiary)]" style="height: var(--app-row-height); padding-left: {pad(1)}">
+										<li role="none" class="flex items-center text-xs text-[color:var(--app-text-tertiary)]" style="height: var(--app-row-height); padding-left: {pad(1)}">
 											<span class="ml-6">No pages yet</span>
 										</li>
 									{/each}
@@ -597,7 +627,7 @@
 							{/if}
 						</li>
 					{:else}
-						<li class="px-2 text-xs text-[color:var(--app-text-tertiary)]" style="line-height: var(--app-row-height)">
+						<li role="treeitem" aria-level="1" aria-selected="false" aria-label="Join or create a teamspace" class="px-2 text-xs text-[color:var(--app-text-tertiary)]" style="line-height: var(--app-row-height)">
 							<a href={`/${ws}/settings/teamspaces`} class="no-underline hover:text-[color:var(--app-text-secondary)]" style="color: inherit">Join or create a teamspace</a>
 						</li>
 					{/each}
@@ -628,7 +658,7 @@
 					{#each mine as page (page.id)}
 						{@render node(page, 0)}
 					{:else}
-						<li class="px-2 text-xs text-[color:var(--app-text-tertiary)]" style="line-height: var(--app-row-height)">
+						<li role="none" class="px-2 text-xs text-[color:var(--app-text-tertiary)]" style="line-height: var(--app-row-height)">
 							Nothing here yet. Add a page with +.
 						</li>
 					{/each}

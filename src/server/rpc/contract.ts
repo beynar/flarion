@@ -49,6 +49,8 @@ import { pageRowSchema } from '../../lib/shared/protocol';
 import {
 	aiAskEventSchema,
 	aiAskInputSchema,
+	aiMarkersInputSchema,
+	aiMarkersOutputSchema,
 	aiRegenerateInputSchema,
 	aiWriteEventSchema,
 	aiWriteInputSchema,
@@ -263,7 +265,9 @@ const aiRouter = {
 	/** Streams an answer drawn from pages the caller may read. */
 	ask: priv.input(aiAskInputSchema).output(eventIterator(aiAskEventSchema)),
 	/** Re-runs an AI property on a page. */
-	regenerate: priv.input(aiRegenerateInputSchema).output(seqSchema)
+	regenerate: priv.input(aiRegenerateInputSchema).output(seqSchema),
+	/** The pending and stale markers of a page's AI properties (the page must be readable). */
+	markers: priv.input(aiMarkersInputSchema).output(aiMarkersOutputSchema)
 };
 
 const filesRouter = {

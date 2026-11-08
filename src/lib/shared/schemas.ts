@@ -384,6 +384,10 @@ export const aiAskEventSchema = v.variant('type', [
 export type AiAskEvent = v.InferOutput<typeof aiAskEventSchema>;
 export const aiRegenerateInputSchema = v.object({ pageId: idSchema, propId: idSchema });
 
+/** Where each AI property of a page stands: `pending` (a change waits for the model), `stale` (the last attempt failed, the old value shows). */
+export const aiMarkersInputSchema = v.object({ pageId: idSchema });
+export const aiMarkersOutputSchema = v.array(v.object({ propId: idSchema, pending: v.boolean(), stale: v.boolean() }));
+
 // ───────────────────────────── files ─────────────────────────────
 
 export const fileBeginInputSchema = v.object({

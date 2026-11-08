@@ -62,12 +62,23 @@ breach is only logged) through the same mail interface as invites. A signal that
 Thresholds are `THRESHOLDS` in `src/server/admin/slo.ts`. The "page above 80%" signal is also what the app shows its
 writers (the Page DO enforces the 16 MiB quota).
 
+## Cron triggers (`src/server/scheduled.ts`)
+
+| Cron | Runs |
+| --- | --- |
+| `0 3 * * *` | Outbox drain, membership and share reconcile, outbox prune, the purge Workflows (trash older than 30 days), the nightly backup Workflows and the pending-restore safety net |
+| `0 4 * * SUN` | Upload sweep (uploads begun more than a day ago and never committed) and the **export sweep**: everything under `exports/` in the files bucket older than 7 days, finished zips and the scratch parts of failed runs (`src/server/export/sweep.ts`; 7 days is also the TTL of the job record in KV, so a link never outlives its record) |
+| `*/5 * * * *` | The alert evaluation above |
+
+Each job logs one `[cron] <name>:` line with its counts (Workers Logs).
+
 ## Tail Worker (errors)
 
 `workers/tail/` is a second small Worker with its own `wrangler.jsonc`. The main Worker lists it in `tail_consumers`
 (staging: `flarion-tail-staging`; production: `flarion-tail`; not in local dev). For every invocation that failed (an
 uncaught exception, `exceededCpu`, `exceededMemory`, an `error` log) it writes an `error` data point to the same dataset
-and one JSON log line. Deploy it **before** the main Worker (a `tail_consumers` entry must name a Worker that exists):
+and one JSON log line. Deploy it **before** the main Worker (a `tail_consumers` entry must name a Worker that exists);
+`scripts/deploy.sh` does it as the step before the main deploy (`--skip-tail` to leave it out), by hand:
 
 ```bash
 npx wrangler deploy -c workers/tail/wrangler.jsonc --env staging

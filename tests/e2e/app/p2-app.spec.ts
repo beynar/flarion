@@ -218,14 +218,15 @@ test('a property is created, values are set, and a second user sees them live', 
 	await expect(bob.page.getByTestId('page-title')).toHaveValue('Gamma');
 
 	const panel = page.getByTestId('page-properties');
+	// A new property opens its own editor (the panel focuses what it just created), so each step waits for that editor
+	// and types into it instead of clicking the cell: a click that lands after the auto-open would close a popover.
 	// A number property.
 	await page.getByTestId('add-property').click();
 	await page.getByRole('option', { name: 'Number' }).first().click();
 	await page.getByLabel('Property name').fill('Points');
 	await page.getByRole('button', { name: 'Create property' }).click();
 	const points = panel.getByTestId('property-row').filter({ hasText: 'Points' });
-	await expect(points).toBeVisible();
-	await points.getByTestId('property-value').click();
+	await expect(points.getByRole('spinbutton', { name: 'Points' })).toBeFocused();
 	await page.keyboard.type('42');
 	await page.keyboard.press('Enter');
 	await expect(points.getByTestId('property-value')).toContainText('42');
@@ -236,8 +237,6 @@ test('a property is created, values are set, and a second user sees them live', 
 	await page.getByLabel('Property name').fill('Priority');
 	await page.getByRole('button', { name: 'Create property' }).click();
 	const priority = panel.getByTestId('property-row').filter({ hasText: 'Priority' });
-	await expect(priority).toBeVisible();
-	await priority.getByTestId('property-value').click();
 	await page.getByPlaceholder('Search or create an option…').fill('High');
 	await page.keyboard.press('Enter');
 	await expect(priority.getByTestId('property-value')).toContainText('High');
@@ -249,7 +248,7 @@ test('a property is created, values are set, and a second user sees them live', 
 	await page.getByLabel('Property name').fill('Notes');
 	await page.getByRole('button', { name: 'Create property' }).click();
 	const notes = panel.getByTestId('property-row').filter({ hasText: 'Notes' });
-	await notes.getByTestId('property-value').click();
+	await expect(notes.getByRole('textbox', { name: 'Notes' })).toBeFocused();
 	await page.keyboard.type('Ship it');
 	await page.keyboard.press('Enter');
 	await expect(notes.getByTestId('property-value')).toContainText('Ship it');

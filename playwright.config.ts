@@ -17,7 +17,7 @@ export default defineConfig({
 	// Per suite and port: concurrent runs (distinct ports) must not clean each other's traces and screenshots.
 	outputDir: `test-results/root-${port}`,
 	testDir: './tests/e2e',
-	testIgnore: ['**/editor/**', '**/app/**'], // the Editor and App UI tracks have their own configs (tests/e2e/{editor,app}/playwright.config.ts)
+	testIgnore: ['**/editor/**', '**/app/**', '**/prod/**'], // the Editor and App UI tracks and the production-build CSP check have their own configs (tests/e2e/{editor,app,prod}/playwright.config.ts)
 	globalSetup: './tests/e2e/global-setup.ts',
 	timeout: 90_000,
 	expect: { timeout: 15_000 },

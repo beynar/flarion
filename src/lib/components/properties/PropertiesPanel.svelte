@@ -7,6 +7,7 @@
 	import type { PageEntity, WorkspaceStore } from '#lib/client/workspace.svelte.ts';
 	import type { PropValue, PropertyDef, PropertyType } from '#lib/shared/property-types.ts';
 	import AddProperty from './AddProperty.svelte';
+	import AiPropertyStatus from './AiPropertyStatus.svelte';
 	import PropertyEditor from './PropertyEditor.svelte';
 	import PropertyLabel from './PropertyLabel.svelte';
 	import {
@@ -160,8 +161,8 @@
 		}
 	}
 
-	function createProperty(type: PropertyType, name: string) {
-		const def = newPropertyDef(type, name);
+	function createProperty(type: PropertyType, name: string, config?: Record<string, unknown>) {
+		const def = newPropertyDef(type, name, undefined, config);
 		pinned.add(def.id);
 		focusId = def.id;
 		quiet(store.createProperty(def));
@@ -181,6 +182,7 @@
 			<div class="flex items-start gap-2" style="min-height: var(--app-property-row-height); padding-block: 3px" data-testid="property-row" data-property-id={def.id} data-type={def.type}>
 				<PropertyLabel
 					{def}
+					siblings={store.properties}
 					editable={editable && def.type !== 'unique_id'}
 					onRename={(name) => quiet(store.updateProperty(def.id, { name }))}
 					onConfig={(config) => quiet(store.updateProperty(def.id, { config }))}
@@ -201,6 +203,9 @@
 					onCreateOption={createOption}
 					onUpload={upload}
 				/>
+				{#if def.type === 'ai'}
+					<AiPropertyStatus pageId={page.id} propId={def.id} {value} {editable} />
+				{/if}
 			</div>
 		{/each}
 
