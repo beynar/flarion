@@ -1,44 +1,19 @@
-// After `vite build`: puts the roaring WebAssembly module next to the built Worker so wrangler uploads it as a
-// CompiledWasm module (src/server/bitmaps/wasm-source.ts imports it by name; wrangler.jsonc has the rule), and keeps it
-// out of the static assets (the assets directory is the Worker's own directory).
-import { appendFileSync, copyFileSync, existsSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+// After `vite build`: rebuilds the Worker with code splitting so a socket dial evaluates (and uploads) as little as possible.
+//
+// This step depends only on the layout sveltekit-cloudflare-worker documents (docs/architecture.md): `_worker.js` imports `./_sveltekit-worker.js`
+// (the adapter's Worker, `export default { fetch }`) and `./_user-worker.js` (the bundle of `src/worker.ts`), and `.wasm` modules sit next to them
+// with a content hash in their name. It never reads the facade's code.
+import { appendFileSync, existsSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
-import { dirname, join, resolve } from 'node:path';
+import { join, resolve } from 'node:path';
 
 const outDir = '.svelte-kit/cloudflare';
 if (!existsSync(outDir)) {
 	console.log('[postbuild] no Worker build output, nothing to do');
 	process.exit(0);
 }
-const require = createRequire(import.meta.url);
-const wasm = join(dirname(require.resolve('roaring-wasm/package.json')), 'index.wasm');
-copyFileSync(wasm, join(outDir, 'roaring.wasm'));
 const ignore = join(outDir, '.assetsignore');
-const lines = existsSync(ignore) ? readFileSync(ignore, 'utf8').split('\n') : [];
-if (!lines.includes('roaring.wasm')) appendFileSync(ignore, `${lines.at(-1) === '' || lines.length === 0 ? '' : '\n'}roaring.wasm\n`);
-console.log('[postbuild] roaring.wasm copied to', outDir);
-
-// Start-up (docs/ops/load-test.md "Start-up"): the generated `_worker.js` imports SvelteKit's server (the rendering of the whole
-// app: entasis, charts, every page) at the top, so every isolate evaluates it, including the one that serves a WebSocket
-// upgrade (a socket dial is served by a fresh isolate, and pays for all of it). Load it on the first page request instead.
 const entry = join(outDir, '_worker.js');
-if (existsSync(entry)) {
-	let source = readFileSync(entry, 'utf8');
-	// The facade of sveltekit-cloudflare-worker 0.1 (`createWorkerFacade`): SvelteKit's Worker is `svelteKit`, `next()` calls it once.
-	const eager = "import svelteKit from './_sveltekit-worker.js';\n";
-	const call = 'const next = () => (response ??= svelteKit.fetch(request, env, context));';
-	if (source.includes(eager) && source.includes(call)) {
-		source = source
-			.replace(eager, '')
-			.replace(call, "const next = () => (response ??= import('./_sveltekit-worker.js').then((m) => m.default.fetch(request, env, context)));");
-		writeFileSync(entry, source);
-		console.log('[postbuild] _worker.js loads SvelteKit lazily');
-	} else if (source.includes("import('./_sveltekit-worker.js')")) {
-		console.log('[postbuild] _worker.js already loads SvelteKit lazily');
-	} else {
-		console.warn('[postbuild] WARNING: _worker.js has an unexpected shape; SvelteKit stays eagerly loaded (slow socket dials)');
-	}
-}
 
 // Start-up, second step (docs/ops/load-test.md "Third pass"): the plugin bundles `src/worker.ts` and SvelteKit into one script, and esbuild
 // without `splitting` inlines every dynamic `import()` into it, so a socket dial parsed all 5.6 MB. Rebuild the entry here with code splitting:
@@ -46,7 +21,11 @@ if (existsSync(entry)) {
 // renderers and the workflows become `wc-*.js` chunks that wrangler uploads as separate modules (`rules` in wrangler.jsonc) and workerd only
 // compiles when a request first imports them. The routes are server-rendered (`ssr` is on everywhere), so their server build (entasis, charts,
 // every page: about 1.4 MB) is part of the SvelteKit chunks; it loads with SvelteKit on the first page request and never on a socket dial.
-if (existsSync(entry) && readFileSync(entry, 'utf8').includes("'./_user-worker.js'") && process.env.WORKER_SPLIT !== 'off') {
+if (existsSync(entry) && process.env.WORKER_SPLIT !== 'off') {
+	const facade = readFileSync(entry, 'utf8');
+	if (!facade.includes("'./_user-worker.js'") || !facade.includes("'./_sveltekit-worker.js'")) {
+		throw new Error('[postbuild] _worker.js no longer imports ./_user-worker.js and ./_sveltekit-worker.js: the layout sveltekit-cloudflare-worker documents changed, update scripts/postbuild.mjs');
+	}
 	const pluginRequire = createRequire(realpathSync(resolve('node_modules/sveltekit-cloudflare-worker/package.json')));
 	const { build } = pluginRequire('esbuild');
 	const root = resolve('.');
@@ -76,6 +55,28 @@ if (existsSync(entry) && readFileSync(entry, 'utf8').includes("'./_user-worker.j
 				setup(b) {
 					// The plugin's single-file bundle of the user Worker is replaced by the source, so its dynamic imports stay dynamic.
 					b.onResolve({ filter: /^\.\/_user-worker\.js$/ }, () => ({ path: join(root, 'src/worker.ts') }));
+					// SvelteKit's Worker (the adapter's `export default { fetch }`: the rendering of the whole app, entasis, charts, every page) is imported
+					// by the facade at the top, so every isolate would evaluate it, a socket dial's included. It becomes a chunk instead, loaded by the first
+					// page request: the facade's `svelteKit` is a stand-in whose methods import the real module and call it.
+					b.onResolve({ filter: /^\.\/_sveltekit-worker\.js$/ }, (args) =>
+						args.namespace === 'lazy-sveltekit' ? undefined : { path: 'sveltekit-worker', namespace: 'lazy-sveltekit', pluginData: { real: join(root, outDir, '_sveltekit-worker.js') } }
+					);
+					b.onLoad({ filter: /.*/, namespace: 'lazy-sveltekit' }, (args) => ({
+						contents: `const load = () => import(${JSON.stringify(args.pluginData.real)});\nexport default new Proxy({}, { get: (_, name) => async (...args) => (await load()).default[name](...args) });`,
+						resolveDir: root,
+						loader: 'js',
+					}));
+					// A `.wasm` import is a CompiledWasm module: the plugin's own build already wrote the file next to the Worker with a content hash in its name
+					// (`<name>-<hash>.wasm`, appended to .assetsignore), Wrangler uploads it through its default CompiledWasm rule, and the chunks import it by that name.
+					b.onResolve({ filter: /\.wasm(\?module)?$/ }, async (args) => {
+						if (args.pluginData?.wasm) return undefined;
+						const resolved = await b.resolve(args.path.replace(/\?module$/, ''), { kind: args.kind, importer: args.importer, resolveDir: args.resolveDir, pluginData: { wasm: true } });
+						if (resolved.errors.length > 0) return { errors: resolved.errors };
+						const stem = resolved.path.split(/[\\/]/).pop().replace(/\.wasm$/, '');
+						const found = readdirSync(outDir).filter((f) => new RegExp(`^${stem.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}-[0-9a-f]{8}\\.wasm$`).test(f));
+						if (found.length !== 1) throw new Error(`[postbuild] expected one ${stem}-<hash>.wasm next to _worker.js for ${resolved.path}, found ${found.length}`);
+						return { path: `./${found[0]}`, external: true };
+					});
 					// The `(dev)` routes (the editor test page, the SLO preview, the views bench) are development tools: their server build is dead weight
 					// in the Worker (and each answers 404 or fails without a development server anyway).
 					b.onLoad({ filter: /output[\\/]server[\\/]entries[\\/]pages[\\/]\(dev\)[\\/].*\.svelte\.js$/ }, () => ({

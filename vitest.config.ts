@@ -18,7 +18,11 @@ export default defineConfig({
 			{
 				// The svelte plugin compiles `.svelte.ts` rune modules (the client store and its tests).
 				plugins: [svelte()],
-				resolve: { alias, conditions: ['browser'] },
+				// Node cannot import a `.wasm` module (src/server/bitmaps/wasm-source.ts): the unit tests run without bitmaps.
+				resolve: {
+					alias: [...Object.entries(alias).map(([find, replacement]) => ({ find, replacement })), { find: /^\.\/wasm-source$/, replacement: fileURLToPath(new URL('./tests/unit/stubs/no-wasm-source.ts', import.meta.url)) }],
+					conditions: ['browser']
+				},
 				test: {
 					name: 'unit',
 					include: ['tests/unit/**/*.test.ts', 'src/**/*.unit.test.ts'],
@@ -26,13 +30,8 @@ export default defineConfig({
 				}
 			},
 			{
-				// The roaring WebAssembly module is a dynamic CompiledWasm import in the Worker; the test pool needs a static
-				// one (src/server/bitmaps/wasm-source.ts, tests/workers/scale/wasm-source.ts).
 				resolve: {
-					alias: [
-						...Object.entries(alias).map(([find, replacement]) => ({ find, replacement })),
-						{ find: /^\.\/wasm-source$/, replacement: fileURLToPath(new URL('./tests/workers/scale/wasm-source.ts', import.meta.url)) }
-					]
+					alias: Object.entries(alias).map(([find, replacement]) => ({ find, replacement }))
 				},
 				plugins: [
 					cloudflareTest({

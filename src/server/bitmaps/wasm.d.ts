@@ -2,3 +2,9 @@
 declare module 'roaring-wasm/browser/index.mjs' {
 	export * from 'roaring-wasm';
 }
+
+/** A `.wasm` import is a compiled module (a CompiledWasm module on Cloudflare). */
+declare module 'roaring-wasm/index.wasm' {
+	const compiled: WebAssembly.Module;
+	export default compiled;
+}

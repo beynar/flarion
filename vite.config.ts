@@ -57,26 +57,21 @@ export default defineConfig(({ command }) => ({
 	// which only development and test servers accept (src/server/objects/workspace/versions.ts). The Worker's
 	// `APP_VERSION` var in wrangler.jsonc must equal package.json's version (tests/unit/app-version.test.ts).
 	define: command === 'build' ? { 'import.meta.env.VITE_APP_VERSION': JSON.stringify(APP_VERSION) } : {},
-	// SvelteKit narrows `server.fs.allow` to src/, .svelte-kit/ and node_modules; the Worker's module runner enforces it for `?raw`
-	// imports, so `import.meta.glob('/migrations/d1/*.sql', { query: '?raw' })` (src/server/db/dev-migrate.ts) needs this entry.
-	// Miniflare's local `send_email` writes every message under `.wrangler/tmp/email` (inside the root): without the ignore each mail
-	// is a Vite "page reload" for every open tab.
-	server: { fs: { allow: ['migrations'] }, watch: { ignored: ['**/.wrangler/**'] } },
 	plugins: [
 		tailwindcss(),
 		sveltekit(
 			cloudflareWorker(
 				{ preprocess: vitePreprocess() },
+				// `vars` are typed as `string`/`number`/`boolean`, not as their literal values: a derived config (another port's origin)
+				// generates the same `Cloudflare.Env` block (src/app.d.ts) as wrangler.jsonc does.
 				command === 'serve'
 					? {
+							strictVars: false,
 							config: devWranglerConfig(),
-							// The generated `Cloudflare.Env` block (src/app.d.ts) types `vars` as literals, so a derived config (another port's
-							// origin) would rewrite the committed file on every start: only the real wrangler.jsonc writes it (default port).
-							...(devConfigIsDerived() ? { typesFile: false as const } : {}),
 							// A server on another port keeps its own state; the default, `.wrangler/state/v3`, is shared with `wrangler dev`.
 							...(devPort() !== DEFAULT_DEV_PORT ? { persistState: { path: `.wrangler/state-${devPort()}` } } : {})
 						}
-					: {}
+					: { strictVars: false }
 			)
 		)
 	]

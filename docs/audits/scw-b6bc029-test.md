@@ -93,3 +93,13 @@ Local mode, `--test-scheduled`:
 - `/healthz`, `/login`, `/v1/docs` and `/v1/openapi.json` return 200.
 - Unauthenticated `/ws` upgrades get 401 and `/rooms` gets 404 (both expected).
 - Scheduled returns 200.
+
+## Follow-up: 9e4b0d4 (2026-11-08)
+The package author fixed the issues above; Flarion pins `9e4b0d465851472892ac0e0914007a4652104c42`. Workarounds removed:
+- `server.fs.allow: ['migrations']` (a root-level `import.meta.glob('/migrations/d1/*.sql', { query: '?raw' })` works in dev) and our `server.watch.ignored` (the plugin ignores `.wrangler/`).
+- The hidden dynamic `import('./roaring.wasm')`, the `roaring.wasm` copy and its `.assetsignore` line in `scripts/postbuild.mjs`, the dev SQL fallback and the test-pool alias:
+  `import roaringModule from 'roaring-wasm/index.wasm'` is a `WebAssembly.Module` in dev (workerd's unsafe-eval) and in the build (a hashed `index-<hash>.wasm`, `compiled-wasm` in `wrangler deploy --dry-run`).
+  Checked: no `[bitmaps] roaring-wasm is unavailable` under `vite dev` (`[bitmaps] roaring-wasm ready`), under `wrangler dev` of the build (the prod CSP suite), and in the Vitest workers pool (bitmap tests). The patched roaring-wasm still takes the module through `__ROARING_WASM_MODULE__`.
+  The unit project (Node) cannot import a `.wasm`: it aliases `./wasm-source` to a stub that makes `ensureRoaring()` answer false.
+- `typesFile: false` on derived configs: `strictVars: false` types `vars` as `string`, and the generated block of a per-port server is identical to the default one.
+- `postbuild.mjs` no longer reads the facade's code: it needs `_worker.js` to import `./_user-worker.js` and `./_sveltekit-worker.js` (it fails loudly otherwise), makes the SvelteKit Worker a lazily loaded chunk through an esbuild stand-in for that import (the adapter's `export default { fetch }`), and resolves `.wasm` imports to the hashed file next to `_worker.js`.

@@ -188,10 +188,10 @@ wrong).
 
 Read together with `docs/spikes/p4-scale.md` (the profile this run is the staging counterpart of):
 
-- **Bitmaps.** The Workspace DO answers filters and counts from Roaring bitmaps when `roaring.wasm` loaded. The first deploy that
+- **Bitmaps.** The Workspace DO answers filters and counts from Roaring bitmaps when the roaring module loaded (`src/server/bitmaps/wasm-source.ts`: a `.wasm` import, uploaded as a hashed CompiledWasm module `index-<hash>.wasm`). The first deploy that
   carries it must be checked: `wrangler tail --env staging` should NOT print `[bitmaps] roaring-wasm is unavailable`. If it does, the
   run still works on the SQL paths (slower at 1,000 tabs: see the "SQL paths" columns of the spike) and the cause is the module
-  packaging (`scripts/postbuild.mjs`, `find_additional_modules` in `wrangler.jsonc`). `BITMAPS=off` as a Worker var turns them off
+  packaging (`scripts/postbuild.mjs` keeps the import pointing at the hashed `.wasm` the plugin wrote next to `_worker.js`; `wrangler deploy --dry-run` lists it as `compiled-wasm`). `BITMAPS=off` as a Worker var turns them off
   to compare.
 - **Overload governor.** Past 150 ms average commit-and-fan-out (or six tasks queued) the object logs
   `[workspace] <id> is overloaded`, writes an `error` metric labelled `overload`, stops serving hidden tabs (the load script's
