@@ -15,3 +15,4 @@ wrangler.dev-*.jsonc
 .sveltekit-cloudflare-worker
 .secrets/
 tests/visual/.state
+.claude/worktrees/
