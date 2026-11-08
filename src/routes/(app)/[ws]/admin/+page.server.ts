@@ -1,5 +1,5 @@
 import { env } from 'cloudflare:workers';
-import { sloReport } from '../../../../server/admin/slo';
+import { server } from '../../../../server/ssr/server';
 import { shellOf } from '../../../../server/ssr/shell';
 import type { PageServerLoad } from './$types';
 
@@ -10,7 +10,7 @@ export const load: PageServerLoad = async (event) => {
 	const list = (env.ADMIN_EMAILS ?? '').split(',').map((e) => e.trim().toLowerCase()).filter(Boolean);
 	if (workspace.role !== 'owner' || (list.length > 0 && !list.includes(session.email.toLowerCase()))) return { slo: null };
 	try {
-		return { slo: await sloReport(env) };
+		return { slo: await (await server()).sloReport(env) };
 	} catch {
 		return { slo: null };
 	}

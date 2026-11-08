@@ -50,6 +50,10 @@ export const fetch: WorkerFetch<Env> = async (request, env, ctx, next) => {
 	return withCsp(request, env, await next());
 };
 
+// SvelteKit's server code (the loads, `src/server/ssr/`) shares this script in a build: it reaches the session check, the D1 directory and better-auth
+// through this loader, so the Worker holds one copy of them (`server/ssr/server-impl.ts`). A closure only: nothing loads until a page request calls it.
+(globalThis as unknown as { __flarionServer: () => Promise<unknown> }).__flarionServer = () => import('./server/ssr/server-impl');
+
 export const queue: WorkerQueue<Env> = async (batch, env, ctx) => (await import('./server/queues/consumer')).queue(batch, env, ctx);
 export const scheduled: WorkerScheduled<Env> = async (controller, env, ctx) => (await import('./server/scheduled')).scheduled(controller, env, ctx);
 

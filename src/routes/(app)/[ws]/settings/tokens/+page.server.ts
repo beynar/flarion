@@ -1,5 +1,5 @@
 import { env } from 'cloudflare:workers';
-import { listTokens } from '../../../../../server/auth/api-tokens';
+import { server } from '../../../../../server/ssr/server';
 import { shellOf } from '../../../../../server/ssr/shell';
 import type { PageServerLoad } from './$types';
 
@@ -7,5 +7,5 @@ import type { PageServerLoad } from './$types';
 export const load: PageServerLoad = async (event) => {
 	if (event.isDataRequest) return { initial: null };
 	const { workspace, session } = await shellOf(event);
-	return { initial: { tokens: await listTokens(env, workspace.id, session.userId) } };
+	return { initial: { tokens: await (await server()).listTokens(env, workspace.id, session.userId) } };
 };

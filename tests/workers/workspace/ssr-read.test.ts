@@ -12,14 +12,14 @@ import { actorOf, batch, createOp, createWorkspace, ranks, type Fixture } from '
 
 const dev = (user: string, role = 'member') => ({ 'x-flarion-dev-actor': user, 'x-flarion-dev-role': role });
 
-const opt = (id: string) => ({ id, name: id, color: 'gray' });
+const opt = (id: string) => ({ id, name: id, color: 'gray' as const });
 
 /** A workspace with a teamspace tree, a page with a backlink, a private page and a database with rows. */
 async function seeded(label: string): Promise<{ ws: Fixture; member: Actor }> {
 	const ws = await createWorkspace(label);
 	const member = actorOf(ws.id, 'member-1', 'member');
 	await ws.stub.syncMember({ userId: member.userId, role: 'member', name: 'Member' });
-	const rk = ranks(8);
+	const rk = ranks(16);
 	await ws.stub.apply(
 		ws.owner,
 		batch([
@@ -36,7 +36,7 @@ async function seeded(label: string): Promise<{ ws: Fixture; member: Actor }> {
 			createOp('secret', null, rk[3], { teamspaceId: null, values: { title: 'Owner only' } }),
 			createOp('db', null, rk[4], { teamspaceId: ws.generalId, isDatabase: true, values: { title: 'DB' } }),
 			{ op: 'createCollection', id: 'db', pageId: 'db', sourceAst: { and: [{ prop: '$parent', op: 'is', value: 'db' }] } },
-			...['r1', 'r2', 'r3', 'r4'].map((id, i) => createOp(id, 'db', rk[5] + String(i), { values: { title: id, prio: i % 2 ? 'p1' : 'p2', amount: i } }))
+			...['r1', 'r2', 'r3', 'r4'].map((id, i) => createOp(id, 'db', rk[5 + i], { values: { title: id, prio: i % 2 ? 'p1' : 'p2', amount: i } }))
 		])
 	);
 	return { ws, member };
@@ -112,7 +112,7 @@ test('nothing the actor cannot read is ever returned', async () => {
 	const priv = await ws.stub.apply(
 		ws.owner,
 		batch([
-			createOp('pdb', null, ranks(1)[0] + 'z', { teamspaceId: null, isDatabase: true, values: { title: 'Private DB' } }),
+			createOp('pdb', null, ranks(16)[15], { teamspaceId: null, isDatabase: true, values: { title: 'Private DB' } }),
 			{ op: 'createCollection', id: 'pdb', pageId: 'pdb', sourceAst: { and: [{ prop: '$parent', op: 'is', value: 'pdb' }] } } as Op
 		])
 	);

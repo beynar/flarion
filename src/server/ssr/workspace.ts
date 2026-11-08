@@ -8,12 +8,12 @@
  *   the views and the pickers read from the store.
  */
 import type { Cookies } from '@sveltejs/kit';
-import { listMembers } from '../auth/workspaces';
 import { env } from 'cloudflare:workers';
 import { parseUiCookie, uiCookieName, type UiState } from '../../lib/client/ui-cookies';
 import type { StoreSeed } from '../../lib/shared/seed';
 import type { Subscription } from '../../lib/shared/protocol';
 import { TREE_ID } from '../../lib/shared/sub-key';
+import { server } from './server';
 import type { Shell } from './shell';
 
 /** The person's remembered interface choices for the workspace (`fl_ui_<id>`). */
@@ -25,7 +25,7 @@ export async function workspaceSeed(shell: Shell, cookies: Pick<Cookies, 'get'>,
 	const tree: Subscription = { kind: 'tree', parents: [null, ...ui.exp] };
 	const [read, members] = await Promise.all([
 		stub.ssrRead(actor, { subs: [{ id: TREE_ID, sub: tree }], ...(options.reveal ? { reveal: options.reveal } : {}), properties: true, teamspaces: true }),
-		workspace.role === 'guest' ? Promise.resolve(undefined) : listMembers(env, workspace.id, workspace.role).catch(() => undefined)
+		workspace.role === 'guest' ? Promise.resolve(undefined) : server().then((s) => s.listMembers(env, workspace.id, workspace.role)).catch(() => undefined)
 	]);
 	const opened = read.windows.find((w) => w.id === TREE_ID)?.sub;
 	return {

@@ -65,7 +65,7 @@ if (existsSync(entry) && readFileSync(entry, 'utf8').includes("'./_user-worker.j
 		conditions: ['workerd'],
 		external: ['cloudflare:*', 'node:*'],
 		minify: process.env.WORKER_MINIFY !== 'off',
-		keepNames: true,
+		keepNames: process.env.WORKER_KEEP_NAMES !== 'off',
 		metafile: true,
 		legalComments: 'none',
 		logLevel: 'warning',
@@ -82,6 +82,20 @@ if (existsSync(entry) && readFileSync(entry, 'utf8').includes("'./_user-worker.j
 						contents: "export default function () { throw new Error('This page is for the development server'); }",
 						loader: 'js',
 					}));
+					// entasis's code and diff components load shiki's grammars and themes (about 320 modules, 14 MB) with dynamic imports; the server render
+					// never highlights, and every module a Worker uploads costs start-up (45 ms per MB), so the tables that point at them are emptied
+					// (`bundledLanguages`, `bundledThemes`, `@pierre/highlights`' theme loader): the browser build, which loads them on demand, is untouched.
+					b.onLoad({ filter: /output[\\/]server[\\/]chunks[\\/][^\\/]+\.js$/ }, (args) => {
+						const source = readFileSync(args.path, 'utf8');
+						// Grammar and theme tables (hundreds of dynamic imports) and the inlined oniguruma WebAssembly (200 KB of base64).
+						const table = (source.match(/import\("\.\/[^"]+\.js"\)/g)?.length ?? 0) >= 40;
+						const inlinedWasm = source.length > 150_000 && source.includes('Uint8Array.from(atob("');
+						if (!table && !inlinedWasm) return undefined;
+						const exported = /\nexport \{([^}]*)\};?/.exec(source)?.[1] ?? '';
+						const names = exported.split(',').map((part) => part.trim().split(/\s+as\s+/).pop()).filter(Boolean);
+						if (names.length === 0) return undefined;
+						return { contents: names.map((name) => (name === 'default' ? 'export default {};' : `export const ${name} = {};`)).join('\n'), loader: 'js' };
+					});
 					// roaring-wasm carries its own copy of the module as a base64 string (230 KB of every start); the Worker passes the compiled module.
 					b.onLoad({ filter: /roaring-wasm[\\/]browser[\\/]index\.mjs$/ }, async (args) => ({
 						contents: readFileSync(args.path, 'utf8').replace(/"data:application\/octet-stream;base64,[A-Za-z0-9+/=]+"/, '"data:application/octet-stream;base64,"'),

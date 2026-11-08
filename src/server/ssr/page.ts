@@ -18,8 +18,7 @@ import type { PageRow } from '../../lib/shared/protocol';
 import type { StoreSeed } from '../../lib/shared/seed';
 import { subKey } from '../../lib/shared/sub-key';
 import { roomAccessForLevel } from '../rooms/access';
-import { issueRoomToken } from '../rooms/issue-token';
-import { openPageRoom } from '../rooms/page-room';
+import { server } from './server';
 import type { PageLockState } from '../objects/page/page-do';
 import type { JSONDoc } from 'edytor/crdt/edytor';
 import type { Shell } from './shell';
@@ -57,6 +56,7 @@ export async function pageData(shell: Shell, pageId: string, options: { viewId: 
 		return { seed: { ...seed, windows }, row, body: null };
 	}
 
+	const { openPageRoom, issueRoomToken } = await server();
 	const { room } = await openPageRoom(env, actor.workspaceId, pageId);
 	const [read, token] = await Promise.all([
 		room.readForRender(actor.userId),

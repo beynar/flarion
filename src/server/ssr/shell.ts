@@ -13,8 +13,8 @@
 import { redirect, type RequestEvent } from '@sveltejs/kit';
 import { env } from 'cloudflare:workers';
 import type { Me, Workspace } from '../../lib/shared/schemas';
-import { listWorkspaces } from '../auth/workspaces';
 import type { Actor, SessionInfo } from '../auth/session';
+import { server } from './server';
 import type { WorkspaceDO } from '../objects/workspace/workspace-do';
 
 export interface SignedIn {
@@ -38,7 +38,7 @@ const loginUrl = (event: Pick<RequestEvent, 'url'>) => `/login?next=${encodeURIC
 export async function signedIn(event: Pick<RequestEvent, 'locals' | 'url'>): Promise<SignedIn> {
 	const session = event.locals.session;
 	if (!session) redirect(307, loginUrl(event));
-	const workspaces = await listWorkspaces(env, session.userId);
+	const workspaces = await (await server()).listWorkspaces(env, session.userId);
 	const me: Me = { id: session.userId, name: session.name, email: session.email, emailVerified: session.emailVerified, image: session.image ?? null, workspaces };
 	return { session, me };
 }

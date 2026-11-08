@@ -14,7 +14,7 @@
  */
 import { env } from 'cloudflare:workers';
 import type { Handle } from '@sveltejs/kit/hooks';
-import { resolveSession } from './server/auth/session';
+import { server } from './server/ssr/server';
 import { NONCE_HEADER, newNonce } from './server/security/csp';
 
 /** better-auth's session cookie (`__Secure-` prefixed over https), the only thing a signed-in request must carry. */
@@ -22,7 +22,7 @@ const SESSION_COOKIE = /(?:^|;\s*)(?:__Secure-)?better-auth\.session_token=/;
 
 export const handle: Handle = async ({ event, resolve }) => {
 	const header = event.request.headers.get('cookie');
-	const session = header && SESSION_COOKIE.test(header) ? await resolveSession(event.request, env) : null;
+	const session = header && SESSION_COOKIE.test(header) ? await (await server()).resolveSession(event.request, env) : null;
 	event.locals.session = session;
 	event.locals.user = session ? { id: session.userId, name: session.name, email: session.email, image: session.image ?? null } : null;
 

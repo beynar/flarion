@@ -1,4 +1,4 @@
-import { listInvites } from '../../../../../server/auth/workspaces';
+import { server } from '../../../../../server/ssr/server';
 import { shellOf } from '../../../../../server/ssr/shell';
 import { env } from 'cloudflare:workers';
 import type { PageServerLoad } from './$types';
@@ -8,5 +8,5 @@ export const load: PageServerLoad = async (event) => {
 	if (event.isDataRequest) return { initial: null };
 	const { workspace } = await shellOf(event);
 	const manage = workspace.role === 'owner' || workspace.role === 'admin';
-	return { initial: { invites: manage ? await listInvites(env, workspace.id, workspace.role) : [] } };
+	return { initial: { invites: manage ? await (await server()).listInvites(env, workspace.id, workspace.role) : [] } };
 };
