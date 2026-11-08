@@ -408,7 +408,8 @@
 	.column {
 		box-sizing: content-box;
 		padding-bottom: 8px;
-		width: 100%;
+		/* auto, not 100%: with content-box a 100% width plus the side padding is wider than the screen on a phone. */
+		width: auto;
 		max-width: var(--app-page-width);
 		margin: 0 auto;
 		padding-inline: var(--app-page-padding-x-narrow);

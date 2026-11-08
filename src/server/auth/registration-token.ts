@@ -48,11 +48,16 @@ export async function issueRegistrationToken(
 	return { token: `${PREFIX}.${jti}.${exp}.${mac}`, expiresAt: new Date(exp * 1000) };
 }
 
-async function parse(secret: string, token: string, now: number): Promise<string | null> {
+/** Tokens are signed with the current secret and verified under it and the previous one (secret rotation). */
+type Secrets = string | readonly string[];
+
+async function parse(secrets: Secrets, token: string, now: number): Promise<string | null> {
 	const parts = token.split('.');
 	if (parts.length !== 4 || parts[0] !== PREFIX) return null;
 	const [, jti, exp, mac] = parts as [string, string, string, string];
-	if (!(await hmacVerify(secret, DOMAIN, `${jti}.${exp}`, mac))) return null;
+	let valid = false;
+	for (const secret of typeof secrets === 'string' ? [secrets] : secrets) valid = (await hmacVerify(secret, DOMAIN, `${jti}.${exp}`, mac)) || valid;
+	if (!valid) return null;
 	if (!Number.isFinite(Number(exp)) || Number(exp) * 1000 <= now) return null;
 	return jti;
 }
@@ -70,7 +75,7 @@ function claimsOf(jti: string, value: string): RegistrationClaims | null {
 /** Reads a token's claims without using it up. Null when forged, expired or already consumed. */
 export async function peekRegistrationToken(
 	store: Store,
-	secret: string,
+	secret: Secrets,
 	token: string,
 	now = Date.now()
 ): Promise<RegistrationClaims | null> {
@@ -84,7 +89,7 @@ export async function peekRegistrationToken(
 /** Uses the token up: exactly one caller ever gets the claims. */
 export async function consumeRegistrationToken(
 	store: Store,
-	secret: string,
+	secret: Secrets,
 	token: string,
 	now = Date.now()
 ): Promise<RegistrationClaims | null> {

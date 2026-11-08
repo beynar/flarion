@@ -337,7 +337,7 @@ export function groupMeta(def: PropertyDef | undefined, key: string, lookup: { m
 		case 'person':
 		case 'created_by':
 		case 'last_edited_by':
-			return { key, label: lookup.member?.(key) ?? 'Unknown user', color: null, empty: false };
+			return { key, label: lookup.member?.(key) ?? 'Deleted user', color: null, empty: false };
 		case 'checkbox':
 			return { key, label: key === 'true' ? 'Checked' : 'Unchecked', color: null, empty: false };
 		case 'relation':

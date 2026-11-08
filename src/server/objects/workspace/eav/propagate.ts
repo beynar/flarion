@@ -10,6 +10,7 @@
  */
 import { reverseIdOf, type PropertyDef } from '../../../../lib/shared/property-types';
 import type { WorkspaceDb } from '../../../db/workspace.client';
+import { seedAi } from './ai';
 import { Computer, PageStore, formulaUsesNow } from './compute';
 import { readEdges, topoRank, type Edge } from './dependency';
 import type { ChangeRecord, EavOpContext } from './index';
@@ -220,6 +221,8 @@ export async function seedFromRecords(pass: Pass, records: readonly ChangeRecord
 export async function afterWriteImpl(db: WorkspaceDb, records: readonly ChangeRecord[], ctx: EavOpContext): Promise<ChangeRecord[]> {
 	if (records.length === 0) return [];
 	const registry = await loadEavRegistry(db);
+	// AI properties are computed later, by a queue job: here they only get their invalidation markers (`ai.ts`).
+	await seedAi(db, registry, records, ctx.now);
 	if (!hasComputed(registry)) return [];
 	const pass = await startPass(db, ctx);
 	await seedFromRecords(pass, records);

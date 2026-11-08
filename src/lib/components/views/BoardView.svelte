@@ -121,9 +121,10 @@
 			density="compact"
 			class="notion-board"
 			theme={{
-				root: { base: 'flex w-full items-start gap-2 overflow-x-auto p-0 pt-2 scrollbar-none' },
+				// On a phone a column is most of the screen and the board snaps from one to the next (the next one peeks in).
+				root: { base: 'flex w-full items-start gap-2 overflow-x-auto p-0 pt-2 scrollbar-none max-md:snap-x max-md:snap-mandatory max-md:scroll-px-1' },
 				column: { base: 'flex max-h-full w-full flex-col rounded-md bg-transparent ring-0' },
-				columnWrapper: { base: 'min-w-[260px] max-w-[260px] flex-none basis-[260px]' },
+				columnWrapper: { base: 'min-w-[260px] max-w-[260px] flex-none basis-[260px] max-md:min-w-[80vw] max-md:max-w-[80vw] max-md:basis-[80vw] max-md:snap-start' },
 				columnHeader: { base: 'flex items-center gap-md px-1! py-1!' },
 				list: { base: 'flex min-h-row-lg flex-1 flex-col overflow-y-auto scrollbar-none rounded-md transition-colors gap-2 p-0.5! pt-1! data-[dnd-over=true]:bg-primary/5' },
 				card: { base: 'rounded-[6px] text-sm select-none cursor-grab p-0! overflow-hidden bg-[color:var(--app-page)] shadow-[0_0_0_1px_var(--app-hairline),0_1px_2px_rgba(15,15,15,0.06)] hover:bg-[color:var(--app-hover)]' }

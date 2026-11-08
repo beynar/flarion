@@ -28,7 +28,9 @@ import { chunks, qmarks } from '../objects/workspace/eav/sql';
 import type { Ctx } from './context';
 import { IN_CHUNK } from './context';
 import { LIVE_TARGET_SQL } from './relations';
-import { EXACT_NEEDLE_UNITS, eavSource, pageSource, type Frag, type Source, type Verify } from './sources';
+import { EXACT_NEEDLE_UNITS, bitmapSource, eavSource, pageSource, type Frag, type Source, type Verify } from './sources';
+import { INDEXED_TYPES, type OptionIndex } from '../bitmaps/option-index';
+import { roaringReady } from '../bitmaps/roaring';
 
 export interface ConstNode {
 	kind: 'const';
@@ -62,6 +64,8 @@ export interface CompileOptions {
 	weekStartsOn?: 0 | 1;
 	/** Estimate selectivities from the counts (default). Off, leaves are always probed: for one-page checks. */
 	estimate?: boolean;
+	/** The option index: select, status, multi-select and person conditions read Roaring bitmaps when given. */
+	bitmaps?: OptionIndex | null;
 }
 
 const TRUE: ConstNode = { kind: 'const', value: true };
@@ -72,6 +76,7 @@ export class CompileEnv {
 	readonly dctx: DateCtx;
 	readonly estimate: boolean;
 	readonly me: string | undefined;
+	readonly bitmaps: OptionIndex | null;
 
 	constructor(
 		readonly db: WorkspaceDb,
@@ -81,6 +86,12 @@ export class CompileEnv {
 		this.dctx = { now: opts.now, weekStartsOn: opts.weekStartsOn ?? 1 };
 		this.estimate = opts.estimate !== false;
 		this.me = opts.me;
+		this.bitmaps = opts.bitmaps && roaringReady() ? opts.bitmaps : null;
+	}
+
+	/** Whether conditions on this property are answered from the option index. */
+	indexed(def: PropertyDef | undefined): boolean {
+		return this.bitmaps !== null && def !== undefined && INDEXED_TYPES.has(def.type);
 	}
 
 	/** Upper bound of the number of pages (`page.num` is dense and never reused). */
@@ -99,6 +110,12 @@ export class CompileEnv {
 }
 
 const NO_ESTIMATE = Number.POSITIVE_INFINITY;
+/**
+ * A bitmap probe costs one `has` per candidate and a scan builds a set of its members (about five times as much per
+ * page), against the executor's two-rows-per-probe rule for SQL: weighting the scan cost by this keeps candidate
+ * checks on the probe path until the candidates outnumber the members several times over.
+ */
+const BITMAP_SCAN_WEIGHT = 10;
 const PROBE_CAP = 1000;
 
 // ───────────────────────────── tree ─────────────────────────────
@@ -420,6 +437,12 @@ async function refsLeaf(env: CompileEnv, c: Condition, def: PropertyDef | undefi
 		if (def?.type === 'relation' && def.config.reverseOf) return reverseLeaf(env, c, def.config.reverseOf, null);
 		const prop = eavProp(env, c);
 		if (prop === undefined) return FALSE;
+		if (env.indexed(def)) {
+			await env.bitmaps!.ensure(env.db, prop);
+			const bits = env.bitmaps!.presence(prop);
+			const size = bits.size;
+			return leaf(env, c, bitmapSource(bits), c.op === 'is_empty', size, size * BITMAP_SCAN_WEIGHT, `bitmap prop=${prop} (presence)`);
+		}
 		// A relation to a tombstone reads as gone: only rows pointing at a live page count as a value.
 		return presenceLeaf(env, c, 'p_ref', prop, def?.type === 'relation' ? { sql: LIVE_TARGET_SQL, params: [] } : null);
 	}
@@ -460,6 +483,12 @@ async function refsLeaf(env: CompileEnv, c: Condition, def: PropertyDef | undefi
 		const [row] = await all<{ num: number }>(env.db, 'SELECT num FROM page WHERE id = ? AND deleted_at IS NULL', target);
 		if (!row) return negate ? TRUE : FALSE;
 		v = String(row.num);
+	}
+	if (env.indexed(def)) {
+		await env.bitmaps!.ensure(env.db, prop);
+		const bits = env.bitmaps!.value(prop, v);
+		const size = bits.size;
+		return leaf(env, c, bitmapSource(bits), negate, size, size * BITMAP_SCAN_WEIGHT, `bitmap prop=${prop} v=${v}`);
 	}
 	const posEst = await env.est(() => valueCountOf(env.db, prop, v), NO_ESTIMATE);
 	return leaf(env, c, eavSource('p_ref', prop, { sql: 'v = ?', params: [v] }), negate, posEst, posEst, `p_ref prop=${prop} v=${v}`);

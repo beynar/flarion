@@ -73,7 +73,7 @@ describe('a public link', () => {
 		expect(response.status).toBe(200);
 		expect(response.headers.get('x-robots-tag')).toContain('noindex');
 		const html = await response.text();
-		expect(html).toContain('<h1>Shared page</h1>');
+		expect(html).toContain('<h1 class="page-title">Shared page</h1>');
 		expect(html).toContain('🤝');
 		expect(html).toContain('<meta name="robots" content="noindex, nofollow">');
 

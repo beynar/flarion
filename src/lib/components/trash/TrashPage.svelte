@@ -17,7 +17,7 @@
 	let { store, ws }: { store: WorkspaceStore; ws: string } = $props();
 
 	const list = new TrashList(rpc);
-	const nameOf = (userId: string | null) => (userId ? (store.members.find((m) => m.userId === userId)?.name ?? 'Someone') : '');
+	const nameOf = (userId: string | null) => (userId ? (store.members.find((m) => m.userId === userId)?.name ?? 'Deleted user') : '');
 	const titleOf = (e: TrashEntry) => e.title || 'Untitled';
 
 	onMount(() => {

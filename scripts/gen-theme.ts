@@ -20,6 +20,8 @@
  *   3. Exact shadows. `--elevation-3` (and 4 and 5, which dialogs use) carry Notion's three-layer
  *      menu shadow per theme, at `html[data-theme]` specificity, unlayered, so they beat both the
  *      plugin's base layer and `<Theme designTokens>`.
+ *   5. Panel radius. `radius: 0.75` makes controls 6px and tags 3px but its `lg` step 9px; `--radius-lg` is written as the
+ *      token's 10px for panels and menus.
  *   4. Row heights. entasis rows are 32/40/48 and controls 28/32/36. `--row-height-sm/md` are
  *      overridden to Notion's 28/36; button heights (28/24) share `--control-height-*` with
  *      inputs (32), so buttons get a `theme` override from `--app-button-height*` instead.
@@ -38,7 +40,7 @@ const HEADER = (what: string) =>
 
 type Theme = 'light' | 'dark';
 const themes: Theme[] = ['light', 'dark'];
-const { core, shadows, blockColors, optionColors, type, metrics, radii, motion, entasis } = notion;
+const { core, highContrast, shadows, blockColors, optionColors, type, metrics, radii, motion, entasis } = notion;
 
 const px = (n: number) => `${n}px`;
 const decls = (entries: Array<[string, string]>, indent = '\t') =>
@@ -211,11 +213,44 @@ const staticVars: Array<[string, string]> = [
 	['--row-height-md', px(metrics.tableRow.value)]
 ];
 
+/** The high-contrast setting (`html[data-contrast='high']`): secondary and tertiary text that keep 4.5:1. */
+function contrastVars(theme: Theme): Array<[string, string]> {
+	return [
+		['--app-text-secondary', highContrast.textSecondary[theme]],
+		['--app-text-tertiary', highContrast.textTertiary[theme]],
+		['--app-text-sidebar', highContrast.textSidebar[theme]],
+		['--app-accent', highContrast.accent[theme]],
+		// entasis' primary role: the fill of solid primary buttons (white text on it).
+		['--color-primary', highContrast.primaryFill.value],
+		...(theme === 'dark' ? blockColorNames.map((name): [string, string] => [`--app-option-${name}-fg`, highContrast.optionTextDark.value]) : [])
+	];
+}
+
+// Reduced motion: a person who asks the OS for less motion gets none from entasis' transitions, drawers and spinners
+// (their durations come from CSS), nor from the app's own.
+const reducedMotionCss = `@media (prefers-reduced-motion: reduce) {
+	*,
+	*::before,
+	*::after {
+		animation-duration: 0.01ms !important;
+		animation-iteration-count: 1 !important;
+		transition-duration: 0.01ms !important;
+		scroll-behavior: auto !important;
+	}
+}
+`;
+
 const appCss =
 	HEADER('App variables, and the fixes for what the entasis theme engine cannot express.') +
 	'\n' +
 	`html,\nhtml[data-theme='light'] {\n${decls([...staticVars, ...appThemeVars('light')])}\n}\n\n` +
-	`html[data-theme='dark'] {\n${decls(appThemeVars('dark'))}\n}\n`;
+	`html[data-theme='dark'] {\n${decls(appThemeVars('dark'))}\n}\n\n` +
+	// Gap 5: the runtime `<Theme designTokens>` style writes `--radius-lg` at `html[data-theme]` after this sheet loads, so this rule is
+	// one class more specific than it.
+	`html:root[data-theme] {\n${decls([['--radius-lg', px(radii.panel.value)]])}\n}\n\n` +
+	`html[data-contrast='high'] {\n${decls(contrastVars('light'))}\n}\n\n` +
+	`html[data-theme='dark'][data-contrast='high'] {\n${decls(contrastVars('dark'))}\n}\n\n` +
+	reducedMotionCss;
 
 /* ---------------------------------------------------------------- design-tokens.ts */
 
@@ -242,13 +277,26 @@ export const designTokens = {
 } satisfies ThemeDesignTokenMap<readonly ['light', 'dark']>;
 `;
 
+/* ---------------------------------------------------------------- page-vars.ts */
+
+// The variables of a page rendered by the Worker without the app's `html[data-theme]` (published pages, HTML export):
+// the same values as app-vars.css and edytor-overrides.css, as strings (a Worker bundle cannot import a `.css?raw`).
+const pageVarsTs =
+	HEADER('The token variables of published pages and HTML exports (src/server/export/style.ts).') +
+	`export const PAGE_VARS = {
+	light: ${JSON.stringify(decls([...staticVars, ...appThemeVars('light'), ...edytorVars('light')]))},
+	dark: ${JSON.stringify(decls([...appThemeVars('dark'), ...edytorVars('dark')]))}
+} as const;
+`;
+
 /* ---------------------------------------------------------------- write + sanity checks */
 
 const files: Record<string, string> = {
 	'entasis-theme.css': entasisCss,
 	'edytor-overrides.css': edytorCss,
 	'app-vars.css': appCss,
-	'design-tokens.ts': designTokensTs
+	'design-tokens.ts': designTokensTs,
+	'page-vars.ts': pageVarsTs
 };
 for (const [name, body] of Object.entries(files)) writeFileSync(resolve(outDir, name), body);
 

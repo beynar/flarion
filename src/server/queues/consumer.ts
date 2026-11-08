@@ -1,16 +1,19 @@
 /**
  * The `JOBS` queue consumer. Messages are routed by `type`:
  * - `index-page`: batched, deduplicated and throttled (see `index-pages.ts`), fed to the Workspace DO;
- * - `ai-property`, `email`: no-op handlers that later phases fill (P4 AI properties, P2 emails).
+ * - `ai-property`: the AI property writer (`ai/property.ts`); `email`: the email sender.
  * A message nobody understands is acked and logged: retrying it would never help.
  */
 import type { WorkerQueue } from 'sveltekit-cloudflare-worker';
+import { runAiPropertyJob } from '../ai/property';
 import { handleEmail } from './email';
 import { indexPages, type JobMessage } from './index-pages';
 import type { AiPropertyJob, EmailJob, IndexPageJob, Job } from './types';
 
-/** Later phases fill this (P4: compute the AI property of the page and write `p_text`). */
-export async function handleAiPropertyJob(_env: Env, _job: AiPropertyJob): Promise<void> {}
+/** Computes the AI property of the page and writes its `p_text` value (`ai/property.ts`: debounce, guardrails, stale on failure). */
+export async function handleAiPropertyJob(env: Env, job: AiPropertyJob): Promise<void> {
+	await runAiPropertyJob(env, job);
+}
 
 /** Later phases fill this (P2: send the invite, mention and comment emails through `env.EMAIL`). */
 export async function handleEmailJob(_env: Env, _job: EmailJob): Promise<void> {}

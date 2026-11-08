@@ -309,7 +309,7 @@ export type PresenceUser = v.InferOutput<typeof presenceUserSchema>;
 export const presenceEntrySchema = v.object({ pageId: idSchema, users: v.array(presenceUserSchema) });
 export type PresenceEntry = v.InferOutput<typeof presenceEntrySchema>;
 
-export const NOTIFICATION_KINDS = ['mention', 'comment', 'reply', 'invite', 'page_shared', 'access_changed', 'reminder'] as const;
+export const NOTIFICATION_KINDS = ['mention', 'comment', 'reply', 'invite', 'page_shared', 'access_changed', 'reminder', 'export_ready'] as const;
 export const notificationSchema = v.object({
 	id: idSchema,
 	kind: v.picklist(NOTIFICATION_KINDS),
@@ -340,6 +340,11 @@ export const clientMessageSchema = v.variant('t', [
 	/** The page this tab is on, null when none. */
 	v.object({ t: v.literal('presence'), pageId: v.nullable(idSchema) }),
 	v.object({ t: v.literal('notifications.read'), ids: v.pipe(v.array(idSchema), v.minLength(1), v.maxLength(100)) }),
+	/**
+	 * Whether this tab is hidden (`document.hidden`). An overloaded Workspace DO stops re-evaluating the subscriptions of
+	 * hidden tabs (docs/PLAN.md "Runbooks"); on `hidden: false` it sends fresh snapshots if the tab missed anything.
+	 */
+	v.object({ t: v.literal('visibility'), hidden: v.boolean() }),
 	v.object({ t: v.literal('ping') })
 ]);
 export type ClientMessage = v.InferOutput<typeof clientMessageSchema>;
@@ -427,6 +432,11 @@ export const serverMessageSchema = v.variant('t', [
 		lockedBy: v.nullable(v.string()),
 		lockedAt: v.nullable(v.number())
 	}),
+	/**
+	 * A page's document passed 80% of its size quota (edytor refuses writes at 100%): `bytes` of `limit`. Sent to every
+	 * connected tab whose person can read the page, when the room saves and the share grew by at least five points.
+	 */
+	v.object({ t: v.literal('quota'), pageId: idSchema, bytes: v.number(), limit: v.number() }),
 	v.object({
 		t: v.literal('error'),
 		code: v.picklist(['bad_subscription', 'forbidden', 'not_found', 'too_many_subscriptions', 'internal']),
@@ -489,7 +499,17 @@ function decode<T>(schema: v.GenericSchema<unknown, T>, raw: string | ArrayBuffe
 
 /** Serializes a message. Callers should send only messages that satisfy the schema. */
 export const encodeClientMessage = (msg: ClientMessage): string => JSON.stringify(msg);
-export const encodeServerMessage = (msg: ServerMessage): string => JSON.stringify(msg);
+/**
+ * A fan-out sends the same message object to every socket that has the same diff (the tabs of one person, a `head` for everyone),
+ * so the encoding is remembered per object: 1,000 tabs cost a few serializations, not 1,000. Messages are never changed after
+ * they are sent.
+ */
+const encodedMessages = new WeakMap<object, string>();
+export const encodeServerMessage = (msg: ServerMessage): string => {
+	let text = encodedMessages.get(msg);
+	if (text === undefined) encodedMessages.set(msg, (text = JSON.stringify(msg)));
+	return text;
+};
 
 export const decodeClientMessage = (raw: string | ArrayBuffer | Uint8Array): DecodeResult<ClientMessage> =>
 	decode(clientMessageSchema, raw, MAX_CLIENT_FRAME_BYTES);

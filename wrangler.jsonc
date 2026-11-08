@@ -9,6 +9,7 @@
 	],
 	"workers_dev": true,
 	"preview_urls": true,
+	"find_additional_modules": true,
 	"observability": {
 		"enabled": true,
 		"logs": {
@@ -32,7 +33,9 @@
 		"AI_TEXT_MODEL": "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
 		"AI_EMBEDDING_MODEL": "@cf/baai/bge-m3",
 		"TURNSTILE_SITE_KEY": "1x00000000000000000000AA",
-		"FILES_ORIGIN": "http://localhost:5173"
+		"FILES_ORIGIN": "http://localhost:5173",
+		"CF_ACCOUNT_ID": "6886250e2aff0047919a1ed731a55c64",
+		"METRICS_DATASET": "flarion_metrics"
 	},
 	"d1_databases": [
 		{
@@ -106,6 +109,11 @@
 			"name": "flarion-purge",
 			"binding": "PURGE",
 			"class_name": "PurgeWorkflow"
+		},
+		{
+			"name": "flarion-backup",
+			"binding": "BACKUP",
+			"class_name": "BackupWorkflow"
 		}
 	],
 	"ai": {
@@ -160,12 +168,14 @@
 	"triggers": {
 		"crons": [
 			"0 3 * * *",
-			"0 4 * * SUN"
+			"0 4 * * SUN",
+			"*/5 * * * *"
 		]
 	},
 	"env": {
 		"staging": {
 			"name": "flarion-staging",
+			"find_additional_modules": true,
 			"vars": {
 				"APP_NAME": "Flarion",
 				"APP_VERSION": "0.0.1",
@@ -177,7 +187,9 @@
 				"AI_TEXT_MODEL": "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
 				"AI_EMBEDDING_MODEL": "@cf/baai/bge-m3",
 				"TURNSTILE_SITE_KEY": "1x00000000000000000000AA",
-				"FILES_ORIGIN": "https://flarion-staging.beynar.workers.dev"
+				"FILES_ORIGIN": "https://flarion-staging.beynar.workers.dev",
+				"CF_ACCOUNT_ID": "6886250e2aff0047919a1ed731a55c64",
+				"METRICS_DATASET": "flarion_metrics_staging"
 			},
 			"d1_databases": [
 				{
@@ -242,6 +254,11 @@
 					"name": "flarion-purge-staging",
 					"binding": "PURGE",
 					"class_name": "PurgeWorkflow"
+				},
+				{
+					"name": "flarion-backup-staging",
+					"binding": "BACKUP",
+					"class_name": "BackupWorkflow"
 				}
 			],
 			"ai": {
@@ -296,12 +313,19 @@
 			"triggers": {
 				"crons": [
 					"0 3 * * *",
-					"0 4 * * SUN"
+					"0 4 * * SUN",
+					"*/5 * * * *"
 				]
-			}
+			},
+			"tail_consumers": [
+				{
+					"service": "flarion-tail-staging"
+				}
+			]
 		},
 		"production": {
 			"name": "flarion",
+			"find_additional_modules": true,
 			"vars": {
 				"APP_NAME": "Flarion",
 				"APP_VERSION": "0.0.1",
@@ -313,7 +337,9 @@
 				"AI_TEXT_MODEL": "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
 				"AI_EMBEDDING_MODEL": "@cf/baai/bge-m3",
 				"TURNSTILE_SITE_KEY": "1x00000000000000000000AA",
-				"FILES_ORIGIN": "https://flarion-files.beynar.dev"
+				"FILES_ORIGIN": "https://flarion-files.beynar.dev",
+				"CF_ACCOUNT_ID": "6886250e2aff0047919a1ed731a55c64",
+				"METRICS_DATASET": "flarion_metrics"
 			},
 			"d1_databases": [
 				{
@@ -378,6 +404,11 @@
 					"name": "flarion-purge",
 					"binding": "PURGE",
 					"class_name": "PurgeWorkflow"
+				},
+				{
+					"name": "flarion-backup",
+					"binding": "BACKUP",
+					"class_name": "BackupWorkflow"
 				}
 			],
 			"ai": {
@@ -432,9 +463,15 @@
 			"triggers": {
 				"crons": [
 					"0 3 * * *",
-					"0 4 * * SUN"
+					"0 4 * * SUN",
+					"*/5 * * * *"
 				]
 			},
+			"tail_consumers": [
+				{
+					"service": "flarion-tail"
+				}
+			],
 			"routes": [
 				{
 					"pattern": "flarion.beynar.dev",

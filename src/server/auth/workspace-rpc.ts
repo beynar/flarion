@@ -8,6 +8,7 @@
  * - `rename`: the workspace's display name changed in D1 (`workspace.settings`); the DO keeps it in `meta`.
  * - `getMemberRole`: the cached mirror; `null` when the user is not (yet) mirrored as a member.
  */
+import { workspaceStubWithHint, type LocationHint } from '../objects/workspace/location';
 import type { WorkspaceRole } from './session';
 
 export interface WorkspaceIdentityRpc {
@@ -17,6 +18,10 @@ export interface WorkspaceIdentityRpc {
 	getMemberRole(userId: string): Promise<WorkspaceRole | null>;
 }
 
-export function workspaceIdentity(env: Pick<Env, 'WORKSPACE'>, workspaceId: string): WorkspaceIdentityRpc {
-	return env.WORKSPACE.getByName(workspaceId) as unknown as WorkspaceIdentityRpc;
+/**
+ * `hint` is only given to the call that creates the workspace's object (`init`): Cloudflare places a Durable Object
+ * where it is first reached and ignores the hint afterwards (docs/PLAN.md "Performance, limits and scaling").
+ */
+export function workspaceIdentity(env: Pick<Env, 'WORKSPACE'>, workspaceId: string, hint?: LocationHint): WorkspaceIdentityRpc {
+	return workspaceStubWithHint<WorkspaceIdentityRpc>(env.WORKSPACE, workspaceId, hint);
 }

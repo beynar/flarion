@@ -235,6 +235,9 @@ export type RollupFunction = (typeof ROLLUP_FUNCTIONS)[number];
 
 export const AI_PROPERTY_KINDS = ['summary', 'keywords', 'translation', 'custom'] as const;
 
+/** The properties an AI property quotes besides the page text: `sourceProps`, else the legacy `sources`. */
+export const aiSourcesOf = (config: { sourceProps?: readonly string[]; sources?: readonly string[] }): readonly string[] => config.sourceProps ?? config.sources ?? [];
+
 const EmptyConfig = v.object({});
 
 /** Suffix of the id of a two-way relation's synthetic reverse property: `<relation id>:reverse`. */
@@ -304,7 +307,9 @@ export const propertyConfigSchemas = {
 		kind: v.picklist(AI_PROPERTY_KINDS),
 		prompt: v.optional(v.pipe(v.string(), v.maxLength(4000))),
 		language: v.optional(v.pipe(v.string(), v.maxLength(40))),
-		/** Properties whose values are quoted to the model besides the page text. */
+		/** Properties whose values are quoted to the model besides the page text (plain values of the page itself). */
+		sourceProps: v.optional(v.array(idSchema)),
+		/** The name this field had before `sourceProps`: still read, never written by the app. */
 		sources: v.optional(v.array(idSchema), [])
 	})
 } as const;

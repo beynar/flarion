@@ -114,6 +114,28 @@ const core = {
 	})
 } as const;
 
+/**
+ * The high-contrast setting (Settings > Appearance, or the OS's `prefers-contrast: more`): Notion's secondary and
+ * tertiary text sit at or under WCAG AA (4.5:1) on the page and the gray panels, so by default they stay as Notion has
+ * them, and this setting swaps in values that keep 4.5:1 on every surface the app uses (page, sidebar, hover and
+ * active washes, callout and code panels, the gray block background). Ratios are checked by tests/unit/design-contrast.test.ts.
+ */
+const highContrast = {
+	textSecondary: themed('#55544f', 'rgba(255, 255, 255, 0.70)', 'derived', {
+		note: 'Default is #73726e / 0.46 white: 4.3:1 on the gray panels, 4.0:1 in dark.'
+	}),
+	textTertiary: themed('#6a6965', 'rgba(255, 255, 255, 0.58)', 'derived', {
+		note: 'Default is #91918e / 0.32 white: about 3:1, below AA.'
+	}),
+	textSidebar: themed('#4b4a47', 'rgba(255, 255, 255, 0.78)', 'derived'),
+	/** Blue text (links, active toolbar buttons) on the page: #2383e2 is 3.9:1 on white, so light uses a deeper blue and dark a lighter one. */
+	accent: themed('#1a6dc0', '#5aa9ff', 'derived'),
+	/** The fill of primary buttons, which carry white text: 5.3:1 (the default #2383e2 gives 3.9:1). */
+	primaryFill: value('#1a6dc0', 'derived'),
+	/** Option tags in dark mode: full white on the stronger palette (the 0.85 white of the default is 4.4:1 on yellow). */
+	optionTextDark: value('#ffffff', 'derived')
+} as const;
+
 /** Notion's three-layer floating-surface shadow. */
 const shadows = {
 	menu: themed(
@@ -363,6 +385,7 @@ export const notion = {
 		]
 	},
 	core,
+	highContrast,
 	shadows,
 	blockColors,
 	optionColors,

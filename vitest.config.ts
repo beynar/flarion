@@ -26,7 +26,14 @@ export default defineConfig({
 				}
 			},
 			{
-				resolve: { alias },
+				// The roaring WebAssembly module is a dynamic CompiledWasm import in the Worker; the test pool needs a static
+				// one (src/server/bitmaps/wasm-source.ts, tests/workers/scale/wasm-source.ts).
+				resolve: {
+					alias: [
+						...Object.entries(alias).map(([find, replacement]) => ({ find, replacement })),
+						{ find: /^\.\/wasm-source$/, replacement: fileURLToPath(new URL('./tests/workers/scale/wasm-source.ts', import.meta.url)) }
+					]
+				},
 				plugins: [
 					cloudflareTest({
 						wrangler: { configPath: './wrangler.test.jsonc' },

@@ -216,7 +216,7 @@ describe('/share/:token (the published page, rendered by the Worker)', () => {
 		expect(response.headers.get('content-type')).toContain('text/html');
 		const html = await response.text();
 		expect(html).toContain('<title>Launch plan · Flarion</title>');
-		expect(html).toContain('<h1>Launch plan</h1>');
+		expect(html).toContain('<h1 class="page-title">Launch plan</h1>');
 		expect(html).toContain('🚀');
 		expect(html).toContain('<meta name="robots" content="noindex, nofollow">');
 		expect(response.headers.get('x-robots-tag')).toContain('noindex');
@@ -230,17 +230,18 @@ describe('/share/:token (the published page, rendered by the Worker)', () => {
 		const pageId = newPage('<img src=x onerror=alert(1)> & "q"', null);
 		const grant = await owner().page.grants.set({ pageId, subjectKind: 'public', subjectId: null, level: 'read' });
 		const html = await (await call(grant.token!)).text();
+		// The title is text everywhere it shows (the tab, the bar, the heading).
 		expect(html).not.toContain('<img');
 		expect(html).toContain('&lt;img src=x onerror=alert(1)&gt; &amp; &quot;q&quot;');
 	});
 
-	test('the policy lets images and media load from the files origin, and nothing from anywhere else', async () => {
+	test('the policy lets images and media load from the files origin, https images and data, and nothing else', async () => {
 		const pageId = newPage();
 		const grant = await owner().page.grants.set({ pageId, subjectKind: 'public', subjectId: null, level: 'read' });
 		const env = { ...world.env, FILES_ORIGIN: 'https://files.flarion.example/' } as unknown as Env;
 		const csp = (await call(grant.token!, env)).headers.get('content-security-policy')!;
 		expect(csp).toContain("default-src 'none'");
-		expect(csp).toContain('img-src data: https://files.flarion.example;');
+		expect(csp).toContain("img-src 'self' data: https: https://files.flarion.example;");
 		expect(csp).toContain('media-src https://files.flarion.example;');
 		expect(csp).not.toContain("'unsafe-eval'");
 	});

@@ -7,9 +7,12 @@
 	import { starIcon, starIconFill } from 'entasis/icons/star';
 	import { dotsThreeIcon } from 'entasis/icons/dotsThree';
 	import { lockIcon } from 'entasis/icons/lock';
+	import { shareNetworkIcon } from 'entasis/icons/shareNetwork';
 	import { lockKeyOpenIcon } from 'entasis/icons/lockKeyOpen';
 	import { clockCounterClockwiseIcon } from 'entasis/icons/clockCounterClockwise';
 	import { historyPanel } from '#lib/components/history/panel-state.svelte.ts';
+	import { exportDialog } from '#lib/components/export/state.svelte.ts';
+	import { downloadSimpleIcon } from 'entasis/icons/downloadSimple';
 	import { PopupMenu } from 'entasis/popup-menu';
 	import type { MenuItem } from 'entasis/menu';
 	import { toast } from 'entasis/toast';
@@ -17,6 +20,7 @@
 	import { moonIcon } from 'entasis/icons/moon';
 	import { sunIcon } from 'entasis/icons/sun';
 	import { magnifyingGlassIcon } from 'entasis/icons/magnifyingGlass';
+	import { sparkleIcon } from 'entasis/icons/sparkle';
 	import { wifiSlashIcon } from 'entasis/icons/wifiSlash';
 	import type { SidebarApi } from 'entasis/sidebar';
 	import type { PresenceUser } from '#lib/shared/protocol.ts';
@@ -36,6 +40,7 @@
 		onToggleFavorite,
 		onToggleDark,
 		onSearch,
+		onAsk,
 		onShare,
 		pageId = null,
 		canLock = false
@@ -56,6 +61,8 @@
 		onToggleFavorite: () => void;
 		onToggleDark: () => void;
 		onSearch: () => void;
+		/** Opens the Ask AI panel; absent when AI is unavailable. */
+		onAsk?: () => void;
 		/** Opens the share dialog of the current page. */
 		onShare?: () => void;
 		/** The page the "…" menu acts on (its lock), when a page is open. */
@@ -79,6 +86,10 @@
 	const pageMenu = $derived.by((): MenuItem[] =>
 		pageId
 			? [
+					// The Share button leaves the crowded top bar on phones: it is here instead.
+					...(sidebar.isMobile && onShare
+						? [{ type: 'option', title: 'Share', prefix: shareNetworkIcon, onclick: () => onShare(), 'data-testid': 'share-menu' } as MenuItem]
+						: []),
 					{
 						type: 'option',
 						title: lock?.locked ? 'Unlock page' : 'Lock page',
@@ -94,6 +105,13 @@
 						prefix: clockCounterClockwiseIcon,
 						onclick: () => historyPanel.show(pageId),
 						'data-testid': 'page-history'
+					} as MenuItem,
+					{
+						type: 'option',
+						title: 'Export',
+						prefix: downloadSimpleIcon,
+						onclick: () => exportDialog.show(pageId),
+						'data-testid': 'page-export'
 					} as MenuItem
 				]
 			: []
@@ -152,6 +170,9 @@
 			class="md:hidden"
 			onclick={onSearch}
 		/>
+		{#if onAsk}
+			<TipButton variant="ghost" size="small" tip="Ask AI" keys={['⌘', 'J']} prefix={sparkleIcon} onclick={onAsk} data-testid="ask-ai-button" />
+		{/if}
 		{#if showPageActions}
 			<span class="mr-1 ml-1 hidden text-xs text-[color:var(--app-text-secondary)] md:inline" aria-live="polite">
 				{pending > 0 ? 'Saving…' : 'Saved'}

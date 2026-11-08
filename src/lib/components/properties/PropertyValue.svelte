@@ -33,7 +33,7 @@
 		compact = false
 	}: { def: PropertyDef; value: PropValue | null | undefined; compact?: boolean } & PropertyLookups = $props();
 
-	const person = (id: string) => members.find((m) => m.userId === id)?.name ?? 'Unknown user';
+	const person = (id: string) => members.find((m) => m.userId === id)?.name ?? 'Deleted user';
 	const ids = $derived(valueIds(value));
 	// An option the registry does not know (deleted, or created elsewhere and not fetched yet) shows nothing.
 	const tags = $derived(

@@ -30,6 +30,8 @@ import {
 } from '../../../lib/shared/filter-ast';
 import type { DateOperand, DateRangeOperand } from '../../../lib/shared/dates';
 import type { PropertyDef } from '../../../lib/shared/property-types';
+import type { OptionIndex } from '../../bitmaps/option-index';
+import { createBitmap, roaringReady, type Bitmap } from '../../bitmaps/roaring';
 import type { SortTuple } from '../../engine/types';
 import { compareSortTuples, groupKeysOf, matchesFilterMany, runQuery, sortKeyOf } from '../../engine';
 import { orderGroups } from '../../engine/group';
@@ -40,6 +42,26 @@ import type { RowReader } from './rows';
 
 /** The ungrouped list's key. */
 export const FLAT = '';
+
+/**
+ * One string object per page id, shared by every unit that holds the page. A unit keeps the id of every page it
+ * matches, and a page is in many units at once (the same board, table and filtered views of one database): without
+ * sharing, each unit's parse or evaluation allocates its own copy of a 36-character id (about 56 bytes plus the array
+ * slot), and a few hundred thousand ids across the live units are most of the object's 128 MB; shared, the pages cost
+ * one copy and each unit only its 8-byte slot (docs/spikes/p4-scale.md "Memory"). Cleared when it holds more ids than
+ * a workspace is expected to (the units keep their strings; the pool just starts over).
+ */
+const ID_POOL = new Map<string, string>();
+const ID_POOL_MAX = 300_000;
+export function internId(id: string): string {
+	const known = ID_POOL.get(id);
+	if (known !== undefined) return known;
+	if (ID_POOL.size >= ID_POOL_MAX) ID_POOL.clear();
+	ID_POOL.set(id, id);
+	return id;
+}
+/** Pool size, for the state report. */
+export const internedIds = (): number => ID_POOL.size;
 
 /** What a view subscription asks (symbolic: the view and collection are resolved at every evaluation). */
 export interface ViewUnitSpec {
@@ -115,20 +137,70 @@ export async function resolveView(db: WorkspaceDb, spec: ViewUnitSpec): Promise<
 
 // ───────────────────────── state ─────────────────────────
 
-/** The ordered ids of a unit: one list under {@link FLAT}, or one per non-empty group. */
+/**
+ * The ordered ids of a unit: one list under {@link FLAT}, or one per non-empty group. Each list can carry a Roaring
+ * bitmap of its pages' numbers (built the first time the live loop needs it, then kept current by `maintainView`
+ * and `evaluateView`): intersecting it with an actor's visibility bitmap gives the visible total, and tells whether
+ * everything is visible, without looking at the ids one by one. Bitmaps are an optimization: a state without them
+ * answers the same questions the slow way.
+ */
 export class ViewState {
+	#bits: Map<string, Bitmap> | null;
+	#union: Bitmap | null = null;
+
 	constructor(
 		readonly groupBy: GroupBySpec | null,
-		readonly lists: ReadonlyMap<string, readonly string[]>
-	) {}
+		readonly lists: ReadonlyMap<string, readonly string[]>,
+		bits: Map<string, Bitmap> | null = null
+	) {
+		this.#bits = bits;
+	}
 
 	get grouped(): boolean {
 		return this.groupBy !== null;
 	}
 
+	/** The bitmap of one list when it is already built. */
+	bitsOf(key: string): Bitmap | undefined {
+		return this.#bits?.get(key);
+	}
+
+	/** Whether every list has its bitmap (so a successor can inherit them). */
+	get hasBits(): boolean {
+		if (!this.#bits) return false;
+		for (const key of this.lists.keys()) if (!this.#bits.has(key)) return false;
+		return true;
+	}
+
+	setBits(key: string, bits: Bitmap): void {
+		(this.#bits ??= new Map()).set(key, bits);
+		this.#union = null;
+	}
+
+	/** The pages of every list together (a page of two groups once): the grouped view's distinct total. */
+	union(): Bitmap | null {
+		if (this.#union) return this.#union;
+		if (!this.#bits) return null;
+		const all = createBitmap();
+		for (const key of this.lists.keys()) {
+			const bits = this.#bits.get(key);
+			if (!bits) return null;
+			all.orInPlace(bits);
+		}
+		return (this.#union = all);
+	}
+
+	/** Releases the bitmaps (the state was replaced and nothing reads it any more). */
+	dispose(): void {
+		for (const bits of this.#bits?.values() ?? []) bits.dispose();
+		this.#union?.dispose();
+		this.#bits = null;
+		this.#union = null;
+	}
+
 	static parse(text: string): ViewState {
 		const raw = JSON.parse(text) as { groupBy: GroupBySpec | null; lists: [string, string[]][] };
-		return new ViewState(raw.groupBy, new Map(raw.lists));
+		return new ViewState(raw.groupBy, new Map(raw.lists.map(([key, ids]) => [key, ids.map(internId)] as [string, string[]])));
 	}
 
 	serialize(): string {
@@ -175,6 +247,8 @@ export function groupKeysFor(registry: EavRegistry, groupBy: GroupBySpec, sizes:
 
 export interface EvalEnv {
 	now: number;
+	/** The option index (select, status, multi-select and person conditions read bitmaps). */
+	bitmaps?: OptionIndex | null;
 }
 
 /** Runs the query over every live page of the collection (no visibility restriction: sockets apply their own). */
@@ -186,16 +260,26 @@ export async function evaluateView(db: WorkspaceDb, resolved: ResolvedView, spec
 		me: spec.me,
 		now: env.now,
 		collectionId: resolved.collectionId,
-		window: {}
+		window: {},
+		bitmaps: env.bitmaps
 	});
 	const groupBy = resolved.spec.groupBy ?? null;
 	const lists = new Map<string, string[]>();
+	const bits = roaringReady() ? new Map<string, Bitmap>() : null;
+	const keep = (key: string, rows: readonly { id: string; num: number }[]) => {
+		lists.set(key, rows.map((r) => internId(r.id)));
+		if (bits) {
+			const nums = createBitmap(rows.map((r) => r.num));
+			nums.optimize();
+			bits.set(key, nums);
+		}
+	};
 	if (groupBy && result.groups) {
-		for (const g of result.groups) if (g.rows.length > 0) lists.set(g.key, g.rows.map((r) => r.id));
+		for (const g of result.groups) if (g.rows.length > 0) keep(g.key, g.rows);
 	} else if (result.rows.length > 0) {
-		lists.set(FLAT, result.rows.map((r) => r.id));
+		keep(FLAT, result.rows);
 	}
-	return new ViewState(groupBy, lists);
+	return new ViewState(groupBy, lists, bits);
 }
 
 // ───────────────────────── incremental maintenance ─────────────────────────
@@ -231,6 +315,9 @@ export interface MaintainInput {
 	reader: RowReader;
 	tuples: TupleCache;
 	now: number;
+	bitmaps?: OptionIndex | null;
+	/** The live loop's id-to-number cache: the binary search over a unit's stored order looks up many ids, and each miss is a query. */
+	numOf?: (id: string) => number | undefined;
 }
 
 /**
@@ -238,7 +325,7 @@ export interface MaintainInput {
  * incremental path cannot answer (a page's tuple could not be loaded): the caller evaluates in full.
  */
 export async function maintainView(input: MaintainInput): Promise<ViewState | null> {
-	const { db, resolved, spec, state, candidates, reader, tuples, now } = input;
+	const { db, resolved, spec, state, candidates, reader, tuples, now, bitmaps, numOf: cachedNumOf } = input;
 	const groupBy = resolved.spec.groupBy ?? null;
 	if ((state.groupBy === null) !== (groupBy === null) || JSON.stringify(state.groupBy) !== JSON.stringify(groupBy)) return null;
 	const sorts = resolved.spec.sorts ?? [];
@@ -247,7 +334,7 @@ export async function maintainView(input: MaintainInput): Promise<ViewState | nu
 	const numOf = reader.nums(candidates);
 	const live = reader.liveIds(candidates);
 	const liveNums = candidates.filter((id) => live.has(id) && numOf.has(id)).map((id) => numOf.get(id) as number);
-	const matched = await matchesFilterMany(db, resolved.spec.filter, liveNums, { me: spec.me, now, collectionId: resolved.collectionId });
+	const matched = await matchesFilterMany(db, resolved.spec.filter, liveNums, { me: spec.me, now, collectionId: resolved.collectionId, bitmaps });
 	const matchedNums = [...matched];
 	const keysOf = new Map<number, string[]>();
 	if (groupBy) for (const [n, keys] of await groupKeysOf(db, groupBy, matchedNums, { now })) keysOf.set(n, keys);
@@ -269,7 +356,7 @@ export async function maintainView(input: MaintainInput): Promise<ViewState | nu
 		const tupleOfId = async (id: string): Promise<SortTuple | undefined> => {
 			const hit = probe.get(id);
 			if (hit) return hit;
-			const n = reader.nums([id]).get(id);
+			const n = cachedNumOf?.(id) ?? reader.nums([id]).get(id);
 			if (n === undefined) return undefined;
 			const t = (await tuples.load(sorts, [n])).get(n);
 			if (t) probe.set(id, t);
@@ -291,12 +378,24 @@ export async function maintainView(input: MaintainInput): Promise<ViewState | nu
 					if (cmp(other, tuple) < 0) lo = mid + 1;
 					else hi = mid;
 				}
-				list.splice(lo, 0, id);
+				list.splice(lo, 0, internId(id));
 			}
 		}
 	}
 	for (const [key, list] of lists) if (list.length === 0) lists.delete(key);
-	return new ViewState(groupBy, lists);
+	// The successor inherits the bitmaps: every candidate leaves, the pages that matched are put where they belong.
+	let bits: Map<string, Bitmap> | null = null;
+	if (roaringReady() && state.hasBits) {
+		const left = [...idOf.keys()];
+		bits = new Map();
+		for (const key of lists.keys()) {
+			const next = (state.bitsOf(key) ?? createBitmap()).clone();
+			next.removeMany(left);
+			bits.set(key, next);
+		}
+		for (const n of matchedNums) for (const key of keysOf.get(n) ?? []) bits.get(key)?.add(n);
+	}
+	return new ViewState(groupBy, lists, bits);
 }
 
 /** Whether a unit with these properties is touched by writes to `changed` (or by an edit of a page when it reads edit stamps). */

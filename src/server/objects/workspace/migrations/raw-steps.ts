@@ -6,7 +6,24 @@
  * They run synchronously from the constructor, before viborm's estate: never while a viborm transaction
  * is open (CLAUDE.md), and viborm ignores these tables because they are not in `WORKSPACE_TABLES`.
  */
-export const RAW_STEPS: readonly string[][] = [
+export type RawStep = string[] | GatedRawStep;
+
+/**
+ * A step that waits for a feature flag: it applies only while the flag `migration.<name>` is on (D1 flag, KV cached,
+ * `src/server/flags.ts`; a flag lookup that fails reads as off, so a flaky flag store delays a migration, never runs
+ * one). Steps apply in order and a gated step that is not enabled holds back every step after it, so a flag can only
+ * delay the schema, never reorder it. Ship the step dark (flag off) in one deploy, code that uses its columns in a
+ * later one, switch the flag on object by object (`rollout`), and roll back by switching it off and deploying the
+ * previous version (docs/ops/migrations.md).
+ */
+export interface GatedRawStep {
+	flag: `migration.${string}`;
+	statements: string[];
+}
+
+const statementsOf = (step: RawStep): string[] => (Array.isArray(step) ? step : step.statements);
+
+export const RAW_STEPS: readonly RawStep[] = [
 	[
 		// ----- subscription registry (survives hibernation; attachments hold only { socketId, actor }) -----
 		// The one stream per socket (the `hello` event iterator): every server message goes to `request_id`.
@@ -73,17 +90,39 @@ export const RAW_STEPS: readonly string[][] = [
 	]
 ];
 
-/** Applies the steps not yet recorded. Idempotent and cheap once current (one SELECT). */
-export function applyRawSteps(storage: DurableObjectStorage): void {
+/** The raw schema version this object is at (0 for a fresh one). */
+export function rawSchemaVersion(storage: DurableObjectStorage): number {
 	const sql = storage.sql;
 	sql.exec('CREATE TABLE IF NOT EXISTS raw_schema (id INTEGER PRIMARY KEY CHECK (id = 1), version INTEGER NOT NULL)');
-	const row = sql.exec<{ version: number }>('SELECT version FROM raw_schema WHERE id = 1').toArray()[0];
-	const current = row?.version ?? 0;
-	if (current >= RAW_STEPS.length) return;
+	return sql.exec<{ version: number }>('SELECT version FROM raw_schema WHERE id = 1').toArray()[0]?.version ?? 0;
+}
+
+/** The flags of the gated steps this object has not applied yet, in step order (the caller looks them up, then calls `applyRawSteps`). */
+export function pendingFlags(storage: DurableObjectStorage, steps: readonly RawStep[] = RAW_STEPS): string[] {
+	const out: string[] = [];
+	for (let v = rawSchemaVersion(storage); v < steps.length; v++) {
+		const step = steps[v]!;
+		if (!Array.isArray(step)) out.push(step.flag);
+	}
+	return out;
+}
+
+/**
+ * Applies the steps not yet recorded, in order, each in its own transaction, up to the first gated step whose flag is
+ * not in `enabled`. Idempotent and cheap once current (one SELECT). Returns the version the object is at afterwards.
+ */
+export function applyRawSteps(storage: DurableObjectStorage, enabled: ReadonlySet<string> = new Set(), steps: readonly RawStep[] = RAW_STEPS): number {
+	const sql = storage.sql;
+	const current = rawSchemaVersion(storage);
+	let version = current;
 	storage.transactionSync(() => {
-		for (let v = current; v < RAW_STEPS.length; v++) {
-			for (const statement of RAW_STEPS[v]) sql.exec(statement);
+		while (version < steps.length) {
+			const step = steps[version]!;
+			if (!Array.isArray(step) && !enabled.has(step.flag)) break;
+			for (const statement of statementsOf(step)) sql.exec(statement);
+			version++;
 		}
-		sql.exec('INSERT OR REPLACE INTO raw_schema (id, version) VALUES (1, ?)', RAW_STEPS.length);
+		if (version !== current) sql.exec('INSERT OR REPLACE INTO raw_schema (id, version) VALUES (1, ?)', version);
 	});
+	return version;
 }

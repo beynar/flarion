@@ -165,3 +165,43 @@ html[data-theme='dark'] {
 	--app-block-red: #BE524B;
 	--app-block-red-bg: #332523;
 }
+
+html:root[data-theme] {
+	--radius-lg: 10px;
+}
+
+html[data-contrast='high'] {
+	--app-text-secondary: #55544f;
+	--app-text-tertiary: #6a6965;
+	--app-text-sidebar: #4b4a47;
+	--app-accent: #1a6dc0;
+	--color-primary: #1a6dc0;
+}
+
+html[data-theme='dark'][data-contrast='high'] {
+	--app-text-secondary: rgba(255, 255, 255, 0.70);
+	--app-text-tertiary: rgba(255, 255, 255, 0.58);
+	--app-text-sidebar: rgba(255, 255, 255, 0.78);
+	--app-accent: #5aa9ff;
+	--color-primary: #1a6dc0;
+	--app-option-gray-fg: #ffffff;
+	--app-option-brown-fg: #ffffff;
+	--app-option-orange-fg: #ffffff;
+	--app-option-yellow-fg: #ffffff;
+	--app-option-green-fg: #ffffff;
+	--app-option-blue-fg: #ffffff;
+	--app-option-purple-fg: #ffffff;
+	--app-option-pink-fg: #ffffff;
+	--app-option-red-fg: #ffffff;
+}
+
+@media (prefers-reduced-motion: reduce) {
+	*,
+	*::before,
+	*::after {
+		animation-duration: 0.01ms !important;
+		animation-iteration-count: 1 !important;
+		transition-duration: 0.01ms !important;
+		scroll-behavior: auto !important;
+	}
+}

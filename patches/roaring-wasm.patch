@@ -1,0 +1,17 @@
+diff --git a/browser/index.mjs b/browser/index.mjs
+index fd835c8517bc19e82048df5e91cc11cfa8758ec4..c51071cee3a87b3bcef183749c40654ddce6d4dc 100644
+--- a/browser/index.mjs
++++ b/browser/index.mjs
+@@ -342,7 +342,11 @@ var _scriptName,
+                   })(binaryFile),
+                 );
+               })(binaryFile)
+-                .then((binary) => WebAssembly.instantiate(binary, imports))
++                .then((binary) =>
++                  globalThis.__ROARING_WASM_MODULE__
++                    ? WebAssembly.instantiate(globalThis.__ROARING_WASM_MODULE__, imports).then((instance) => ({ instance, module: globalThis.__ROARING_WASM_MODULE__ }))
++                    : WebAssembly.instantiate(binary, imports),
++                )
+                 .then(receiver, (reason) => {
+                   err("failed to asynchronously prepare wasm: " + reason),
+                     abort(reason);

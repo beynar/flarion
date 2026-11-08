@@ -8,10 +8,12 @@ import { createDirectoryClient, type DirectoryClient } from '../db/global.client
 import { INVITE_TTL_DAYS, hashInviteToken, isInviteUsable, lookupInvite, newInviteToken } from './invites';
 import { guestInviteMail, inviteMail, sendMail } from '../mail';
 import { drainOutbox, outboxInsert, runOutbox } from './outbox';
+import { assertAccountActive } from './account-deletion';
+import { locationHintFor } from '../objects/workspace/location';
 import type { SessionInfo, WorkspaceRole } from './session';
 import { applyPendingGrants, revokeGuestGrants } from '../share/guests';
 
-export type Services = { env: Env; ctx: Pick<ExecutionContext, 'waitUntil'> };
+export type Services = { env: Env; ctx: Pick<ExecutionContext, 'waitUntil'>; request?: Request };
 
 const SLUG = /^[a-z0-9][a-z0-9-]{1,38}[a-z0-9]$/;
 const iso = (date: Date) => date.toISOString();
@@ -91,6 +93,7 @@ export async function createWorkspace(
 	input: { name: string; slug?: string; icon?: string | null }
 ): Promise<WorkspaceDto> {
 	const { env } = services;
+	await assertAccountActive(env, session.userId);
 	const db = createDirectoryClient(env.DB, session.userId);
 	const explicit = input.slug !== undefined;
 	const now = new Date();
@@ -106,7 +109,14 @@ export async function createWorkspace(
 		}
 		const outbox = outboxInsert(db, id, {
 			kind: 'init',
-			payload: { workspaceId: id, name: input.name, ownerId: session.userId, ownerName: session.name }
+			payload: {
+				workspaceId: id,
+				name: input.name,
+				ownerId: session.userId,
+				ownerName: session.name,
+				// Where the creator is: the object is placed there (a hint only counts on first contact).
+				locationHint: locationHintFor(services.request?.cf as { continent?: string; country?: string; longitude?: string } | undefined)
+			}
 		});
 		try {
 			await db.$transaction([
@@ -423,6 +433,7 @@ export async function revokeInvite(env: Env, workspaceId: string, role: Workspac
  */
 export async function acceptInvite(services: Services, session: SessionInfo, token: string): Promise<WorkspaceDto> {
 	const { env } = services;
+	await assertAccountActive(env, session.userId);
 	const invite = await lookupInvite(env, token);
 	if (!invite || !isInviteUsable(invite)) throw new ORPCError('NOT_FOUND', { message: 'This invitation is no longer valid' });
 	if (invite.email.toLowerCase() !== session.email.toLowerCase()) {

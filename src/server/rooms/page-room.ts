@@ -3,14 +3,16 @@
  * `PageDO`'s own methods, and edytor's generated RPC types are too deep for tsc, so the surface the Worker uses is
  * written down here once.
  */
-import type { JSONDoc } from 'edytor/crdt/edytor';
-import type { CommitResult, ExportedBlocks, HistoryEntry, ImportReceipt, ImportRequest, RestoreResult } from 'edytor/cloudflare';
+import type { JSONBlock, JSONDoc } from 'edytor/crdt/edytor';
+import type { CommentActor, CommentOutcome, CommentRequest, CommentSnapshot, CommitResult, ExportedBlocks, HistoryEntry, ImportReceipt, ImportRequest, RestoreResult } from 'edytor/cloudflare';
 import type { PageLockState } from '../objects/page/page-do';
 import { roomName } from './names';
 
 export interface PageRoomApi {
 	recordIdentity(workspaceId: string, pageId: string): Promise<void>;
 	read(): Promise<JSONDoc>;
+	/** The body with its version (published pages): the room's `read()` and `String(lastUpdated() ?? 0)`. */
+	readPublished(): Promise<{ doc: JSONDoc; version: string }>;
 	seedFrom(json: JSONDoc): Promise<{ seeded: boolean }>;
 	lockState(userId?: string): Promise<PageLockState>;
 	listHistory(): Promise<HistoryEntry[]>;
@@ -24,6 +26,16 @@ export interface PageRoomApi {
 	commitMove(moveId: string, receipt: { to: string; ids: Record<string, string> }): Promise<CommitResult>;
 	abortMove(moveId: string): Promise<{ moveId: string; status: 'applied' | 'noop' }>;
 	purge(): Promise<{ r2Deleted: number; sockets: number }>;
+	/** Public API (`/v1`): see `PageDO.appendBlocks`. */
+	appendBlocks(input: {
+		parentId: string | null;
+		blocks: JSONBlock[];
+		afterId?: string;
+		userId: string;
+		bypassLock: boolean;
+	}): Promise<{ ok: true; blocks: JSONBlock[] } | { ok: false; reason: 'locked' | 'not_found' | 'invalid'; message: string }>;
+	listCommentThreads(): Promise<CommentSnapshot>;
+	applyComment(request: CommentRequest, actor: CommentActor): Promise<CommentOutcome>;
 }
 
 /**

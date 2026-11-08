@@ -374,8 +374,11 @@ export const aiAskInputSchema = v.object({
 });
 export const aiAskEventSchema = v.variant('type', [
 	v.object({ type: v.literal('delta'), text: v.string() }),
-	/** Pages the answer draws on, all visible to the caller. */
-	v.object({ type: v.literal('sources'), pages: v.array(v.object({ id: idSchema, title: v.string() })) }),
+	/**
+	 * Pages the answer draws on, all visible to the caller (`snippet`: the start of the cited passage, HTML-escaped
+	 * plain text). Sent once, after the last `delta`; empty when nothing readable was relevant.
+	 */
+	v.object({ type: v.literal('sources'), pages: v.array(v.object({ id: idSchema, title: v.string(), snippet: v.optional(v.string()) })) }),
 	v.object({ type: v.literal('done'), threadId: idSchema })
 ]);
 export type AiAskEvent = v.InferOutput<typeof aiAskEventSchema>;

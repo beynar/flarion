@@ -109,8 +109,16 @@ export async function signUpAndCreateWorkspace(person: Person, workspaceName: st
 /** Invites `invitee` by email from Settings > Members and returns the invite link. */
 export async function inviteMember(owner: Person, slug: string, invitee: Person): Promise<string> {
 	const { page } = owner;
-	await page.goto(`/${slug}/settings/members`);
-	await expect(page.getByTestId('members-tab')).toBeVisible();
+	// A dev server that is reloading (other people's edits, HMR) answers 500 for a moment: load again.
+	for (let attempt = 0; ; attempt++) {
+		await page.goto(`/${slug}/settings/members`);
+		try {
+			await expect(page.getByTestId('members-tab')).toBeVisible({ timeout: 12_000 });
+			break;
+		} catch (error) {
+			if (attempt >= 3) throw error;
+		}
+	}
 	await page.getByLabel('Invite by email').fill(invitee.email);
 	await page.getByRole('button', { name: 'Send invite' }).click();
 	await expect(page.getByTestId('pending-invites').getByText(invitee.email)).toBeVisible();
@@ -200,4 +208,58 @@ export async function dragRow(page: Page, from: string | RegExp, to: string | Re
 			await page.mouse.up();
 		}
 	};
+}
+
+/** The private API as the client calls it (cookie, CSRF header, workspace header): seeds data through the RPCs. */
+export async function rpcCall<T = unknown>(page: Page, workspaceId: string, path: string, input: unknown): Promise<T> {
+	return page.evaluate(
+		async ({ workspaceId, path, input }) => {
+			const response = await fetch(`/rpc/${path}`, {
+				method: 'POST',
+				headers: { 'content-type': 'application/json', 'x-csrf-token': 'orpc', 'x-workspace-id': workspaceId, 'x-app-version': 'dev' },
+				body: JSON.stringify({ json: input })
+			});
+			const body = (await response.json()) as { json?: unknown };
+			if (!response.ok) throw new Error(`${path}: ${response.status} ${JSON.stringify(body)}`);
+			return body.json;
+		},
+		{ workspaceId, path, input }
+	) as Promise<T>;
+}
+
+/** The id of the workspace with this slug, read from `me`. */
+export const workspaceIdOf = (page: Page, slug: string): Promise<string> =>
+	page.evaluate(async (slug) => {
+		const response = await fetch('/rpc/me', { method: 'POST', headers: { 'content-type': 'application/json', 'x-csrf-token': 'orpc', 'x-app-version': 'dev' }, body: '{}' });
+		const body = (await response.json()) as { json: { workspaces: { id: string; slug: string }[] } };
+		return body.json.workspaces.find((w) => w.slug === slug)!.id;
+	}, slug);
+
+const EDITOR = '[data-flarion-editor] [data-edytor]';
+
+/** Types `text` as the body of a page, through the real editor. */
+export async function writeBody(page: Page, slug: string, pageId: string, text: string) {
+	await page.goto(`/${slug}/${pageId}`);
+	await page.waitForSelector(`${EDITOR}[contenteditable]`);
+	await page.locator(EDITOR).click();
+	await page.keyboard.press('Control+End');
+	await page.keyboard.press('Enter');
+	await page.keyboard.type(text);
+	await expect.poll(() => page.locator('[data-flarion-editor]').innerText()).toContain(text.slice(0, 20));
+}
+
+/**
+ * Waits until the full-text index holds the body of `pageId` for `term`: body text reaches it through the Page Durable
+ * Object's save and the batched indexing queue (about 30 seconds).
+ */
+export async function waitForBodyIndexed(page: Page, workspaceId: string, term: string, pageId: string) {
+	await expect
+		.poll(
+			async () => {
+				const { hits } = await rpcCall<{ hits: { id: string; field: string }[] }>(page, workspaceId, 'search/query', { q: term });
+				return hits.some((hit) => hit.id === pageId && hit.field === 'body');
+			},
+			{ timeout: 150_000, intervals: [2000, 3000, 5000] }
+		)
+		.toBe(true);
 }

@@ -3,7 +3,8 @@
  * the `RL_AUTH` rate limit. In development and tests only, `GET|DELETE /api/auth/dev/mails` reads or clears
  * the mails the dev fallback stored (see `server/mail`).
  */
-import { getAuth } from '../auth/auth';
+import { getAuth, SESSION_EXPIRES_SECONDS } from '../auth/auth';
+import { resignSessionCookie } from '../auth/secret-rotation';
 import { ensureDevSchema } from '../db/dev-migrate';
 import { clearDevMails, readDevMails } from '../mail';
 import type { RouteHandler } from './types';
@@ -51,7 +52,13 @@ export const handleAuth: RouteHandler = async (request, env) => {
 
 	try {
 		await ensureDevSchema(env);
-		return await getAuth(env).handler(request);
+		// Secret rotation overlap: a session cookie signed with the previous secret is re-signed (docs/ops/secrets.md).
+		const rotated = await resignSessionCookie(request, env, SESSION_EXPIRES_SECONDS);
+		const response = await getAuth(env).handler(rotated.request);
+		if (!rotated.setCookie) return response;
+		const headers = new Headers(response.headers);
+		headers.append('set-cookie', rotated.setCookie);
+		return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
 	} catch (error) {
 		console.error('[auth] unhandled error:', error instanceof Error ? (error.stack ?? error.message) : error);
 		// Internals are only ever shown in development and tests.

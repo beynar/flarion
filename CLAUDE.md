@@ -179,3 +179,27 @@ itself on `E2E_PORT` and reuses when one is already there. Three Playwright conf
 - **Gate numbers** (`tests/e2e/p3-gate.spec.ts`, real browsers, local dev): an edit reaches a collaborator's DOM in about
   15 ms p50 and 20 ms p95 over 20 edits; the workers measurement (`tests/workers/live/latency.test.ts`) has no network.
 - Chromium headless: the comment margin needs a 1,700 px viewport for every thread to show a card.
+
+## Integration conventions learned in P4 (App UI)
+- **Quick find, search page, Ask AI**: `⌘K` is `shell/CommandPalette.svelte` over `search.quick` (order) + `search.query` (snippets, paths),
+  debounced by `QuickFinder` (`src/lib/client/search.ts`); the search page is `/[ws]/search` (`components/search/SearchPage.svelte`, state in
+  the URL); `⌘J` opens `components/ai/AskPanel.svelte` (entasis `AIChat`, streamed from `ai.ask` by `ai/ask.ts`, threads in
+  localStorage `flarion.<ws>.<user>.ai.threads`). The panel switches itself off (banner, composer disabled, entry points hidden) when `ai.ask`
+  answers `SERVICE_UNAVAILABLE` / `NOT_IMPLEMENTED`. **Dev AI**: set `localStorage['flarion:fake-ai'] = '1'` (dev build only): every AI call then
+  carries `x-flarion-fake-ai` and the backend answers with its deterministic fake model (`src/lib/client/ai-rpc.ts`).
+- **Accessibility settings**: Settings > Appearance has the theme and a contrast choice (`Match system` / `Standard` / `High contrast`,
+  `src/lib/client/a11y.svelte.ts`, localStorage `flarion.contrast`) which sets `data-contrast="high"` on `<html>`; `generated/app-vars.css`
+  then raises `--app-text-secondary/-tertiary/-sidebar` to the `highContrast` tokens (4.5:1 on every surface, `tests/unit/design-contrast.test.ts`).
+  Standard contrast keeps Notion's softer text on purpose. Reduced motion needs no setting (generated CSS and entasis follow the OS).
+- **`pnpm test:visual`** (`tests/visual/`, its own config, `E2E_PORT` default 5973): a `seed` project builds one workspace through the real app
+  and RPCs (`seed.ts`: two people, a teamspace, a database with six views, a published page, trash), then `screens.spec.ts` compares
+  **20 screens x 2 themes** (`__screenshots__/<screen>-<theme>.png`), `metrics.spec.ts` asserts computed row heights, font sizes and radii
+  equal `notion.tokens.ts`, `a11y.spec.ts` runs axe (WCAG 2.0-2.2 A/AA) on the same 20 screens in both themes, with all rules in High
+  contrast and every rule but `color-contrast` in Standard (the one exception: the sidebar's page tree, see the spec's header), and
+  `mobile.spec.ts` checks the phone layout (390px, touch) and photographs 8 phone screens (`mobile-*-light.png`, in addition to the 40). Rendering is pinned (bundled Inter, clock at 2026-11-15 UTC, reduced motion, no
+  caret, masks over times and ids); the baselines were made with Chromium on macOS, so regenerate them on another platform.
+  Commands: `E2E_PORT=5873 pnpm test:visual` (all), `... pnpm test:visual screens|metrics|a11y` (one), `pnpm test:visual:update` (rewrite the
+  baselines; look at the images before committing), `VISUAL_REUSE=1` (keep the seed of the last run). The dev server must have been started
+  after the last `pnpm add` (a stale Vite cache answers `504 Outdated Optimize Dep`).
+- **Phones** (< 768px): the sidebar is an overlay (entasis `Sidebar` offcanvas), dialogs collapse to bottom sheets (entasis `Dialog`), the Ask
+  AI panel is full screen, the table scrolls sideways, the board snaps column by column.

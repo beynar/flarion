@@ -85,6 +85,7 @@
 			onItemClick={({ occurrence, event }) => env.open(occurrence.item.id, event)}
 			density="compact"
 			class="notion-calendar"
+			theme={{ navigation: { base: '[&_button]:h-7! [&_button]:w-7!' } }}
 			itemTooltip={false}
 		/>
 		{#if undated}

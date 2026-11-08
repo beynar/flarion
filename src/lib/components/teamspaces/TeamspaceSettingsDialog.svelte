@@ -272,6 +272,7 @@
 								label="Add a member"
 								theme={{ label: { base: 'sr-only' } }}
 								placeholder="Add a workspace member…"
+								prefix={false}
 								bind:searchValue={query}
 								bind:value={picked}
 								items={candidateOptions}

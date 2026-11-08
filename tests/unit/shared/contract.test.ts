@@ -18,7 +18,7 @@ type Outputs = InferContractRouterOutputs<typeof contract>;
 describe('private contract: routers of the plan', () => {
 	it('has every router', () => {
 		expect(Object.keys(contract).sort()).toEqual(
-			['ai', 'collection', 'files', 'me', 'mutate', 'page', 'property', 'search', 'tokens', 'view', 'workspace'].sort()
+			['account', 'admin', 'ai', 'collection', 'files', 'import', 'me', 'mutate', 'page', 'property', 'search', 'tokens', 'view', 'workspace'].sort()
 		);
 		expect(Object.keys(contract.workspace)).toEqual(expect.arrayContaining(['create', 'settings', 'members', 'invites', 'teamspaces']));
 		expect(Object.keys(contract.workspace.teamspaces)).toEqual(expect.arrayContaining(['create', 'members']));
@@ -43,6 +43,8 @@ describe('private contract: routers of the plan', () => {
 		const os = implement(contract);
 		const seen: string[] = [];
 		const router = os.router({
+			account: {} as never,
+			admin: {} as never,
 			me: os.me.handler(() => ({ id: 'u1', name: 'Ada', email: 'a@b.c', emailVerified: true, image: null, workspaces: [] })),
 			workspace: {
 				list: os.workspace.list.handler(() => []),
@@ -54,6 +56,8 @@ describe('private contract: routers of the plan', () => {
 					throw new ORPCError('NOT_FOUND');
 				}),
 				delete: os.workspace.delete.handler(() => ({ purgeAfter: '2026-12-07T10:00:00Z' })),
+				export: {} as never,
+				transferOwnership: {} as never,
 				members: {
 					list: os.workspace.members.list.handler(() => []),
 					setRole: os.workspace.members.setRole.handler(() => ({})),
@@ -112,6 +116,7 @@ describe('private contract: routers of the plan', () => {
 				regenerate: {} as never
 			},
 			files: {} as never,
+			import: {} as never,
 			tokens: {} as never
 		});
 		const handler = new RPCHandler(router);

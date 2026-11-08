@@ -77,11 +77,13 @@
 	{#if !dp.start}
 		<Empty size="small" title="No date property yet" description="Add a date property to this database to place its pages on the timeline." data-testid="timeline-needs-date" />
 	{:else}
+		<!-- The zoom Select shows its label above the box; Notion's is a bare "Week" menu (the label stays for screen readers). -->
 		<GanttChart
 			bind:tasks
 			timeZone="UTC"
 			density="compact"
 			class="notion-timeline"
+			theme={{ zoomControl: { base: '[&_label]:sr-only' } }}
 			layout={{ rowHeight: 36, grid: { columns: [{ id: 'title', title: 'Name', width: 240, sortable: false, editable: false }] } }}
 			timeline={{ todayIndicator: true }}
 			interactions={{ moveTask: env.editable, resizeStart: env.editable, resizeEnd: env.editable, resizeProgress: false, reorderRows: false, indent: false, outdent: false, createRange: false }}

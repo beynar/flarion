@@ -16,10 +16,14 @@ export function fakeReply(user: string): string {
 		case 'continue':
 			return `and then the story went on, as drafted by the assistant. ${head ? `(after: ${head.slice(-30)})` : ''}`.trim();
 		case 'summarize':
+		case 'summary':
 			return `Summary: ${head}.`;
+		case 'keywords':
+			return head.split(' ').slice(0, 5).join(', ');
 		case 'fix_spelling':
 			return quoted.replace(/teh/g, 'the');
 		case 'translate':
+		case 'translation':
 			return `Traduction: ${head}`;
 		case 'explain':
 			return `In simple terms: ${head}.`;

@@ -371,7 +371,7 @@ export function describeCondition(
 			const id = String(value);
 			const type = field?.def?.type;
 			if (field?.def && (type === 'select' || type === 'status' || type === 'multi_select')) text = optionsOf(field.def).find((o) => o.id === id)?.name ?? id;
-			else if (type === 'person' || type === 'created_by' || type === 'last_edited_by') text = members.find((m) => m.userId === id)?.name ?? 'Someone';
+			else if (type === 'person' || type === 'created_by' || type === 'last_edited_by') text = members.find((m) => m.userId === id)?.name ?? 'Deleted user';
 			else text = resolvePage?.(id) ?? 'Deleted page';
 			break;
 		}
@@ -400,6 +400,6 @@ export function groupKeyLabel(def: Pick<PropertyDef, 'type' | 'config' | 'name'>
 	if (def.type === 'checkbox') return key === 'true' ? 'Checked' : 'Unchecked';
 	const option = optionsOf(def).find((o) => o.id === key);
 	if (option) return option.name;
-	if (def.type === 'person' || def.type === 'created_by' || def.type === 'last_edited_by') return members.find((m) => m.userId === key)?.name ?? 'Someone';
+	if (def.type === 'person' || def.type === 'created_by' || def.type === 'last_edited_by') return members.find((m) => m.userId === key)?.name ?? 'Deleted user';
 	return key;
 }

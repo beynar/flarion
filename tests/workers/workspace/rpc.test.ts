@@ -186,11 +186,9 @@ describe('rows made from a view and the P4 stubs', () => {
 		expect((await failure(owner.page.create({}))).code).toBe('VALIDATION_FAILED');
 	});
 
-	test('ai.regenerate and ai.ask answer a clean NOT_IMPLEMENTED to a signed-in caller, and nothing to an outsider', async () => {
+	test('ai.regenerate answers NOT_FOUND for a page that does not exist, and nothing to an outsider', async () => {
 		const { ws, owner } = await setup();
-		const error = await failure(owner.ai.regenerate({ pageId: 'x', propId: 'y' }));
-		expect(error).toMatchObject({ code: 'NOT_IMPLEMENTED', status: 501, data: { feature: 'ai-property' } });
-		expect(error.message).toBe('AI properties are not available yet.');
+		expect((await failure(owner.ai.regenerate({ pageId: 'x', propId: 'y' }))).code).toBe('NOT_FOUND');
 		const outsider = clientFor(ws.id, null);
 		expect((await failure(outsider.ai.regenerate({ pageId: 'x', propId: 'y' }))).code).toBe('UNAUTHORIZED');
 	});

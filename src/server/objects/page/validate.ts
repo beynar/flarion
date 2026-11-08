@@ -58,6 +58,11 @@ const CANNOT_EDIT: ReadonlySet<StoredAccess> = new Set(['none', 'read', 'comment
 
 const LAST_EDITOR = 'last_editor';
 
+/** A write that did not come through a socket (the public API) records its user as the page's last editor. */
+export function recordLastEditor(kv: SyncKvStorage, userId: string): void {
+	kv.put(LAST_EDITOR, userId);
+}
+
 /** The user whose frame last changed the page's blocks, for the indexing job's `editedBy`. */
 export function lastEditor(kv: SyncKvStorage): string | null {
 	return kv.get<string>(LAST_EDITOR) ?? null;

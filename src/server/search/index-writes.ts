@@ -21,7 +21,7 @@ import { chunks, MAX_PARAMS, qmarks, rawAll, rawRun } from '../objects/workspace
 import { chunkForFullText, cleanText } from './chunk';
 
 /** Property types whose values are indexed as text. */
-export const INDEXED_PROPERTY_TYPES = ['text', 'url', 'email', 'phone'] as const;
+export const INDEXED_PROPERTY_TYPES = ['text', 'url', 'email', 'phone', 'ai'] as const;
 /** Rows per multi-row INSERT (three bound parameters each, under the platform's 100). */
 const ROWS_PER_INSERT = 30;
 

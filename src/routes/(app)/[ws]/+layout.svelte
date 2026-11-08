@@ -56,13 +56,16 @@
 			? 'settings'
 			: routeId.endsWith('/trash')
 				? 'trash'
-				: routeId.endsWith('/[page]')
-					? 'page'
-					: 'home'
+				: routeId.endsWith('/search')
+					? 'search'
+					: routeId.endsWith('/[page]')
+						? 'page'
+						: 'home'
 	);
 
 	const crumbs: BreadcrumbItem[] = $derived.by(() => {
 		if (section === 'trash') return [{ label: 'Trash', active: true }];
+		if (section === 'search') return [{ label: 'Search', active: true }];
 		if (section === 'settings') return [{ label: 'Settings', active: true }];
 		if (section === 'page') {
 			const id = page.params.page ?? '';

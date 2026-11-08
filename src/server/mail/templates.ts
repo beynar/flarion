@@ -152,3 +152,27 @@ export function pageSharedMail(input: {
 		text: signoff(`${input.inviterName} gave you access to "${title}" in the ${input.workspaceName} workspace on Flarion. You can ${phrase} this page.\n\nOpen the page:\n${input.url}`)
 	};
 }
+
+/** The alert cron's mail: one line per breaching signal, and a link to the dashboard. */
+export function alertMail(input: {
+	signals: readonly { label: string; display: string; alertWhen: string; detail?: string }[];
+	environment: string;
+	appOrigin: string;
+}): Template {
+	const names = input.signals.map((s) => s.label);
+	const lines = input.signals.map((s) => `${s.label}: ${s.display}\n  Alert when: ${s.alertWhen}${s.detail ? `\n  ${s.detail}` : ''}`);
+	const items = input.signals
+		.map((s) => `<li><strong>${escapeHtml(s.label)}</strong>: ${escapeHtml(s.display)}<br><span style="color:#787774">Alert when: ${escapeHtml(s.alertWhen)}${s.detail ? ` · ${escapeHtml(s.detail)}` : ''}</span></li>`)
+		.join('');
+	const url = `${input.appOrigin}/`;
+	return {
+		subject: `[${input.environment}] Flarion alert: ${names.join(', ')}`,
+		html: layout(
+			'An operating target is breached',
+			`<ul style="padding-left:18px;margin:0">${items}</ul>`,
+			{ label: 'Open Flarion', url },
+			`Environment: ${escapeHtml(input.environment)}. The SLO dashboard is under Settings, Operations (owners only). You get one mail an hour for a signal that keeps breaching.`
+		),
+		text: signoff(`An operating target is breached (${input.environment}):\n\n${lines.join('\n\n')}\n\nOpen ${url} and go to Settings, Operations for the dashboard.`)
+	};
+}

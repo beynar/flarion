@@ -17,6 +17,7 @@ import {
 	updateWorkspace,
 	listWorkspaces
 } from '../../auth/workspaces';
+import { transferOwnership } from '../../auth/account-deletion';
 
 export const workspaceHandlers = {
 	list: os.workspace.list.use(requireSession).handler(({ context }) => listWorkspaces(context.env, context.session.userId)),
@@ -32,6 +33,10 @@ export const workspaceHandlers = {
 	delete: os.workspace.delete
 		.use(requireWorkspace)
 		.handler(({ context, input }) => deleteWorkspace(context, context.actor, input.confirmName)),
+	transferOwnership: os.workspace.transferOwnership.use(requireWorkspace).handler(async ({ context, input }) => {
+		await transferOwnership(context, context.actor, input.userId);
+		return {};
+	}),
 	members: {
 		list: os.workspace.members.list.use(requireWorkspace).handler(({ context }) => listMembers(context.env, context.actor.workspaceId, context.actor.role)),
 		setRole: os.workspace.members.setRole.use(requireWorkspace).handler(async ({ context, input }) => {

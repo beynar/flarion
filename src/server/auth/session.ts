@@ -6,7 +6,8 @@
  *   sessions (restricted to registering a passkey) never resolve: they are not usable for the app.
  * - `resolveMembership`: the Workspace DO's cached mirror first (`getMemberRole`), then D1.
  */
-import { getAuth } from './auth';
+import { getAuth, SESSION_EXPIRES_SECONDS } from './auth';
+import { resignSessionCookie } from './secret-rotation';
 import { workspaceIdentity } from './workspace-rpc';
 import { createDirectoryClient } from '../db/global.client';
 import { ensureDevSchema } from '../db/dev-migrate';
@@ -35,7 +36,9 @@ export async function resolveSession(request: Request, env: Env): Promise<Sessio
 	let result;
 	try {
 		await ensureDevSchema(env);
-		result = await getAuth(env).api.getSession({ headers: request.headers });
+		// Secret rotation overlap: read a cookie signed with the previous secret as if it were signed with the current one.
+		const { request: effective } = await resignSessionCookie(request, env, SESSION_EXPIRES_SECONDS);
+		result = await getAuth(env).api.getSession({ headers: effective.headers });
 	} catch (error) {
 		// D1 unavailable or a malformed cookie: treated as signed out (the cookie cache still serves
 		// most requests while D1 is down).

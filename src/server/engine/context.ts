@@ -17,7 +17,8 @@ export interface Counters {
 	rowsRead: number;
 }
 
-export const toSet = (visible: VisibleSet): ReadonlySet<number> => (visible instanceof Set ? visible : new Set(visible as readonly number[]));
+/** A set-like (`has`, `size`) is used as it is: the Workspace DO hands in a copy-free view of an actor's visibility. */
+export const toSet = (visible: VisibleSet): ReadonlySet<number> => (Array.isArray(visible) ? new Set(visible as readonly number[]) : (visible as ReadonlySet<number>));
 
 export class Ctx {
 	readonly counters: Counters = { statements: 0, scans: 0, probes: 0, rowsRead: 0 };

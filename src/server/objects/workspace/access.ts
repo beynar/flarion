@@ -18,6 +18,8 @@
  * records a per-page `delta` (before/after level) that the live loop turns into `add`/`remove`/`$access`
  * diffs; the deltas live for one commit.
  */
+import { createBitmap, roaringReady, type Bitmap } from '../../bitmaps/roaring';
+import { LevelMap } from './level-map';
 import { ACCESS_LEVELS, type AccessLevel } from '../../db/workspace.schema';
 import { actorFacts, type Actor as PolicyActor } from '../../db/policy';
 import type { WorkspaceClient, WorkspaceTx } from '../../db/workspace.client';
@@ -81,7 +83,13 @@ interface Entry {
 	actor: AccessActor & { role: WorkspaceRole | 'anonymous' };
 	facts: PolicyActor;
 	/** num -> level rank of every live page the actor can read. */
-	levels: Map<number, number>;
+	levels: LevelMap;
+	/**
+	 * The same pages as a Roaring bitmap (null while roaring is not loaded): the live loop counts and cuts windows with
+	 * bitmap intersections instead of one `has` per page. Replaced, never changed in place, so a view taken earlier
+	 * keeps the set it was taken with.
+	 */
+	bits: Bitmap | null;
 	dirty: 'full' | Set<number> | null;
 	/** Facts must be re-read before the next recompute (a teamspace membership or default level changed). */
 	staleFacts: boolean;
@@ -101,6 +109,8 @@ export interface VisibilityView {
 	levelBefore(num: number): AccessLevel | null;
 	/** Pages whose visibility or level changed in this commit. */
 	readonly delta: ReadonlyMap<number, PageDelta>;
+	/** The visible pages as a bitmap (`has` for sets), or null when bitmaps are off. */
+	readonly bits: Bitmap | null;
 }
 
 const EMPTY_DELTA: ReadonlyMap<number, PageDelta> = new Map();
@@ -109,7 +119,8 @@ const NOTHING: VisibilityView = {
 	hadBefore: () => false,
 	level: () => 'read',
 	levelBefore: () => null,
-	delta: EMPTY_DELTA
+	delta: EMPTY_DELTA,
+	bits: null
 };
 
 export const actorKey = (a: { userId?: string; role?: string; shareToken?: string }): string =>
@@ -236,13 +247,13 @@ export class AccessService {
 
 	// ───────────────────────── visibility sets ─────────────────────────
 
-	async #fresh(actor: AccessActor & { role: WorkspaceRole | 'anonymous' }, facts: PolicyActor): Promise<Map<number, number>> {
+	async #fresh(actor: AccessActor & { role: WorkspaceRole | 'anonymous' }, facts: PolicyActor): Promise<LevelMap> {
 		const gov = this.#governed.$as(facts);
 		const rows = (await pages(gov).findMany({ where: { deletedAt: null }, select: { num: true, $access: true } })) as {
 			num: number;
 			$access: Record<AccessLevel, boolean>;
 		}[];
-		return new Map(rows.map((r) => [r.num, rankOfAccess(r.$access)]));
+		return new LevelMap(rows.map((r) => [r.num, rankOfAccess(r.$access)] as [number, number]));
 	}
 
 	async #subtree(entry: Entry, nums: readonly number[]): Promise<Map<number, number>> {
@@ -299,7 +310,7 @@ export class AccessService {
 				const facts = this.facts(actor);
 				const levels = await this.#fresh(actor, facts);
 				if (epoch !== this.#epoch && attempt < 2) continue;
-				this.#entries.set(key, { key, actor, facts, levels, dirty: null, staleFacts: false, delta: new Map(), used: ++this.#clock });
+				this.#entries.set(key, { key, actor, facts, levels, bits: bitsOf(levels), dirty: null, staleFacts: false, delta: new Map(), used: ++this.#clock });
 				this.#evict();
 				return;
 			}
@@ -318,18 +329,26 @@ export class AccessService {
 			for (const [num, rank] of after) if (before.get(num) !== rank) entry.delta.set(num, { before: before.get(num) ?? NONE, after: rank });
 			for (const [num, rank] of before) if (!after.has(num)) entry.delta.set(num, { before: rank, after: NONE });
 			entry.levels = after;
+			entry.bits = bitsOf(after);
 		} else {
 			const nums = [...dirty];
 			const fresh = await this.#subtree(entry, nums);
-			const after = new Map(entry.levels);
+			// Changed in place (the dirty pages only): a copy of a 50,000-page map per connected actor per commit was
+			// the cost of every page create. The live loop takes its `view` after this settles.
+			const bits = entry.bits ? entry.bits.clone() : null;
 			for (const num of nums) {
 				const was = before.get(num) ?? NONE;
 				const now = fresh.get(num) ?? NONE;
-				if (now === NONE) after.delete(num);
-				else after.set(num, now);
+				if (now === NONE) {
+					before.delete(num);
+					bits?.delete(num);
+				} else {
+					before.set(num, now);
+					bits?.add(num);
+				}
 				if (was !== now) entry.delta.set(num, { before: was, after: now });
 			}
-			entry.levels = after;
+			entry.bits = bits;
 		}
 		entry.used = ++this.#clock;
 	}
@@ -354,10 +373,18 @@ export class AccessService {
 	}
 
 	/** Levels of the pages in `nums` the actor can see (num -> level), for callers that need `$access`. */
-	async levelsOf(actor: AccessActor): Promise<ReadonlyMap<number, AccessLevel> | null> {
+	async levelsOf(actor: AccessActor): Promise<{ get(num: number): AccessLevel | undefined } | null> {
 		const entry = await this.#visible(actor);
 		if (!entry) return null;
-		return new Map([...entry.levels].map(([num, rank]) => [num, ACCESS_LEVELS[rank]!]));
+		const { levels } = entry;
+		// A lookup into the set itself (the callers ask about the few rows of a window), not a copy of 50,000 entries.
+		return { get: (num) => (levels.has(num) ? ACCESS_LEVELS[levels.get(num) as number] : undefined) };
+	}
+
+	/** The actor's visible pages as a copy-free `Set`-shaped view, for the query engine (null: no membership). */
+	async visibleSetOf(actor: AccessActor): Promise<ReadonlySet<number> | null> {
+		const entry = await this.#visible(actor);
+		return entry ? entry.levels.asSet() : null;
 	}
 
 	/** Makes sure an actor's entry exists and is current (sockets call this before the sync paths run). */
@@ -376,8 +403,9 @@ export class AccessService {
 		const resolved = this.resolve(actor);
 		const entry = resolved ? this.#entry(resolved) : undefined;
 		if (!entry) return NOTHING;
-		const { levels, delta } = entry;
+		const { levels, delta, bits } = entry;
 		return {
+			bits,
 			has: (num) => levels.has(num),
 			hadBefore: (num) => {
 				const d = delta.get(num);
@@ -556,6 +584,14 @@ export class AccessService {
 		this.#entries.clear();
 		this.#facts.clear();
 	}
+}
+
+/** A bitmap of the visible pages, or null when roaring is not loaded. */
+function bitsOf(levels: LevelMap): Bitmap | null {
+	if (!roaringReady()) return null;
+	const bits = createBitmap(levels.keys());
+	bits.optimize();
+	return bits;
 }
 
 /** The highest level a `$access` object grants. */

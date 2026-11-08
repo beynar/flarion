@@ -460,7 +460,7 @@
 				</a>
 			{/if}
 			<PresenceAvatars users={store.othersOn(page.id)} max={2} size="tiny" />
-			<span class="hidden items-center group-hover/row:flex group-focus-within/row:flex">
+			<span class="hidden items-center group-hover/row:flex group-focus-within/row:flex [@media(hover:none)]:flex">
 				{@render more(`More actions for ${page.title || 'Untitled'}`, { kind: 'page', id: page.id })}
 				{@render add(`Add a page inside ${page.title || 'Untitled'}`, { parentId: page.id })}
 			</span>
@@ -505,7 +505,7 @@
 			{label}
 		</Button>
 		{#if actions}
-			<span class="hidden group-hover/section:flex group-focus-within/section:flex">{@render actions()}</span>
+			<span class="hidden group-hover/section:flex group-focus-within/section:flex [@media(hover:none)]:flex">{@render actions()}</span>
 		{/if}
 	</div>
 {/snippet}
@@ -579,7 +579,7 @@
 									<span class="grid size-5 shrink-0 place-items-center text-[15px] leading-none">{ts.icon ?? '👥'}</span>
 									<span class="ml-1 truncate font-medium">{ts.name}</span>
 								</Button>
-								<span class="hidden items-center group-hover/ts:flex group-focus-within/ts:flex">
+								<span class="hidden items-center group-hover/ts:flex group-focus-within/ts:flex [@media(hover:none)]:flex">
 									{@render more(`More actions for ${ts.name}`, { kind: 'teamspace', id: ts.id })}
 									{@render add(`Add a page to ${ts.name}`, { parentId: null, teamspaceId: ts.id })}
 								</span>

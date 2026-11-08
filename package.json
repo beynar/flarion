@@ -5,22 +5,29 @@
   "type": "module",
   "scripts": {
     "dev": "vite dev",
-    "build": "vite build",
+    "build": "vite build && node scripts/postbuild.mjs",
     "preview": "vite preview",
     "prepare": "svelte-kit sync || echo ''",
     "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
     "test": "vitest run",
     "test:unit": "vitest run --project unit",
     "test:workers": "vitest run --project workers",
-    "deploy": "vite build && wrangler deploy",
-    "deploy:staging": "vite build && wrangler deploy --env staging",
+    "test:visual": "playwright test -c tests/visual/playwright.config.ts",
+    "test:visual:update": "playwright test -c tests/visual/playwright.config.ts --update-snapshots",
+    "deploy": "vite build && node scripts/postbuild.mjs && wrangler deploy",
+    "deploy:staging": "vite build && node scripts/postbuild.mjs && wrangler deploy --env staging",
     "gen:theme": "node --experimental-strip-types scripts/gen-theme.ts",
     "gen:workspace-estate": "UPDATE_ESTATE=1 vitest run --project unit tests/unit/db/workspace-estate.test.ts",
-    "db:generate": "node --experimental-strip-types scripts/db-generate.ts"
+    "db:generate": "node --experimental-strip-types scripts/db-generate.ts",
+    "load": "node --experimental-strip-types scripts/load/run.ts",
+    "load:smoke": "node --experimental-strip-types scripts/load/run.ts --smoke",
+    "scale:profile": "node scripts/scale/profile.mjs"
   },
   "devDependencies": {
+    "@axe-core/playwright": "4.11.0",
     "@cloudflare/vitest-plugin": "^1.6.0",
     "@cloudflare/workers-types": "^5.20261107.1",
+    "@fontsource-variable/inter": "5.2.8",
     "@playwright/test": "^1.65.0",
     "@sveltejs/adapter-cloudflare": "8.0.2",
     "@sveltejs/kit": "3.1.1",
@@ -45,6 +52,9 @@
     "overrides": {
       "@effect/platform-node-shared": "4.0.0-beta.107",
       "effect": "4.0.0-beta.102"
+    },
+    "patchedDependencies": {
+      "roaring-wasm@1.1.0": "patches/roaring-wasm.patch"
     }
   },
   "dependencies": {
@@ -57,10 +67,13 @@
     "@orpc/openapi": "1.16.2",
     "@orpc/server": "1.16.2",
     "@orpc/valibot": "1.16.2",
+    "@tanstack/charts": "1.1.0",
     "better-auth": "1.7.18",
     "edytor": "7.0.4",
     "entasis": "0.16.0",
+    "fflate": "0.8.2",
     "katex": "^0.19.1",
+    "roaring-wasm": "1.1.0",
     "valibot": "1.5.0",
     "viborm": "1.12.1"
   },

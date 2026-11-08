@@ -65,4 +65,7 @@
 			<Button type="submit" color="primary" class="w-full" loading={busy} disabled={!name?.trim()}>Create workspace</Button>
 		</form>
 	{/if}
+	<p class="mt-4 text-center text-xs text-[color:var(--app-text-tertiary)]">
+		<a class="underline" href="/account" data-testid="onboarding-account-link">Delete my account</a>
+	</p>
 </AuthCard>

@@ -423,4 +423,19 @@
 		border-bottom: 1px solid var(--app-hairline);
 		margin-bottom: 2px;
 	}
+	/* On a phone the tabs and the toolbar do not fit side by side: the tabs take a line, the toolbar the next. */
+	@media (max-width: 767px) {
+		.chrome {
+			flex-wrap: wrap;
+			row-gap: 0;
+		}
+		.chrome > :global(*) {
+			flex: 1 1 100%;
+			min-width: 0;
+		}
+		.chrome > :global(:last-child) {
+			justify-content: flex-start;
+			overflow-x: auto;
+		}
+	}
 </style>

@@ -4,6 +4,7 @@
 	import { Toaster } from 'entasis/toast';
 	import { setButtonTheme } from 'entasis/button';
 	import { designTokens } from '#lib/design/generated/design-tokens.ts';
+	import { cspNonce } from '#lib/client/csp.ts';
 
 	let { children } = $props();
 
@@ -25,7 +26,7 @@
 
 <!-- designTokens: 16px type base at every width, raisedWithBorder off, neutral/neutral/primary
      roles and 100/150ms motion. The `edytor-notion` wrapper scopes edytor's document theme. -->
-<Theme {designTokens}>
+<Theme {designTokens} nonce={cspNonce()}>
 	<div class="edytor-notion app-root">
 		{@render children()}
 	</div>

@@ -431,14 +431,23 @@ export class WorkspaceStore {
 			reauth: this.#o.reauth
 		});
 		this.#socket.start();
+		// Hidden tabs are the first thing an overloaded Workspace DO stops serving; the server resynchronizes on show.
+		if (typeof document !== 'undefined') {
+			document.addEventListener('visibilitychange', this.#onVisibility);
+		}
 		void this.refreshProperties();
 		void this.refreshDirectory();
 	}
+
+	#onVisibility = (): void => {
+		this.#send({ t: 'visibility', hidden: document.hidden });
+	};
 
 	dispose(): void {
 		if (this.#disposed) return;
 		void this.flushTitles();
 		this.#disposed = true;
+		if (typeof document !== 'undefined') document.removeEventListener('visibilitychange', this.#onVisibility);
 		this.#socket?.dispose();
 		for (const t of this.#titleTimers.values()) this.#clock.clearTimeout(t);
 		for (const l of this.#layers) if (l.timer) this.#clock.clearTimeout(l.timer);
@@ -653,6 +662,9 @@ export class WorkspaceStore {
 		this.#send({ t: 'subscribe', id, sub: held.sub });
 	}
 
+	/** The share of the document quota last shown for a page, so a toast appears once per five points. */
+	readonly #quotaShown = new Map<string, number>();
+
 	#send(msg: ClientMessage): void {
 		this.#socket?.send(msg);
 	}
@@ -675,6 +687,8 @@ export class WorkspaceStore {
 		}
 		this.#resumedMode = null;
 		if (this.#myPage) extra.push({ t: 'presence', pageId: this.#myPage });
+		// A tab that connects while hidden says so: an overloaded object does not re-evaluate its views (docs/PLAN.md runbook).
+		if (typeof document !== 'undefined' && document.hidden) extra.push({ t: 'visibility', hidden: true });
 		return { lastSeq, subs, extra };
 	}
 
@@ -758,6 +772,18 @@ export class WorkspaceStore {
 				}
 				this.#welcomed = true;
 				return;
+			case 'quota': {
+				// "Warn at 80% of the document quota": once per page, again at every five points more.
+				const share = Math.floor((msg.bytes / msg.limit) * 20) / 20;
+				if ((this.#quotaShown.get(msg.pageId) ?? 0) >= share) return;
+				this.#quotaShown.set(msg.pageId, share);
+				this.#notify({
+					kind: 'info',
+					title: 'This page is nearly full',
+					description: `Its content is ${Math.round((msg.bytes / msg.limit) * 100)}% of the size limit; past it, edits are refused. Split it into subpages.`
+				});
+				return;
+			}
 			case 'lock':
 				this.#o.onLock?.({ pageId: msg.pageId, locked: msg.locked, lockedBy: msg.lockedBy, lockedAt: msg.lockedAt });
 				return;

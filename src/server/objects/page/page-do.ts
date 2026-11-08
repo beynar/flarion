@@ -21,12 +21,17 @@
  *   namespace, so the room forwards a moved block's late edits to its new page by itself.
  * - `purge()` wipes the room for good (trash purge): sockets, R2 snapshot and versions, then all its storage.
  */
+import { QUOTA_WARN_RATIO } from '../../limits';
 import { DurableObject } from 'cloudflare:workers';
-import type { JSONDoc } from 'edytor/crdt/edytor';
+import type { JSONBlock, JSONDoc } from 'edytor/crdt/edytor';
 import {
 	SOCKET_TAG,
 	attachRoom,
 	type AttachedDocument,
+	type CommentActor,
+	type CommentOutcome,
+	type CommentRequest,
+	type CommentSnapshot,
 	type CommitResult,
 	type DocumentAccessLevel,
 	type ExportedBlocks,
@@ -43,6 +48,8 @@ import { roomSemantics } from '../../../lib/shared/blocks/kinds.js';
 import type { IndexPageJob } from '../../queues/types';
 import { deletePrefix, pageHistoryStore } from './history-store';
 import { enqueueIndexJob } from './index-job';
+import { bumpPageVersion } from '../../share/cache';
+import { metric } from '../../metrics';
 import { ensurePageMetaTable, recordPageMeta, resolvePageIdentity, type PageIdentity } from './page-meta';
 import { loadSnapshot, pageKeyPrefix, saveSnapshot } from './snapshot-store';
 import {
@@ -51,6 +58,7 @@ import {
 	lastEditor,
 	readPageLock,
 	recordBypass,
+	recordLastEditor,
 	recordUserAccess,
 	writePageLock
 } from './validate';
@@ -61,6 +69,9 @@ export const MAX_DOCUMENT_BYTES = 16 * 1024 * 1024;
 export const PURGE_AFTER_DAYS = 30;
 
 const SEED_KEY = 'seed:json';
+/** The share of the quota last reported to the Workspace DO (absent: nothing reported, the page is under the warning). */
+const QUOTA_REPORTED_KEY = 'quota:reported';
+
 /** Hours the room's clock jumps in `closeHistorySlot`: past the next local noon or midnight, whichever is first. */
 const SLOT_JUMP_MS = 13 * 60 * 60 * 1000;
 
@@ -159,8 +170,40 @@ export class PageDO extends DurableObject<Env> {
 		if (this.purged) return;
 		const identity = this.identity();
 		await saveSnapshot(this.env.FILES, identity, saved);
+		// "Page document size" target: the share of the quota this page holds (the app warns at 80%).
+		const { documentBytes, documentLimit } = this.document.metrics();
+		metric(this.env, 'doc_size', {
+			labels: [identity.workspaceId, identity.pageId],
+			value: documentLimit > 0 ? documentBytes / documentLimit : 0,
+			extra: [documentBytes]
+		});
+		this.reportQuota(identity, documentBytes, documentLimit);
 		const version = this.document.lastUpdated() ?? Date.now();
+		// Published pages cache their body by version (src/server/share/cache.ts): a save is a new version.
+		await bumpPageVersion(this.env.CACHE, identity.workspaceId, identity.pageId, version);
 		await enqueueIndexJob(this.env.JOBS as Queue<IndexPageJob>, this.ctx.storage.kv, identity, version);
+	}
+
+	/**
+	 * "Page document size: warn at 80% of the quota, also shown to the user" (docs/PLAN.md "Operating targets"): when a save
+	 * moves this page's share of its quota across 80% or by five points past it, the Workspace DO is told, and it pushes a
+	 * `quota` message to the tabs that can read the page (and keeps it for tabs that connect later). Best effort.
+	 */
+	private reportQuota(identity: PageIdentity, bytes: number, limit: number): void {
+		if (limit <= 0) return;
+		const ratio = bytes / limit;
+		const kv = this.ctx.storage.kv;
+		const last = kv.get<number>(QUOTA_REPORTED_KEY);
+		const over = ratio >= QUOTA_WARN_RATIO;
+		if (over ? last !== undefined && ratio - last < 0.05 : last === undefined) return;
+		if (over) kv.put(QUOTA_REPORTED_KEY, ratio);
+		else kv.delete(QUOTA_REPORTED_KEY);
+		const workspace = this.env.WORKSPACE.getByName(identity.workspaceId) as unknown as { pageQuota(pageId: string, bytes: number, limit: number): Promise<void> };
+		this.ctx.waitUntil(
+			Promise.resolve()
+				.then(() => workspace.pageQuota(identity.pageId, over ? bytes : 0, limit))
+				.catch((error) => console.warn(`page ${identity.pageId}: reporting the size quota failed`, String(error)))
+		);
 	}
 
 	// ───────────── sockets: tell the Workspace DO when the room opens and empties ─────────────
@@ -234,6 +277,14 @@ export class PageDO extends DurableObject<Env> {
 	// Durable Object RPC reaches only this class's own methods, so the room methods the Workspace DO,
 	// the queue consumer and tests call are forwarded here.
 
+	/**
+	 * The body and version of this page for a published page or an export (src/server/share, src/server/export): the
+	 * room's `read()` and the time of its last change, the same string `persist` records for the cache.
+	 */
+	readPublished(): { doc: JSONDoc; version: string } {
+		return { doc: this.document.read(), version: String(this.document.lastUpdated() ?? 0) };
+	}
+
 	/** What the indexing consumer needs from this page, in one call. */
 	readForIndex(): PageIndexSource {
 		return {
@@ -278,6 +329,58 @@ export class PageDO extends DurableObject<Env> {
 			if (typeof user === 'string') users.add(user);
 		}
 		return [...users];
+	}
+
+	// ───────────── public API (`/v1`): blocks and comments ─────────────
+
+	/**
+	 * `PATCH /blocks/{id}/children`: appends `blocks` (edytor JSON, nested) under `parentId` (`null`: the page itself),
+	 * after `afterId` when given, as one room transaction every collaborator receives. A locked page refuses unless
+	 * `bypassLock` (the caller holds full access). Refusals are values (`ok: false`), not throws, so they cross the
+	 * Durable Object RPC boundary cleanly. Answers the new blocks (ids included), without their children.
+	 */
+	appendBlocks(
+		input: { parentId: string | null; blocks: JSONBlock[]; afterId?: string; userId: string; bypassLock: boolean }
+	): { ok: true; blocks: JSONBlock[] } | { ok: false; reason: 'locked' | 'not_found' | 'invalid'; message: string } {
+		if (this.purged) return { ok: false, reason: 'not_found', message: 'This page was deleted' };
+		if (readPageLock(this.ctx.storage.kv) && !input.bypassLock) return { ok: false, reason: 'locked', message: 'This page is locked' };
+		const idsOf = (parentId: string | null): string[] | null => {
+			const doc = this.document.read();
+			if (parentId === null) return (doc.children ?? []).map((b) => b.id ?? '');
+			const found = findBlock(doc.children ?? [], parentId);
+			return found ? (found.children ?? []).map((b) => b.id ?? '') : null;
+		};
+		const before = idsOf(input.parentId);
+		if (before === null) return { ok: false, reason: 'not_found', message: `Block "${input.parentId}" not found` };
+		if (input.afterId && !before.includes(input.afterId)) return { ok: false, reason: 'not_found', message: `Block "${input.afterId}" is not a child of this block` };
+		try {
+			// A page nobody has written yet starts from its first blocks (no leading empty paragraph).
+			const seeded = input.parentId === null && !input.afterId && this.document.lastUpdated() === null && this.seedFrom({ children: input.blocks }).seeded;
+			if (!seeded) {
+				this.document.transact((doc) => {
+					const siblings = doc.childrenIds(input.parentId);
+					const at = input.afterId ? siblings.indexOf(input.afterId) + 1 : siblings.length;
+					doc.insertBlocks({ parent: input.parentId, index: at }, input.blocks);
+				});
+			}
+		} catch (error) {
+			return { ok: false, reason: 'invalid', message: error instanceof Error ? error.message : 'The blocks were refused' };
+		}
+		recordLastEditor(this.ctx.storage.kv, input.userId);
+		const known = new Set(before);
+		const after = this.document.read();
+		const siblings = input.parentId === null ? (after.children ?? []) : (findBlock(after.children ?? [], input.parentId)?.children ?? []);
+		return { ok: true, blocks: siblings.filter((b) => !known.has(b.id ?? '')) };
+	}
+
+	/** The comment threads of this page, oldest first (public API `GET /comments`). */
+	listCommentThreads(): CommentSnapshot {
+		return this.document.listComments();
+	}
+
+	/** One comments request (add a thread, reply...) by `actor`, under edytor's rules (public API `POST /comments`). */
+	applyComment(request: CommentRequest, actor: CommentActor): Promise<CommentOutcome> {
+		return this.document.comment(request, actor);
 	}
 
 	// ───────────── page lock ─────────────
@@ -445,4 +548,14 @@ export class PageDO extends DurableObject<Env> {
 		}
 		return { sockets };
 	}
+}
+
+/** A block of a nested document by id (depth first). */
+function findBlock(blocks: readonly JSONBlock[], id: string): JSONBlock | null {
+	for (const block of blocks) {
+		if (block.id === id) return block;
+		const inner = block.children ? findBlock(block.children, id) : null;
+		if (inner) return inner;
+	}
+	return null;
 }

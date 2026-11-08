@@ -4,6 +4,7 @@
  * set the caller passes in (`QueryOptions.visible`), and with the live pages (`deleted_at IS NULL`).
  */
 import type { GroupBySpec, SortSpec } from '../../lib/shared/filter-ast';
+import type { OptionIndex } from '../bitmaps/option-index';
 
 /** `page.num`s the actor may see: a Set, or a plain (sorted or not) array. */
 export type VisibleSet = ReadonlySet<number> | readonly number[];
@@ -35,6 +36,12 @@ export interface QueryOptions {
 	collectionId?: string;
 	/** Properties the caller shows (only echoed back in `props.shown`). */
 	shown?: readonly string[];
+	/**
+	 * The Workspace DO's option index (docs/spikes/p4-scale.md): conditions on select, status, multi-select and person
+	 * properties are answered from Roaring bitmaps instead of `p_ref` scans. Optional (the engine runs the same SQL
+	 * without it, and `tests/workers/scale/bitmaps.test.ts` checks both give the oracle's answer).
+	 */
+	bitmaps?: OptionIndex | null;
 }
 
 export interface RowRef {

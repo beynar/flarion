@@ -13,10 +13,13 @@
  * Schemas are Standard Schema (Valibot). Nothing here is `any`.
  */
 import { eventIterator, oc } from '@orpc/contract';
+import { exportJobInputSchema, exportJobSchema, pageExportInputSchema, pageExportResultSchema, workspaceExportInputSchema, workspaceExportResultSchema } from '../../lib/shared/export-schemas';
 import { historyReadResultSchema, historyUndoResultSchema, moveBlocksInputSchema, moveBlocksResultSchema } from '../../lib/shared/editor-schemas';
 import * as v from 'valibot';
 import { viewDefSchema } from '../../lib/shared/definitions';
+import { importBeginInputSchema, importBeginResultSchema, importStatusSchema } from '../../lib/shared/import/schemas';
 import { mutationBatchSchema, seqSchema } from '../../lib/shared/ops';
+import { sloReportSchema } from '../../lib/shared/slo-schemas';
 import {
 	blockAppendBodySchema,
 	blockChildrenQuerySchema,
@@ -126,10 +129,14 @@ const workspaceRouter = {
 	get: priv.output(workspaceSchema),
 	/** Name, slug, icon. */
 	settings: priv.input(workspaceUpdateSchema).output(workspaceSchema),
+	/** Hands the workspace to another member (who becomes its owner; the caller becomes an admin). Owner only. */
+	transferOwnership: priv.input(idOnly('userId')).output(emptySchema),
 	/** Soft-deletes the workspace; it is purged after 30 days. Owner only. */
 	delete: priv
 		.input(v.object({ confirmName: v.string() }))
 		.output(v.object({ purgeAfter: isoSchema })),
+	/** Exports every page of the workspace as a zip (an EXPORT Workflow job). Owners only. */
+	export: priv.input(workspaceExportInputSchema).output(workspaceExportResultSchema),
 	members: {
 		list: priv.output(v.array(memberSchema)),
 		setRole: priv.input(v.object({ userId: idSchema, role: v.picklist(['admin', 'member', 'guest']) })).output(emptySchema),
@@ -200,6 +207,10 @@ const pageRouter = {
 		/** Undoes the last restore (one level). Needs `update`. */
 		undo: priv.input(pageIdSchema).output(historyUndoResultSchema)
 	},
+	/** Markdown or HTML of a page: small ones in the answer, recursive or bundled ones as an EXPORT Workflow job. Needs `read`. */
+	export: priv.input(pageExportInputSchema).output(pageExportResultSchema),
+	/** Progress of an export job the caller started; once complete, a fresh signed download URL. */
+	exportStatus: priv.input(exportJobInputSchema).output(exportJobSchema),
 	/** Moves blocks to another page without losing a concurrent edit (edytor's export, import, commit). Needs `update` on both. */
 	moveBlocks: priv.input(moveBlocksInputSchema).output(moveBlocksResultSchema),
 	grants: {
@@ -267,15 +278,42 @@ const filesRouter = {
 		.output(v.nullable(v.object({ title: v.optional(v.string()), description: v.optional(v.string()), image: v.optional(v.string()), icon: v.optional(v.string()) })))
 };
 
+const importRouter = {
+	/** Starts importing an uploaded CSV (`PUT /import/upload`) into a new database: the `IMPORT` Workflow creates it in chunks. */
+	begin: priv.input(importBeginInputSchema).output(importBeginResultSchema),
+	/** Progress of an import (poll it): rows created, bytes read, the state. */
+	status: priv.input(idOnly('id')).output(importStatusSchema),
+	/** Stops an import at its next chunk; the rows created so far stay. */
+	cancel: priv.input(idOnly('id')).output(importStatusSchema)
+};
+
 const tokensRouter = {
 	list: priv.output(v.array(apiTokenSchema)),
 	create: priv.input(tokenCreateInputSchema).output(tokenCreateResultSchema),
 	revoke: priv.input(idOnly('id')).output(emptySchema)
 };
 
+const accountRouter = {
+	/**
+	 * Deletes the caller's account: memberships, passkeys, sessions and tokens go; the user stays in history and
+	 * attribution as "Deleted user". Refused (`CONFLICT`, `data.code` `OWNS_WORKSPACES`, `data.workspaces`) while the
+	 * caller owns a workspace: transfer ownership or delete it first. `confirmEmail` must be the account's email.
+	 */
+	delete: priv.input(v.object({ confirmEmail: v.pipe(v.string(), v.trim(), v.minLength(3), v.maxLength(320)) })).output(emptySchema),
+	/** The live workspaces the caller owns (what blocks `delete`). */
+	owned: priv.output(v.array(v.object({ id: idSchema, name: v.string() })))
+};
+
+const adminRouter = {
+	/** The operating targets measured from Analytics Engine (owners only; `ADMIN_EMAILS` narrows it further). */
+	slo: priv.output(sloReportSchema)
+};
+
 export const contract = {
 	/** The signed-in user and their workspaces. */
 	me: priv.output(meSchema),
+	account: accountRouter,
+	admin: adminRouter,
 	workspace: workspaceRouter,
 	page: pageRouter,
 	property: propertyRouter,
@@ -286,6 +324,7 @@ export const contract = {
 	search: searchRouter,
 	ai: aiRouter,
 	files: filesRouter,
+	import: importRouter,
 	tokens: tokensRouter
 };
 

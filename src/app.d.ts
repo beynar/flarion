@@ -9,7 +9,22 @@ declare namespace Cloudflare {
 		BETTER_AUTH_SECRET?: string;
 		ROOM_TOKEN_KEY?: string;
 		API_TOKEN_PEPPER?: string;
+		/** Secret rotation overlap: the value the current key replaced (docs/ops/secrets.md). */
+		API_TOKEN_PEPPER_PREVIOUS?: string;
+		BETTER_AUTH_SECRET_PREVIOUS?: string;
+		/** Analytics Engine SQL API token for the SLO dashboard and the alert cron (docs/ops/alerts.md). */
+		ANALYTICS_API_TOKEN?: string;
+		/** Where the alert cron's mail goes; without it breaches are only logged. */
+		ALERT_EMAIL?: string;
+		/** Comma-separated emails allowed to open the operating dashboard (all owners when unset). */
+		ADMIN_EMAILS?: string;
 		TURNSTILE_SECRET?: string;
+		/** Staging-only secret of the load-test auth (docs/ops/load-test.md); honoured by nothing else. */
+		LOAD_TEST_KEY?: string;
+		/** Worker secret of the operator-only `/admin/*` recovery routes (docs/ops/restore.md); without it the routes do not exist. */
+		ADMIN_KEY?: string;
+		/** `"off"` turns the Roaring bitmaps off (the SQL paths answer the same, only slower): the rollback switch of docs/spikes/p4-scale.md. */
+		BITMAPS?: string;
 	}
 }
 export {};
@@ -47,6 +62,8 @@ declare namespace Cloudflare {
 		AI_EMBEDDING_MODEL: '@cf/baai/bge-m3';
 		TURNSTILE_SITE_KEY: '1x00000000000000000000AA';
 		FILES_ORIGIN: 'http://localhost:5173';
+		CF_ACCOUNT_ID: '6886250e2aff0047919a1ed731a55c64';
+		METRICS_DATASET: 'flarion_metrics';
 		WORKSPACE: DurableObjectNamespace<import('./worker').WorkspaceDO>;
 		PAGE: DurableObjectNamespace<import('./worker').PageDO>;
 		IMPORT: Workflow<
@@ -57,6 +74,9 @@ declare namespace Cloudflare {
 		>;
 		PURGE: Workflow<
 			Parameters<import('./worker').PurgeWorkflow['run']>[0]['payload']
+		>;
+		BACKUP: Workflow<
+			Parameters<import('./worker').BackupWorkflow['run']>[0]['payload']
 		>;
 	}
 }

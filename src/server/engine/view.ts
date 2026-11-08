@@ -22,7 +22,7 @@ import { loadEavRegistry } from '../objects/workspace/eav/registry';
 import { all, chunks, qmarks } from '../objects/workspace/eav/sql';
 import { WorkspaceError, notFound } from '../objects/workspace/errors';
 import { parseSource, runQuery } from './index';
-import type { QueryResult, ReferencedProps, RowRef, VisibleSet } from './types';
+import type { QueryOptions, QueryResult, ReferencedProps, RowRef, VisibleSet } from './types';
 
 export interface QueryViewInput {
 	collectionId: string;
@@ -62,10 +62,12 @@ export interface QueryViewContext {
 	userId: string | undefined;
 	visible: VisibleSet;
 	/** `$access` of the visible pages, when known. */
-	levels?: ReadonlyMap<number, AccessLevel> | null;
+	levels?: { get(num: number): AccessLevel | undefined } | null;
 	fallbackLevel?: AccessLevel;
 	seq: number;
 	now: number;
+	/** The Workspace DO's option index (see `QueryOptions.bitmaps`). */
+	bitmaps?: QueryOptions['bitmaps'];
 }
 
 const clampWindow = (w: { offset?: number; limit?: number }): { offset: number; limit: number } => ({
@@ -174,6 +176,7 @@ export async function queryViewRows(db: WorkspaceDb, input: QueryViewInput, ctx:
 		window,
 		collectionId: input.collectionId,
 		shown,
+		bitmaps: ctx.bitmaps,
 		...(input.groupWindows ? { groupWindows: Object.fromEntries(Object.entries(input.groupWindows).map(([k, w]) => [k, clampWindow(w)])) } : {})
 	});
 

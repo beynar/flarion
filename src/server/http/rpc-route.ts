@@ -9,6 +9,7 @@ import { onError, ORPCError } from '@orpc/server';
 import { BodyLimitPlugin, RPCHandler } from '@orpc/server/fetch';
 import { SimpleCsrfProtectionHandlerPlugin } from '@orpc/server/plugins';
 import { ensureDevSchema } from '../db/dev-migrate';
+import { metric, rpcProcedure, since, statusClass } from '../metrics';
 import { router } from '../rpc/private/router';
 import type { RpcContext } from '../rpc/private/base';
 import type { RouteHandler } from './types';
@@ -40,8 +41,12 @@ export const handleRpc: RouteHandler = async (request, env, ctx) => {
 		return Response.json({ message: 'Content-Type must be application/json' }, { status: 415 });
 	}
 	await ensureDevSchema(env);
+	const started = Date.now();
+	const procedure = rpcProcedure(new URL(request.url).pathname);
 	const result = await handler.handle(request, { prefix: '/rpc', context: { request, env, ctx } });
 	if (!result.matched) return Response.json({ message: 'Not found' }, { status: 404 });
 	result.response.headers.set('cache-control', 'no-store');
+	// Latency is the time to the response head: an event iterator (`ai.ask`) streams after it.
+	metric(env, 'rpc', { labels: [procedure, statusClass(result.response.status)], value: since(started), extra: [result.response.status] });
 	return result.response;
 };

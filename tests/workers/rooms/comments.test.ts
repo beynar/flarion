@@ -53,6 +53,9 @@ describe('comments authorization', { timeout: 30_000 }, () => {
 		// ...but its socket is a read-only view: its edits are refused.
 		const bob = connect(page, await mint(claimsFor(ws, page, 'bob', 'comment')), { userId: 'bob' });
 		await vi.waitFor(() => expect(bob.access.at(-1)).toBe('comment'), { timeout: 10_000, interval: 25 });
+		// `access` can arrive before the initial sync; editing `p1` before it exists locally sends no frame,
+		// so the refusal below would never come. Wait for the synced document first.
+		await vi.waitFor(() => expect(bob.provider.synced).toBe(true), { timeout: 10_000, interval: 25 });
 		bob.document.insertText('p1', 0, 'X');
 		await vi.waitFor(() => expect(bob.denied.length).toBeGreaterThan(0), { timeout: 10_000, interval: 25 });
 		bob.close();

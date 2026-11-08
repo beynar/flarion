@@ -3,6 +3,7 @@
  * synchronous on the object's SQLite, so a `hello`, a `subscribe` and a commit's fan-out each run in one
  * turn and can never observe one another half done.
  */
+import { metric } from '../../metrics';
 import { ORPCError } from '@orpc/server';
 import {
 	CLOSE,
@@ -28,7 +29,7 @@ import { checkVersions, MIN_APP_VERSION } from './versions';
 export const RAW_STREAM = '';
 
 export interface SocketApiDeps {
-	env: Pick<Env, 'APP_VERSION'> & { ENVIRONMENT?: string };
+	env: Pick<Env, 'APP_VERSION'> & { ENVIRONMENT?: string; METRICS?: AnalyticsEngineDataset };
 	hub: LiveHub;
 	presence: Presence;
 	/** Pushes a message on a socket's stream (false: gone). */
@@ -77,6 +78,8 @@ export class WorkspaceSocketApi implements SocketApi {
 		// A new hello starts the session over: its subscriptions replace every earlier one.
 		hub.dropSocket(socket.socketId);
 		hub.bindStream(socket.socketId, requestId, input.clientId, this.#d.now());
+		// `resume`: the client held state from an earlier connection (the "socket reconnects" target).
+		metric(this.#d.env, 'reconnect', { labels: [input.lastSeq === null ? 'fresh' : 'resume'], value: 1 });
 		const head = hub.headSeq();
 		this.#d.send(socket.socketId, {
 			t: 'welcome',
@@ -104,6 +107,22 @@ export class WorkspaceSocketApi implements SocketApi {
 		this.#d.send(socket.socketId, { t: 'head', seq: head });
 		const occupied = this.#d.presence.occupied();
 		if (occupied.length) this.#d.send(socket.socketId, { t: 'presence', entries: this.#d.presence.entries(occupied) });
+	}
+
+	/**
+	 * A tab that was skipped while hidden (or that this object woke up holding) is back: the same answer a reconnect that
+	 * cannot replay gets, without the reconnect: `resumed` in `snapshot` mode, a fresh snapshot of every subscription, `head`.
+	 */
+	async resync(socket: WorkspaceSocket): Promise<void> {
+		const { hub } = this.#d;
+		if (hub.streamOf(socket.socketId) === null) return;
+		const head = hub.headSeq();
+		this.#d.send(socket.socketId, { t: 'resumed', mode: 'snapshot', fromSeq: null, seq: head });
+		for (const entry of hub.subscriptions(socket.socketId)) {
+			const message = await hub.snapshot(socket.socketId, entry.id, socket.actor, head);
+			if (message) this.#d.send(socket.socketId, message);
+		}
+		this.#d.send(socket.socketId, { t: 'head', seq: head });
 	}
 
 	/** Validates and registers one subscription. Sends an `error` message and returns false when refused. */

@@ -21,6 +21,7 @@ import {
 import { issue } from '../../../../lib/shared/result';
 import type { Values } from '../../../../lib/shared/protocol';
 import type { WorkspaceDb } from '../../../db/workspace.client';
+import { forgetAiPages } from './ai';
 import { CountDelta } from './counts';
 import { EavError, throwIssues } from './errors';
 import type { EavOpContext, ChangeRecord } from './index';
@@ -330,5 +331,6 @@ export async function purgePageEav(db: WorkspaceDb, pageId: string, ctx: EavOpCo
 	}
 	await counts.flush(db);
 	await run(db, 'DELETE FROM collection_member WHERE page_id = ?', pageId);
+	await forgetAiPages(db, pageId);
 	return changes;
 }

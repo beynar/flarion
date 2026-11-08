@@ -90,10 +90,10 @@ async function applyMembership(ctx: Ctx, env: CompileEnv, collectionId: string):
 	return { source, plan };
 }
 
-async function makeCtx(db: WorkspaceDb, opts: Pick<QueryOptions, 'me' | 'now' | 'weekStartsOn'> & { visible: VisibleSet | null }): Promise<{ ctx: Ctx; env: CompileEnv }> {
+async function makeCtx(db: WorkspaceDb, opts: Pick<QueryOptions, 'me' | 'now' | 'weekStartsOn' | 'bitmaps'> & { visible: VisibleSet | null }): Promise<{ ctx: Ctx; env: CompileEnv }> {
 	const registry = await loadEavRegistry(db);
 	const ctx = new Ctx(db, registry, opts.visible === null ? null : toSet(opts.visible), opts.me, opts.now, opts.weekStartsOn ?? 1);
-	const env = new CompileEnv(db, registry, { me: opts.me, now: opts.now, weekStartsOn: opts.weekStartsOn });
+	const env = new CompileEnv(db, registry, { me: opts.me, now: opts.now, weekStartsOn: opts.weekStartsOn, bitmaps: opts.bitmaps });
 	return { ctx, env };
 }
 
@@ -224,6 +224,8 @@ export interface MatchOptions {
 	visible?: VisibleSet;
 	/** When given, the page must also belong to this collection (source AST or hand-picked). */
 	collectionId?: string;
+	/** The option index (see `QueryOptions.bitmaps`). */
+	bitmaps?: QueryOptions['bitmaps'];
 }
 
 const filterOf = (x: FilterNode | QuerySpec | null | undefined): FilterNode | undefined =>
@@ -236,7 +238,7 @@ const filterOf = (x: FilterNode | QuerySpec | null | undefined): FilterNode | un
  */
 export async function matchesFilter(db: WorkspaceDb, spec: FilterNode | QuerySpec | null | undefined, pageNum: number, opts: MatchOptions): Promise<boolean> {
 	const { ctx } = await makeCtx(db, { ...opts, visible: opts.visible ?? null });
-	const env = new CompileEnv(db, ctx.registry, { me: opts.me, now: opts.now, weekStartsOn: opts.weekStartsOn, estimate: false });
+	const env = new CompileEnv(db, ctx.registry, { me: opts.me, now: opts.now, weekStartsOn: opts.weekStartsOn, estimate: false, bitmaps: opts.bitmaps });
 	const one = new Set([pageNum]);
 	if ((await ctx.restrict(one)).size === 0) return false;
 	if (opts.collectionId) {
@@ -276,7 +278,7 @@ export async function sortKeyOf(
 export async function matchesFilterMany(db: WorkspaceDb, spec: FilterNode | QuerySpec | null | undefined, pageNums: readonly number[], opts: MatchOptions): Promise<Set<number>> {
 	if (pageNums.length === 0) return new Set();
 	const { ctx } = await makeCtx(db, { ...opts, visible: opts.visible ?? null });
-	const env = new CompileEnv(db, ctx.registry, { me: opts.me, now: opts.now, weekStartsOn: opts.weekStartsOn, estimate: false });
+	const env = new CompileEnv(db, ctx.registry, { me: opts.me, now: opts.now, weekStartsOn: opts.weekStartsOn, estimate: false, bitmaps: opts.bitmaps });
 	const cands = await ctx.restrict(pageNums);
 	if (cands.size === 0) return cands;
 	if (opts.collectionId) {

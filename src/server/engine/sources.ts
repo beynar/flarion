@@ -8,6 +8,7 @@
  * the candidates: the executor does that, not the source.
  */
 import { foldText } from '../../lib/shared/sort-keys';
+import type { Bitmap } from '../bitmaps/roaring';
 import type { EavTable } from '../../lib/shared/property-types';
 import { chunks, qmarks } from '../objects/workspace/eav/sql';
 import { IN_CHUNK, type Ctx } from './context';
@@ -80,8 +81,19 @@ export function eavSource(table: EavTable, prop: number, frag: Frag | null, veri
 			const out: number[] = [];
 			for (const part of chunks(nums, IN_CHUNK)) {
 				ctx.counters.probes++;
-				const c = cond(` AND page IN (${qmarks(part.length)})`);
-				out.push(...(await finish(ctx, await ctx.q(`SELECT ${select} FROM ${table} WHERE ${c.sql}`, ...c.head, ...part, ...c.tail))));
+				// The candidates are read first through the `(page, prop)` index (a MATERIALIZED CTE): left alone, SQLite
+				// has no statistics and switches to the range scan over `(prop, v)` as soon as the list holds five pages,
+				// which reads every row of the value (profiled at 20,000 pages: 45x slower, docs/spikes/p4-scale.md).
+				const c = cond('');
+				const rows = await ctx.q<{ page: number; lng?: number }>(
+					`WITH cand AS MATERIALIZED (SELECT * FROM ${table} WHERE prop = ? AND page IN (${qmarks(part.length)}))
+					 SELECT ${select} FROM cand WHERE ${c.sql}`,
+					prop,
+					...part,
+					...c.head,
+					...c.tail
+				);
+				out.push(...(await finish(ctx, rows)));
 			}
 			return out;
 		}
@@ -99,8 +111,35 @@ export function pageSource(frag: Frag): Source {
 			const out: number[] = [];
 			for (const part of chunks(nums, IN_CHUNK)) {
 				ctx.counters.probes++;
-				for (const r of await ctx.q<{ num: number }>(`SELECT num FROM page WHERE num IN (${qmarks(part.length)}) AND (${frag.sql})`, ...part, ...frag.params)) out.push(r.num);
+				// Candidates first (primary key), then the predicate: SQLite would otherwise pick the `parent_id` or
+				// `teamspace_id` index for a list of five pages or more and read every child of the database.
+				const rows = await ctx.q<{ num: number }>(
+					`WITH cand AS MATERIALIZED (SELECT * FROM page WHERE num IN (${qmarks(part.length)})) SELECT num FROM cand WHERE (${frag.sql})`,
+					...part,
+					...frag.params
+				);
+				for (const r of rows) out.push(r.num);
 			}
+			return out;
+		}
+	};
+}
+
+/**
+ * Pages of one option value (or of any value), from a Roaring bitmap of the option index: a scan is the bitmap's
+ * members, a probe is one `has` per candidate. Both are exact copies of what the `p_ref` source returns (it is built
+ * from `p_ref` and kept in step with every write, `src/server/bitmaps/option-index.ts`).
+ */
+export function bitmapSource(bits: Bitmap): Source {
+	return {
+		async scan(ctx) {
+			ctx.counters.scans++;
+			return bits.toArray();
+		},
+		async probe(ctx, nums) {
+			ctx.counters.probes++;
+			const out: number[] = [];
+			for (const n of nums) if (bits.has(n)) out.push(n);
 			return out;
 		}
 	};

@@ -164,8 +164,8 @@
 				headerCell: {
 					base: 'group/data-table-header relative flex min-w-0 items-center gap-xs overflow-visible border-neutral-muted border-r h-[34px]! px-2! text-xs font-normal whitespace-nowrap text-[color:var(--app-text-secondary)]'
 				},
-				row: { base: 'state-layer grid min-w-full border-b border-neutral-muted transition-colors min-h-[36px]!' },
-				cell: { base: 'relative flex min-w-0 items-center overflow-hidden border-neutral-muted border-r outline-none min-h-[36px]! p-0!' }
+				row: { base: 'state-layer grid min-w-full border-b border-neutral-muted transition-colors min-h-[var(--app-table-row-height)]!' },
+				cell: { base: 'relative flex min-w-0 items-center overflow-hidden border-neutral-muted border-r outline-none min-h-[calc(var(--app-table-row-height)-1px)]! p-0!' }
 			}}
 		>
 			{#snippet header({ column })}
@@ -267,14 +267,15 @@
 		display: flex;
 		align-items: center;
 		width: 100%;
-		min-height: 36px;
+		/* The row's own 1px hairline is part of its 36px (the token): the cell is one less. */
+		min-height: calc(var(--app-table-row-height) - 1px);
 		padding: 0 8px;
 	}
 	.vcell {
 		display: flex;
 		align-items: center;
 		width: 100%;
-		min-height: 36px;
+		min-height: calc(var(--app-table-row-height) - 1px);
 		padding: 0 2px;
 		min-width: 0;
 		overflow: hidden;

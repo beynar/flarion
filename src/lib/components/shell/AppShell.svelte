@@ -12,14 +12,21 @@
 	import { signOutIcon } from 'entasis/icons/signOut';
 	import { notePencilIcon } from 'entasis/icons/notePencil';
 	import { databaseIcon } from 'entasis/icons/database';
+	import { fileCsvIcon } from 'entasis/icons/fileCsv';
 	import { checkIcon } from 'entasis/icons/check';
+	import { sparkleIcon } from 'entasis/icons/sparkle';
 	import { Confirmation } from 'entasis/confirmation';
 	import { notion } from '#lib/design/notion.tokens.ts';
 	import { signOut, type SessionUser } from '#lib/client/session.ts';
+	import { a11yPrefs } from '#lib/client/a11y.svelte.ts';
 	import type { WorkspaceStore } from '#lib/client/workspace.svelte.ts';
 	import type { Workspace } from '#lib/shared/schemas.ts';
+	import ImportDialog from '#lib/components/import/ImportDialog.svelte';
 	import ShareDialog from '#lib/components/share/ShareDialog.svelte';
+	import ExportDialog from '#lib/components/export/ExportDialog.svelte';
 	import TrashPopover from '#lib/components/trash/TrashPopover.svelte';
+	import AskPanel from '#lib/components/ai/AskPanel.svelte';
+	import { askPanel } from '#lib/components/ai/panel-state.svelte.ts';
 	import CommandPalette from './CommandPalette.svelte';
 	import ReloadBanner from './ReloadBanner.svelte';
 	import SidebarTree from './SidebarTree.svelte';
@@ -43,7 +50,7 @@
 		/** The workspace segment of the URL (slug). */
 		ws: string;
 		/** Which top-level route is showing, for the active row. */
-		section: 'home' | 'page' | 'trash' | 'settings';
+		section: 'home' | 'page' | 'trash' | 'settings' | 'search';
 		activePageId?: string;
 		crumbs: BreadcrumbItem[];
 		showPageActions?: boolean;
@@ -56,6 +63,7 @@
 	let sidebarOpen = $state(true);
 	let shareOpen = $state(false);
 	let trashOpen = $state(false);
+	let importOpen = $state(false);
 	let trashAnchor = $state<HTMLElement | null>(null);
 
 	const { sidebar: width } = notion.metrics;
@@ -85,6 +93,7 @@
 	const headerMenu: SidebarMenuEntry[] = $derived([
 		{ label: 'Search', icon: magnifyingGlassIcon, badge: '⌘K', onclick: () => (paletteOpen = true) },
 		{ label: 'Home', icon: houseIcon, href: `/${ws}`, isActive: section === 'home' },
+		...(askPanel.unavailable ? [] : [{ label: 'Ask AI', icon: sparkleIcon, badge: '⌘J', onclick: () => askPanel.toggle(), class: 'sidebar-ask-ai' }]),
 		{
 			label: 'New page',
 			icon: notePencilIcon,
@@ -96,6 +105,12 @@
 			icon: databaseIcon,
 			disabled: !store.canEdit,
 			onclick: () => void newDatabase()
+		},
+		{
+			label: 'Import CSV',
+			icon: fileCsvIcon,
+			disabled: !store.canEdit,
+			onclick: () => (importOpen = true)
 		}
 	]);
 
@@ -147,6 +162,9 @@
 		else if (value === 'action:new-database') void newDatabase();
 		else if (value === 'action:toggle-dark') toggleDark();
 		else if (value === 'action:toggle-sidebar') sidebarOpen = !sidebarOpen;
+		else if (value === 'action:toggle-contrast') a11yPrefs.set(a11yPrefs.high ? 'default' : 'high');
+		else if (value === 'action:ask-ai') askPanel.show();
+		else if (value.startsWith('search:')) void goto(`/${ws}/search?q=${encodeURIComponent(value.slice(7))}`);
 		else if (value.startsWith('page:')) void goto(`/${ws}/${value.slice(5)}`);
 	}
 
@@ -159,6 +177,9 @@
 		} else if (event.shiftKey && event.key.toLowerCase() === 'l') {
 			event.preventDefault();
 			toggleDark();
+		} else if (!event.shiftKey && !event.altKey && event.key.toLowerCase() === 'j') {
+			event.preventDefault();
+			askPanel.toggle();
 		}
 	}
 
@@ -228,6 +249,7 @@
 				onToggleFavorite={() => activePageId && store.toggleFavorite(activePageId)}
 				onToggleDark={toggleDark}
 				onSearch={() => (paletteOpen = true)}
+				onAsk={askPanel.unavailable ? undefined : () => askPanel.toggle()}
 				onShare={() => (shareOpen = true)}
 				pageId={section === 'page' ? (activePageId ?? null) : null}
 				canLock={canLockPage}
@@ -239,15 +261,20 @@
 	{/snippet}
 </Sidebar>
 
-<CommandPalette bind:open={paletteOpen} {store} {ws} {onAction} />
+<CommandPalette bind:open={paletteOpen} {store} {ws} aiAvailable={!askPanel.unavailable} {onAction} />
+
+<AskPanel {store} {ws} activePageId={section === 'page' ? activePageId : undefined} />
 
 <TrashPopover {store} {ws} bind:open={trashOpen} anchor={trashAnchor} />
+
+<ImportDialog bind:open={importOpen} {ws} />
 
 <!-- The host of every `confirmation()` call (delete forever). -->
 <Confirmation />
 
 {#if activePageId && section === 'page'}
 	<ShareDialog {store} pageId={activePageId} bind:open={shareOpen} />
+	<ExportDialog {store} pageId={activePageId} />
 {/if}
 
 {#snippet pageContent()}

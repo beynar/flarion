@@ -1,9 +1,12 @@
 import type { WorkerScheduled } from 'sveltekit-cloudflare-worker';
 import { drainOutbox, pruneOutbox, reconcileMemberships } from './auth/outbox';
 import { SWEEP_CRON, sweepUncommittedUploads } from './files/sweep';
+import { ALERT_CRON, evaluateAlerts } from './admin/alerts';
 import { reconcileGuests } from './share/guests';
 import { reconcilePublicShares } from './share/public-links';
 import { startPurgeWorkflows } from './workflows/purge';
+import { startBackupWorkflows } from './workflows/backup';
+import { finishPendingRestores } from './backup/restore';
 
 /** "0 3 * * *": daily purge + nightly reconcile/backups. "0 4 * * SUN": weekly upload sweep. */
 export const NIGHTLY_CRON = '0 3 * * *';
@@ -40,6 +43,23 @@ export const scheduled: WorkerScheduled<Env> = async (controller, env, ctx) => {
 			startPurgeWorkflows(env)
 				.then((r) => console.log('[cron] purge:', JSON.stringify(r)))
 				.catch((error) => console.error('[cron] purge failed:', error instanceof Error ? (error.stack ?? error.message) : error))
+		);
+		// Nightly logical export of every Workspace DO to R2 (backups/ws/{id}/{day}.jsonl.gz, 30 days), the BACKUP
+		// Workflow per workspace; then the safety net for restores whose indexing replay never ran.
+		ctx.waitUntil(
+			startBackupWorkflows(env)
+				.then((r) => console.log('[cron] backup:', JSON.stringify({ ...r, started: r.started.length })))
+				.then(() => finishPendingRestores(env))
+				.then((r) => r.checked > 0 && console.log('[cron] pending restores:', JSON.stringify(r)))
+				.catch((error) => console.error('[cron] backup failed:', error instanceof Error ? (error.stack ?? error.message) : error))
+		);
+	}
+	// Every five minutes: the operating targets' alert conditions, mailed to ALERT_EMAIL (docs/ops/alerts.md).
+	if (controller.cron === ALERT_CRON) {
+		ctx.waitUntil(
+			evaluateAlerts(env as unknown as Parameters<typeof evaluateAlerts>[0])
+				.then((r) => r.breaches.length > 0 && console.log('[cron] alerts:', JSON.stringify(r)))
+				.catch((error) => console.error('[cron] alerts failed:', error instanceof Error ? (error.stack ?? error.message) : error))
 		);
 	}
 	if (controller.cron === SWEEP_CRON) ctx.waitUntil(sweepUncommittedUploads(env).then((r) => console.log('[cron] upload sweep:', JSON.stringify(r))));

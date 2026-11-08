@@ -1,0 +1,25 @@
+{
+	// The tail Worker of the main Worker (`tail_consumers` in ../../wrangler.jsonc). Deploy it first:
+	//   wrangler deploy -c workers/tail/wrangler.jsonc --env staging
+	//   wrangler deploy -c workers/tail/wrangler.jsonc --env production
+	"$schema": "../../node_modules/wrangler/config-schema.json",
+	"name": "flarion-tail",
+	"account_id": "6886250e2aff0047919a1ed731a55c64",
+	"main": "src/index.ts",
+	"compatibility_date": "2026-07-11",
+	"workers_dev": false,
+	"preview_urls": false,
+	"observability": {
+		"enabled": true
+	},
+	"env": {
+		"staging": {
+			"name": "flarion-tail-staging",
+			"analytics_engine_datasets": [{ "binding": "METRICS", "dataset": "flarion_metrics_staging" }]
+		},
+		"production": {
+			"name": "flarion-tail",
+			"analytics_engine_datasets": [{ "binding": "METRICS", "dataset": "flarion_metrics" }]
+		}
+	}
+}

@@ -1,4 +1,6 @@
 import type { EavTable } from '../../../../lib/shared/property-types';
+import { ensureImportTable } from '../../../import/store';
+import { ensureAiTable } from './ai';
 import { ensureDependencyTable } from './dependency';
 
 /** Tables laid out as `WITHOUT ROWID` clustered by their primary key (the plan's "clustered by property"). */
@@ -18,6 +20,9 @@ export function ensureEavLayout(storage: DurableObjectStorage): string[] {
 	const sql = storage.sql;
 	// The dependency graph of rollups and formulas: raw SQL, outside viborm's managed tables.
 	ensureDependencyTable(sql);
+	// AI-property markers and CSV import jobs: raw SQL tables of the same kind.
+	ensureAiTable(sql);
+	ensureImportTable(sql);
 	for (const table of CLUSTERED_TABLES) {
 		const row = sql.exec<{ sql: string }>("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?", table).toArray()[0];
 		if (!row || /WITHOUT\s+ROWID/i.test(row.sql)) continue;

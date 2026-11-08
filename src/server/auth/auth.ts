@@ -18,23 +18,21 @@ import { getAuthenticatorName, passkey } from '@better-auth/passkey';
 import { globalClient } from '../db/global.client';
 import { sendMail, verificationMail } from '../mail';
 import { flarionPlugin } from './flarion-plugin';
+import { authSecrets } from './secret-rotation';
 import { consumeRegistrationToken, peekRegistrationToken } from './registration-token';
 import { vibormAdapter } from './viborm-adapter';
 
 export const SESSION_EXPIRES_SECONDS = 30 * 24 * 60 * 60;
 export const SESSION_COOKIE_CACHE_SECONDS = 5 * 60;
 
-/** Local `pnpm dev` only: a fixed, public secret so a fresh checkout works without `.dev.vars`. */
-const DEV_SECRET = 'flarion-local-development-secret-not-for-production';
-
-export function authSecret(env: Pick<Env, 'ENVIRONMENT'> & { BETTER_AUTH_SECRET?: string }): string {
-	const secret = env.BETTER_AUTH_SECRET ?? (env.ENVIRONMENT === 'development' ? DEV_SECRET : undefined);
-	if (!secret || secret.length < 32) throw new Error('BETTER_AUTH_SECRET must be set to at least 32 characters');
-	return secret;
+/** The secret better-auth signs with: `BETTER_AUTH_SECRET` (rotation: `server/auth/secret-rotation.ts`). */
+export function authSecret(env: Pick<Env, 'ENVIRONMENT'> & { BETTER_AUTH_SECRET?: string; BETTER_AUTH_SECRET_PREVIOUS?: string }): string {
+	return authSecrets(env)[0];
 }
 
 function createAuth(env: Env) {
-	const secret = authSecret(env);
+	const secrets = authSecrets(env);
+	const secret = secrets[0];
 	const secure = env.APP_ORIGIN.startsWith('https://');
 	const db = globalClient(env.DB);
 
@@ -75,7 +73,7 @@ function createAuth(env: Env) {
 					requireSession: false,
 					// Reads the token without using it up: a cancelled ceremony can be retried until it expires.
 					resolveUser: async ({ ctx, context }) => {
-						const claims = context ? await peekRegistrationToken(ctx.context.internalAdapter, secret, context) : null;
+						const claims = context ? await peekRegistrationToken(ctx.context.internalAdapter, secrets, context) : null;
 						if (!claims) {
 							throw new APIError('BAD_REQUEST', {
 								message: 'This sign-up link has expired. Start again.',
@@ -100,7 +98,7 @@ function createAuth(env: Env) {
 								throw new APIError('CONFLICT', { message: 'This passkey is already registered.', code: 'PASSKEY_ALREADY_REGISTERED' });
 							}
 						}
-						const claims = context ? await consumeRegistrationToken(ctx.context.internalAdapter, secret, context) : null;
+						const claims = context ? await consumeRegistrationToken(ctx.context.internalAdapter, secrets, context) : null;
 						if (!claims) {
 							throw new APIError('BAD_REQUEST', {
 								message: 'This sign-up link has expired or was already used. Start again.',

@@ -96,7 +96,7 @@
 	const count = $derived(countConditions(draft));
 </script>
 
-<div class="flex min-w-[540px] flex-col gap-2 p-3" data-testid="filter-builder">
+<div class="flex w-[min(540px,calc(100vw-2rem))] min-w-0 flex-col gap-2 p-3" data-testid="filter-builder">
 	{#if count === 0}
 		<p class="px-0.5 text-sm text-[color:var(--app-text-tertiary)]" data-testid="filter-empty">No filters applied. Add a rule to narrow this view.</p>
 	{/if}

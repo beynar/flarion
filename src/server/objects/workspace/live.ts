@@ -33,6 +33,8 @@ import type {
 } from '../../../lib/shared/protocol';
 import { MAX_SUBSCRIPTIONS_PER_SOCKET, MAX_WINDOW } from '../../../lib/shared/protocol';
 import { TITLE_PROP_ID } from '../../../lib/shared/property-types';
+import type { OptionIndex } from '../../bitmaps/option-index';
+import { createBitmap, roaringReady, type Bitmap } from '../../bitmaps/roaring';
 import { visibilityScope } from './actor';
 import type { VisibilityView } from './access';
 import type { Actor } from '../../auth/session';
@@ -75,6 +77,8 @@ interface SubRow {
 	/** Per-group window sizes of a grouped view (group key -> limit); the others use `lim`. */
 	glim: Record<string, number>;
 	unitKeys: string[];
+	/** What two subscriptions must share for one derived diff to serve both (without the actor): built once per cached row. */
+	shape?: string;
 }
 
 /** What a commit hands the loop. */
@@ -99,6 +103,14 @@ export interface LiveHost {
 	actorOf(socketId: string): Actor | null;
 	/** The actor's visibility set, current as of the commit being fanned out (fails closed: nothing visible). */
 	view(actor: Actor): VisibilityView;
+	/** The option index the engine answers select, status, multi-select and person conditions from (optional). */
+	bitmaps?: OptionIndex | null;
+	/**
+	 * True for a socket whose subscriptions are not re-evaluated now (a hidden tab of an overloaded object). Such a socket
+	 * gets nothing from the fan-out, and `skipped` is told, so it can be resynchronized when it comes back.
+	 */
+	paused?(socketId: string): boolean;
+	skipped?(socketId: string): void;
 }
 
 const fnv = (text: string): string => {
@@ -322,15 +334,38 @@ export function analyze(rows: readonly LogRow[]): Touch {
 	return t;
 }
 
+/**
+ * Where fan-out time goes, accumulated per isolate (milliseconds): the property-to-subscription index lookup and unit
+ * maintenance (`maintain`), deriving each socket's diff (`derive`), serializing and sending (`send`), plus counters.
+ * Diagnostic only (`liveStats().perf`); `docs/spikes/p4-scale.md` has the numbers it produced.
+ */
+export const fanOutPerf = { fanOuts: 0, maintainMs: 0, deriveMs: 0, sendMs: 0, totalMs: 0, unitsMaintained: 0, subsDerived: 0, derivationsShared: 0, framesSent: 0 };
+export const resetFanOutPerf = () => {
+	for (const key of Object.keys(fanOutPerf) as (keyof typeof fanOutPerf)[]) fanOutPerf[key] = 0;
+};
+
+/** A number per derived ops array, to tell whether two sockets were given the very same diff. */
+const opsIds = new WeakMap<object, number>();
+let opsSeq = 0;
+const opsKey = (ops: object): number => {
+	let id = opsIds.get(ops);
+	if (id === undefined) opsIds.set(ops, (id = ++opsSeq));
+	return id;
+};
+
 const countEvaluations = { value: 0 };
 /** Test hook: how many unit evaluations ran in this isolate. */
 export const unitEvaluations = () => countEvaluations.value;
 
-/** The windows of one view subscription for one actor, at one point in time. */
+/**
+ * The windows of one view subscription for one actor, at one point in time. `total` is the number of visible pages of
+ * the list (what the client shows as the count), `window` the first `limit` of them in order: a list is never
+ * materialized in full when a bitmap can say how many are visible.
+ */
 interface WindowSet {
 	/** Group keys in display order (`[FLAT]` when ungrouped). */
 	keys: string[];
-	lists: Map<string, { all: string[]; window: string[] }>;
+	lists: Map<string, { window: string[]; total: number }>;
 	/** Distinct visible pages. */
 	distinct: number;
 }
@@ -349,6 +384,10 @@ export class LiveHub {
 	readonly #states = new Map<string, ViewState>();
 	/** Resolved view units, dropped whenever a definition changes. */
 	readonly #resolved = new Map<string, ResolvedView | null>();
+	/** Parsed subscription rows (the SQL rows are the truth; a fan-out reads each affected one once per commit). */
+	readonly #subs = new Map<string, Map<string, SubRow>>();
+	/** Socket id -> its stream's request id (null: no stream), the other half of a send. */
+	readonly #streams = new Map<string, string | null>();
 
 	constructor(host: LiveHost) {
 		this.#host = host;
@@ -365,6 +404,13 @@ export class LiveHub {
 	#numsOf(ids: readonly string[]): void {
 		const missing = ids.filter((id) => !this.#nums.has(id));
 		if (missing.length === 0) return;
+		if (missing.length > 600) {
+			// Many at once (a big unit read for the first time since the object woke): one pass over `page` beats a
+			// hundred chunked lookups.
+			if (this.#nums.size > 200_000) this.#nums.clear();
+			for (const r of this.#all<{ id: string; num: number }>('SELECT id, num FROM page')) this.#nums.set(r.id, r.num);
+			return;
+		}
 		for (const [id, num] of this.#reader.nums(missing)) this.#nums.set(id, num);
 		if (this.#nums.size > 200_000) this.#nums.clear();
 	}
@@ -438,6 +484,7 @@ export class LiveHub {
 	// ───────────────────────── streams ─────────────────────────
 
 	bindStream(socketId: string, requestId: string, clientId: string, now: number): void {
+		this.#streams.set(socketId, requestId);
 		this.#run(
 			'INSERT OR REPLACE INTO socket_stream (socket_id, request_id, client_id, opened_at) VALUES (?, ?, ?, ?)',
 			socketId,
@@ -448,7 +495,11 @@ export class LiveHub {
 	}
 
 	streamOf(socketId: string): string | null {
-		return this.#all<{ request_id: string }>('SELECT request_id FROM socket_stream WHERE socket_id = ?', socketId)[0]?.request_id ?? null;
+		const cached = this.#streams.get(socketId);
+		if (cached !== undefined) return cached;
+		const found = this.#all<{ request_id: string }>('SELECT request_id FROM socket_stream WHERE socket_id = ?', socketId)[0]?.request_id ?? null;
+		this.#streams.set(socketId, found);
+		return found;
 	}
 
 	streamSockets(): string[] {
@@ -457,6 +508,8 @@ export class LiveHub {
 
 	/** Forgets a socket: its stream, its subscriptions, and units nobody watches any more. */
 	dropSocket(socketId: string): void {
+		this.#streams.delete(socketId);
+		this.#subs.delete(socketId);
 		this.#run('DELETE FROM socket_stream WHERE socket_id = ?', socketId);
 		this.#run('DELETE FROM socket_sub WHERE socket_id = ?', socketId);
 		this.#run('DELETE FROM sub_link WHERE socket_id = ?', socketId);
@@ -469,6 +522,7 @@ export class LiveHub {
 		this.#run('DELETE FROM sub_unit WHERE unit_key NOT IN (SELECT DISTINCT unit_key FROM sub_link)');
 		this.#run('DELETE FROM sub_prop WHERE unit_key NOT IN (SELECT DISTINCT unit_key FROM sub_link)');
 		for (const { unit_key } of dead) {
+			this.#states.get(unit_key)?.dispose();
 			this.#states.delete(unit_key);
 			this.#resolved.delete(unit_key);
 		}
@@ -477,6 +531,9 @@ export class LiveHub {
 	/** Forgets every socket's registry (after a failed fan-out: the clients reconnect and resume). */
 	clearRegistry(): void {
 		for (const table of ['socket_stream', 'socket_sub', 'sub_link', 'sub_unit', 'sub_prop']) this.#run(`DELETE FROM ${table}`);
+		this.#streams.clear();
+		this.#subs.clear();
+		for (const state of this.#states.values()) state.dispose();
 		this.#states.clear();
 		this.#resolved.clear();
 	}
@@ -496,8 +553,24 @@ export class LiveHub {
 			const spec = JSON.parse(u.spec) as Record<string, unknown>;
 			if (u.kind === 'view') {
 				const resolved = await resolveView(this.#host.db, spec as unknown as ViewUnitSpec);
+				// Without the option index: the check compares the live state with what SQL alone answers.
 				const fresh = resolved ? await evaluateView(this.#host.db, resolved, spec as unknown as ViewUnitSpec, { now: this.#host.now() }) : EMPTY_STATE;
 				if (!fresh.equals(ViewState.parse(u.ids))) stale.push(u.unit_key);
+				// The page-number bitmaps of the in-memory state must be exactly its ids' numbers.
+				const held = this.#states.get(u.unit_key);
+				for (const key of held?.lists.keys() ?? []) {
+					const bits = held?.bitsOf(key);
+					if (!bits) continue;
+					const list = held?.lists.get(key) ?? [];
+					this.#numsOf(list);
+					const want = new Set<number>();
+					for (const id of list) {
+						const n = this.#nums.get(id);
+						if (n !== undefined) want.add(n);
+					}
+					const have = bits.toArray();
+					if (have.length !== want.size || have.some((n) => !want.has(n))) stale.push(`${u.unit_key}#bits:${key}`);
+				}
 			} else if (JSON.stringify(this.#evaluate(u.kind, spec, false)) !== u.ids) stale.push(u.unit_key);
 		}
 		return stale;
@@ -574,7 +647,7 @@ export class LiveHub {
 			this.evaluations++;
 			countEvaluations.value++;
 			const resolved = await resolveView(this.#host.db, spec);
-			const state = resolved ? await evaluateView(this.#host.db, resolved, spec, { now: this.#host.now() }) : EMPTY_STATE;
+			const state = resolved ? await evaluateView(this.#host.db, resolved, spec, { now: this.#host.now(), bitmaps: this.#host.bitmaps }) : EMPTY_STATE;
 			this.#run('INSERT OR REPLACE INTO sub_unit (unit_key, kind, spec, ids) VALUES (?, ?, ?, ?)', unit.key, unit.kind, JSON.stringify(unit.spec), state.serialize());
 			this.#states.set(unit.key, state);
 			this.#resolved.set(unit.key, resolved);
@@ -605,6 +678,7 @@ export class LiveHub {
 			await this.#ensureUnit(unit);
 			this.#run('INSERT INTO sub_link (socket_id, sub_id, ord, unit_key) VALUES (?, ?, ?, ?)', socketId, subId, ord, unit.key);
 		}
+		this.#subs.get(socketId)?.delete(subId);
 	}
 
 	unregister(socketId: string, subId: string): void {
@@ -613,11 +687,24 @@ export class LiveHub {
 	}
 
 	#unregister(socketId: string, subId: string): void {
+		this.#subs.get(socketId)?.delete(subId);
 		this.#run('DELETE FROM socket_sub WHERE socket_id = ? AND sub_id = ?', socketId, subId);
 		this.#run('DELETE FROM sub_link WHERE socket_id = ? AND sub_id = ?', socketId, subId);
 	}
 
 	#loadSub(socketId: string, subId: string): SubRow | null {
+		const cached = this.#subs.get(socketId)?.get(subId);
+		if (cached) return cached;
+		const loaded = this.#readSub(socketId, subId);
+		if (loaded) {
+			let mine = this.#subs.get(socketId);
+			if (!mine) this.#subs.set(socketId, (mine = new Map()));
+			mine.set(subId, loaded);
+		}
+		return loaded;
+	}
+
+	#readSub(socketId: string, subId: string): SubRow | null {
 		const row = this.#all<{ kind: Subscription['kind']; spec: string; lim: number | null; glim: string | null }>(
 			'SELECT kind, spec, lim, glim FROM socket_sub WHERE socket_id = ? AND sub_id = ?',
 			socketId,
@@ -665,30 +752,97 @@ export class LiveHub {
 
 	// ───────────────────────── view windows ─────────────────────────
 
-	/** The windows of a view subscription over `state`, for the pages `has` lets through. */
-	#windows(state: ViewState, row: Pick<SubRow, 'lim' | 'glim'>, has: (num: number) => boolean, registry: EavRegistry): WindowSet {
+	/** The bitmap of a list's page numbers, built from its ids the first time and kept with the state. Null when bitmaps are off. */
+	#membersOf(state: ViewState, key: string): Bitmap | null {
+		if (!roaringReady()) return null;
+		const have = state.bitsOf(key);
+		if (have) return have;
+		const list = state.lists.get(key) ?? [];
+		this.#numsOf(list);
+		const nums: number[] = [];
+		for (const id of list) {
+			const n = this.#nums.get(id);
+			if (n !== undefined) nums.push(n);
+		}
+		const bits = createBitmap(nums);
+		bits.optimize();
+		state.setBits(key, bits);
+		return bits;
+	}
+
+	/** The first `limit` ids of `list` that `has` lets through, reading the list in steps and stopping as soon as it has them. */
+	#firstVisible(list: readonly string[], has: (num: number) => boolean, limit: number): string[] {
+		const out: string[] = [];
+		const step = Math.max(64, limit * 2);
+		for (let i = 0; i < list.length && out.length < limit; i += step) {
+			for (const id of this.#visible(list.slice(i, i + step), has)) {
+				out.push(id);
+				if (out.length === limit) break;
+			}
+		}
+		return out;
+	}
+
+	/**
+	 * One list ANDed with an actor's visibility, cut to `limit`. With bitmaps the visible total is one intersection
+	 * count, a list everything of which is visible is cut by slicing it, and otherwise the list is read only as far as
+	 * the window reaches; without them (or when the visibility `before` a commit is asked for and it changed) every id
+	 * is looked at, as before.
+	 */
+	#cut(state: ViewState, key: string, has: (num: number) => boolean, vis: Bitmap | null, limit: number): { window: string[]; total: number } {
+		const list = state.lists.get(key) ?? [];
+		const members = vis ? this.#membersOf(state, key) : null;
+		if (members && vis) {
+			const total = members.andCardinality(vis);
+			if (total === 0) return { window: [], total: 0 };
+			// `members.size === list.length`: every id of the list has its number in the bitmap (none is a page that is gone).
+			const everything = total === members.size && members.size === list.length;
+			return { window: everything ? list.slice(0, limit) : this.#firstVisible(list, has, limit), total };
+		}
+		const all = this.#visible(list, has);
+		return { window: all.slice(0, limit), total: all.length };
+	}
+
+	/**
+	 * The windows of a view subscription over `state`, for the pages the actor sees now (`when: 'now'`) or saw before
+	 * the commit being fanned out (`'before'`).
+	 */
+	#windows(state: ViewState, row: Pick<SubRow, 'lim' | 'glim'>, view: VisibilityView, registry: EavRegistry, when: 'now' | 'before' = 'now'): WindowSet {
+		const has = when === 'now' ? (n: number) => view.has(n) : (n: number) => view.hadBefore(n);
+		// `before` equals `now` for an actor whose visibility did not change in this commit: only then is the bitmap the right one.
+		const vis = view.bits && (when === 'now' || view.delta.size === 0) ? view.bits : null;
 		const limit = row.lim ?? MAX_WINDOW;
-		const lists = new Map<string, { all: string[]; window: string[] }>();
+		const lists = new Map<string, { window: string[]; total: number }>();
 		if (!state.groupBy) {
-			const all = this.#visible(state.lists.get(FLAT) ?? [], has);
-			lists.set(FLAT, { all, window: all.slice(0, limit) });
-			return { keys: [FLAT], lists, distinct: all.length };
+			const cut = this.#cut(state, FLAT, has, vis, limit);
+			lists.set(FLAT, cut);
+			return { keys: [FLAT], lists, distinct: cut.total };
 		}
 		const sizes = new Map<string, number>();
-		const distinct = new Set<string>();
-		for (const [key, list] of state.lists) {
-			const all = this.#visible(list, has);
-			if (all.length === 0) continue;
-			sizes.set(key, all.length);
-			lists.set(key, { all, window: all.slice(0, row.glim[key] ?? limit) });
-			for (const id of all) distinct.add(id);
+		for (const key of state.lists.keys()) {
+			const cut = this.#cut(state, key, has, vis, row.glim[key] ?? limit);
+			if (cut.total === 0) continue;
+			sizes.set(key, cut.total);
+			lists.set(key, cut);
 		}
 		const keys = groupKeysFor(registry, state.groupBy, sizes);
 		// A hidden group (an empty one with `hideEmpty`) is not a window the client holds.
 		const shown = new Set(keys);
 		for (const key of [...lists.keys()]) if (!shown.has(key)) lists.delete(key);
-		for (const key of keys) if (!lists.has(key)) lists.set(key, { all: [], window: [] });
-		return { keys, lists, distinct: distinct.size };
+		for (const key of keys) if (!lists.has(key)) lists.set(key, { window: [], total: 0 });
+		return { keys, lists, distinct: this.#distinct(state, vis, has) };
+	}
+
+	/** Visible pages of a grouped view, a page of two groups counted once. */
+	#distinct(state: ViewState, vis: Bitmap | null, has: (num: number) => boolean): number {
+		if (vis && roaringReady()) {
+			for (const key of state.lists.keys()) this.#membersOf(state, key);
+			const union = state.union();
+			if (union) return union.andCardinality(vis);
+		}
+		const seen = new Set<string>();
+		for (const list of state.lists.values()) for (const id of this.#visible(list, has)) seen.add(id);
+		return seen.size;
 	}
 
 	#windowIds(set: WindowSet): Set<string> {
@@ -721,8 +875,8 @@ export class LiveHub {
 	#viewCounts(grouped: boolean, oldW: WindowSet, newW: WindowSet): DiffOp[] {
 		const ops: DiffOp[] = [];
 		for (const key of newW.keys) {
-			const before = oldW.lists.get(key)?.all.length ?? 0;
-			const after = newW.lists.get(key)?.all.length ?? 0;
+			const before = oldW.lists.get(key)?.total ?? 0;
+			const after = newW.lists.get(key)?.total ?? 0;
 			if (before !== after) ops.push({ op: 'count', total: after, ...(grouped ? { group: key } : {}) });
 		}
 		if (grouped && oldW.distinct !== newW.distinct) ops.push({ op: 'count', total: newW.distinct });
@@ -738,7 +892,7 @@ export class LiveHub {
 		if (row.kind === 'view') {
 			const state = this.#viewState(row.unitKeys[0]);
 			const registry = await loadEavRegistry(this.#host.db);
-			const set = this.#windows(state, row, (n) => view.has(n), registry);
+			const set = this.#windows(state, row, view, registry);
 			const sub = row.sub as Extract<Subscription, { kind: 'view' }>;
 			if (!state.groupBy) {
 				const window = set.lists.get(FLAT)?.window ?? [];
@@ -748,8 +902,8 @@ export class LiveHub {
 			const everything = this.#windowIds(set);
 			const rows = await this.#reader.viewRows([...everything], view.level, sub.props, sub.collectionId);
 			const groups = set.keys.map((key) => {
-				const list = set.lists.get(key) ?? { all: [], window: [] };
-				return { key, total: list.all.length, rows: list.window.map((id) => rows.get(id)).filter((r): r is ViewRow => !!r) };
+				const list = set.lists.get(key) ?? { window: [], total: 0 };
+				return { key, total: list.total, rows: list.window.map((id) => rows.get(id)).filter((r): r is ViewRow => !!r) };
 			});
 			return { t: 'snapshot', id: subId, total: set.distinct, seq, kind: 'view', rows: [], groups };
 		}
@@ -797,19 +951,21 @@ export class LiveHub {
 			}
 			const sub = { ...row.sub, ...(group === undefined ? { limit } : {}) } as Subscription;
 			this.#run('UPDATE socket_sub SET spec = ?, lim = ?, glim = ? WHERE socket_id = ? AND sub_id = ?', JSON.stringify(sub), next.lim, JSON.stringify(next.glim), socketId, subId);
-			const oldW = this.#windows(state, row, (n) => view.has(n), registry);
-			const newW = this.#windows(state, next, (n) => view.has(n), registry);
+			this.#subs.get(socketId)?.delete(subId);
+			const oldW = this.#windows(state, row, view, registry);
+			const newW = this.#windows(state, next, view, registry);
 			const updated: SubRow = { ...row, sub, lim: next.lim, glim: next.glim };
 			const ops = await this.#viewWindowOps(updated, !!state.groupBy, oldW, newW, view, false);
 			if (ops.length === 0) return null;
 			// The rows that slide in are `add`s, which a client counts: say what the totals are (they do not change
 			// when a window grows, only what is held does), the groups' first.
-			if (state.groupBy) for (const key of newW.keys) ops.push({ op: 'count', total: newW.lists.get(key)?.all.length ?? 0, group: key });
+			if (state.groupBy) for (const key of newW.keys) ops.push({ op: 'count', total: newW.lists.get(key)?.total ?? 0, group: key });
 			ops.push({ op: 'count', total: newW.distinct });
 			return ops;
 		}
 		const sub = { ...row.sub, limit } as Subscription;
 		this.#run('UPDATE socket_sub SET spec = ?, lim = ? WHERE socket_id = ? AND sub_id = ?', JSON.stringify(sub), limit, socketId, subId);
+		this.#subs.get(socketId)?.delete(subId);
 		const all = this.#visible(this.#concat(row.unitKeys), (n) => view.has(n));
 		const oldW = row.lim === null ? all : all.slice(0, row.lim);
 		const newW = all.slice(0, limit);
@@ -824,6 +980,16 @@ export class LiveHub {
 
 	/** Fans one commit out: diffs to the sockets it touches, `head` to the rest. */
 	async fanOut(commit: CommitInfo): Promise<void> {
+		const started = performance.now();
+		try {
+			await this.#fanOut(commit);
+		} finally {
+			fanOutPerf.fanOuts++;
+			fanOutPerf.totalMs += performance.now() - started;
+		}
+	}
+
+	async #fanOut(commit: CommitInfo): Promise<void> {
 		const touch = analyze(commit.rows);
 		for (const id of commit.backlinkTargets ?? []) touch.backlinkTargets.add(id);
 		for (const id of commit.hasChildrenFlips?.keys() ?? []) addTo(touch.fields, id, '$hasChildren');
@@ -863,13 +1029,16 @@ export class LiveHub {
 
 		const units = this.#all<{ unit_key: string; kind: UnitKind; spec: string; flags: number }>('SELECT unit_key, kind, spec, flags FROM sub_unit');
 		const streams = this.streamSockets();
-		const streaming = new Set(streams);
+		// Hidden tabs of an overloaded object are not served (the runbook): no derivation, no frame.
+		const paused = new Set(streams.filter((id) => this.#host.paused?.(id) === true));
+		const streaming = new Set(streams.filter((id) => !paused.has(id)));
 		const diffs = new Map<string, { id: string; ops: DiffOp[] }[]>();
 		const resets = new Map<string, string[]>();
 
 		// Sockets whose actor's visibility changed in this commit: every window of theirs is re-derived.
 		const visibilityHit: { socketId: string; subId: string }[] = [];
 		for (const socketId of streams) {
+			if (paused.has(socketId)) continue;
 			const actor = this.#host.actorOf(socketId);
 			if (actor && this.#host.view(actor).delta.size > 0) {
 				for (const entry of this.subscriptions(socketId)) visibilityHit.push({ socketId, subId: entry.id });
@@ -892,7 +1061,11 @@ export class LiveHub {
 				}
 			}
 			const rescope = new Set<string>();
-			if (streams.length > 0) await this.#maintainViews(units, touch, changed, rescope);
+			if (streams.length > 0) {
+				const m0 = performance.now();
+				await this.#maintainViews(units, touch, changed, rescope);
+				fanOutPerf.maintainMs += performance.now() - m0;
+			}
 			// Subscriptions whose unit changed hands: registered again (the right unit for their user), fresh snapshot.
 			const rescoped = new Set<string>();
 			if (rescope.size > 0) {
@@ -916,11 +1089,13 @@ export class LiveHub {
 			// A definition change (options edited...) can reorder or drop groups without moving any page.
 			if (touch.definition) for (const u of units) if (u.kind === 'view') affected.add(u.unit_key);
 
-			const subs = this.#subsOfUnits([...affected]);
+			const subs = this.#subsOfUnits([...affected]).filter((l) => !paused.has(l.socketId));
 			const seen = new Set(subs.map((l) => `${l.socketId}\u0000${l.subId}`));
 			for (const hit of visibilityHit) if (!seen.has(`${hit.socketId}\u0000${hit.subId}`)) subs.push(hit);
 
 			if (subs.length > 0) {
+				const d0 = performance.now();
+				fanOutPerf.subsDerived += subs.length;
 				const cache = await CommitCache.create(this.#reader, updated);
 				const ids = new Map<string, string[]>();
 				const currentOf = (key: string) => {
@@ -928,10 +1103,24 @@ export class LiveHub {
 					if (!v) ids.set(key, (v = this.#unitIds(key)));
 					return v;
 				};
+				// The diff of a subscription is a function of its unit(s), window sizes, shown properties and the actor's
+				// visibility: tabs of one person (and subscriptions of the same shape) share one derivation per commit.
+				const derived = new Map<string, DiffOp[]>();
 				for (const link of subs) {
 					const row = this.#loadSub(link.socketId, link.subId);
 					const actor = this.#host.actorOf(link.socketId);
 					if (!row || !actor || !streaming.has(link.socketId) || rescoped.has(`${link.socketId}\u0000${link.subId}`)) continue;
+					const shape = `${(row.shape ??= `${row.kind}|${row.unitKeys.join(',')}|${row.lim}|${JSON.stringify(row.glim)}|${row.sub.kind === 'view' ? JSON.stringify(row.sub.props ?? null) : ''}`)}|${actor.userId}|${actor.role}`;
+					const shared = derived.get(shape);
+					if (shared) {
+						fanOutPerf.derivationsShared++;
+						if (shared.length) {
+							const list = diffs.get(link.socketId) ?? [];
+							list.push({ id: link.subId, ops: shared });
+							diffs.set(link.socketId, list);
+						}
+						continue;
+					}
 					const view = this.#host.view(actor);
 					let ops: DiffOp[];
 					if (row.kind === 'view') {
@@ -945,8 +1134,9 @@ export class LiveHub {
 							resets.set(link.socketId, list);
 							continue;
 						}
-						const oldW = this.#windows(old, row, (n) => view.hadBefore(n), registry);
-						const newW = this.#windows(next, row, (n) => view.has(n), registry);
+						const newW = this.#windows(next, row, view, registry);
+						// A unit that did not change, for an actor whose visibility did not change, has the window it had.
+						const oldW = old === next && view.delta.size === 0 ? newW : this.#windows(old, row, view, registry, 'before');
 						ops = await this.#viewWindowOps(row, next.grouped, oldW, newW, view, touch.definition);
 						const oldIds = this.#windowIds(oldW);
 						const inBoth = [...this.#windowIds(newW)].filter((id) => oldIds.has(id));
@@ -971,19 +1161,38 @@ export class LiveHub {
 						if (row.kind === 'tree' || row.kind === 'page') ops.push(...this.#accessUpdates(inBoth, view));
 						if (oldAll.length !== newAll.length) ops.push({ op: 'count', total: newAll.length });
 					}
+					derived.set(shape, ops);
 					if (ops.length) {
 						const list = diffs.get(link.socketId) ?? [];
 						list.push({ id: link.subId, ops });
 						diffs.set(link.socketId, list);
 					}
 				}
+				fanOutPerf.deriveMs += performance.now() - d0;
 			}
+			// The states the commit replaced are not read again: release their bitmaps.
+			for (const { old } of changed.values()) if (old instanceof ViewState) old.dispose();
 		}
 
 		// 3. One frame per socket: its diff, or a head (and a fresh snapshot where a window changed shape).
+		const s0 = performance.now();
+		fanOutPerf.framesSent += streams.length - paused.size;
+		// Sockets with the same diff (same ids, same derived ops) get the same message object, which `encodeServerMessage` serializes once.
+		const head: ServerMessage = { t: 'head', seq: commit.seq };
+		const diffMessages = new Map<string, ServerMessage>();
 		for (const socketId of streams) {
+			if (paused.has(socketId)) {
+				this.#host.skipped?.(socketId);
+				continue;
+			}
 			const subsOf = diffs.get(socketId);
-			const message: ServerMessage = subsOf ? { t: 'diff', seq: commit.seq, subs: subsOf } : { t: 'head', seq: commit.seq };
+			let message: ServerMessage = head;
+			if (subsOf) {
+				const signature = subsOf.map((e) => `${e.id}#${opsKey(e.ops)}`).join('|');
+				let shared = diffMessages.get(signature);
+				if (!shared) diffMessages.set(signature, (shared = { t: 'diff', seq: commit.seq, subs: subsOf }));
+				message = shared;
+			}
 			if (!this.#host.send(socketId, message)) {
 				this.dropSocket(socketId);
 				continue;
@@ -994,6 +1203,7 @@ export class LiveHub {
 				if (snap) this.#host.send(socketId, snap);
 			}
 		}
+		fanOutPerf.sendMs += performance.now() - s0;
 	}
 
 	/** A level that changed on a page the actor keeps seeing. */
@@ -1050,18 +1260,19 @@ export class LiveHub {
 			if (!resolved) {
 				next = EMPTY_STATE;
 			} else if (full || timed || resolved.manual) {
-				next = await evaluateView(db, resolved, spec, { now });
+				next = await evaluateView(db, resolved, spec, { now, bitmaps: this.#host.bitmaps });
 			} else {
 				const candidates = this.#viewCandidates(resolved, touch, old, editedPages);
 				if (candidates.size === 0) continue;
 				const list = [...candidates];
 				const liveCount = this.#reader.liveIds(list).size;
 				const incremental =
-					liveCount > MAX_INCREMENTAL ? null : await maintainView({ db, resolved, spec, state: old, candidates: list, reader: this.#reader, tuples, now });
-				next = incremental ?? (await evaluateView(db, resolved, spec, { now }));
+					liveCount > MAX_INCREMENTAL ? null : await maintainView({ db, resolved, spec, state: old, candidates: list, reader: this.#reader, tuples, now, bitmaps: this.#host.bitmaps, numOf: (id) => this.#numOf(id) });
+				next = incremental ?? (await evaluateView(db, resolved, spec, { now, bitmaps: this.#host.bitmaps }));
 			}
 			this.evaluations++;
 			countEvaluations.value++;
+			fanOutPerf.unitsMaintained++;
 			if (!old.equals(next)) {
 				changed.set(key, { old, next });
 				this.#writeView(key, next);

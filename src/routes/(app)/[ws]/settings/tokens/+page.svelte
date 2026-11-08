@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { Empty } from 'entasis/empty';
+	import TokensTab from '#lib/components/settings/TokensTab.svelte';
 </script>
 
-<Empty title="API tokens" description="API tokens for the public REST API arrive in P4." />
+<TokensTab />

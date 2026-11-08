@@ -3,6 +3,8 @@
  */
 import { os } from './base';
 import { meHandler } from './me';
+import { accountHandlers } from './account';
+import { adminHandlers } from './admin';
 import { workspaceHandlers } from './workspace';
 import { teamspacesHandlers } from './teamspaces';
 import { pageHandlers } from './page';
@@ -14,12 +16,16 @@ import { mutateHandler } from './mutate';
 import { searchHandlers } from './search';
 import { aiHandlers } from './ai';
 import { filesHandlers } from './files';
+import { importHandlers } from './import';
 import { tokensHandlers } from './tokens';
+import { exportHandlers } from './export';
 
 export const router = os.router({
 	me: meHandler,
-	workspace: { ...workspaceHandlers, teamspaces: teamspacesHandlers },
-	page: { ...pageHandlers, lock: pageLockHandlers },
+	account: accountHandlers,
+	admin: adminHandlers,
+	workspace: { ...workspaceHandlers, teamspaces: teamspacesHandlers, export: exportHandlers.workspace },
+	page: { ...pageHandlers, lock: pageLockHandlers, export: exportHandlers.page, exportStatus: exportHandlers.status },
 	property: propertyHandlers,
 	collection: collectionHandlers,
 	view: viewHandlers,
@@ -27,6 +33,7 @@ export const router = os.router({
 	search: searchHandlers,
 	ai: aiHandlers,
 	files: filesHandlers,
+	import: importHandlers,
 	tokens: tokensHandlers
 });
 

@@ -41,7 +41,7 @@
 		handle={reorder}
 		size="small"
 		class="rows"
-		theme={{ root: { base: 'm-0 flex list-none p-0 gap-0' }, item: { base: 'relative flex items-center text-neutral outline-none rounded-none border-0 border-b border-neutral-muted bg-transparent p-0! gap-1! text-sm!' } }}
+		theme={{ root: { base: 'm-0 flex list-none p-0 gap-0' }, item: { base: 'relative flex items-center text-neutral outline-none rounded-none border-0 border-b border-neutral-muted bg-transparent p-0! gap-1! text-sm! opacity-100! cursor-default! active:cursor-default!' } }}
 	>
 		{#snippet item({ item: row })}
 			<a

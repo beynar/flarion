@@ -301,6 +301,7 @@
 						label="Invite people"
 						theme={{ label: { base: 'sr-only' } }}
 						placeholder="Add people, groups or emails"
+						prefix={false}
 						bind:searchValue={query}
 						bind:value={picked}
 						items={inviteItems}

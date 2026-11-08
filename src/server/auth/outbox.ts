@@ -7,10 +7,11 @@
  */
 import { createDirectoryClient, globalClient, type DirectoryClient } from '../db/global.client';
 import { workspaceIdentity } from './workspace-rpc';
+import type { LocationHint } from '../objects/workspace/location';
 import type { WorkspaceRole } from './session';
 
 export type OutboxJob =
-	| { kind: 'init'; payload: { workspaceId: string; name: string; ownerId: string; ownerName: string } }
+	| { kind: 'init'; payload: { workspaceId: string; name: string; ownerId: string; ownerName: string; locationHint?: LocationHint } }
 	| { kind: 'syncMember'; payload: { userId: string; role: WorkspaceRole | null; name?: string } }
 	| { kind: 'rename'; payload: { name: string } };
 
@@ -38,9 +39,14 @@ export function outboxInsert(db: DirectoryClient, workspaceId: string, job: Outb
 }
 
 async function deliver(env: Pick<Env, 'WORKSPACE'>, workspaceId: string, job: OutboxJob): Promise<void> {
+	if (job.kind === 'init') {
+		// The first call that reaches the object places it: near the team that created the workspace.
+		const { locationHint, ...args } = job.payload;
+		await workspaceIdentity(env, workspaceId, locationHint).init(args);
+		return;
+	}
 	const rpc = workspaceIdentity(env, workspaceId);
-	if (job.kind === 'init') await rpc.init({ ...job.payload });
-	else if (job.kind === 'rename') await rpc.rename({ ...job.payload });
+	if (job.kind === 'rename') await rpc.rename({ ...job.payload });
 	else await rpc.syncMember({ ...job.payload });
 }
 

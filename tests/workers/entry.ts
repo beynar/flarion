@@ -8,6 +8,7 @@ import { handleWorkspaceSocket } from '../../src/server/http/workspace-socket-ro
 
 export { WorkspaceDO } from '../../src/server/objects/workspace/workspace-do';
 export { PageDO } from '../../src/server/objects/page/page-do';
+export { ImportWorkflow } from '../../src/server/workflows/import';
 
 /** Generic SQLite Durable Object for driver/FTS5 tests: exposes ctx to RPC callers via runInDurableObject. */
 export class TestSqlDO extends DurableObject {

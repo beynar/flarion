@@ -27,7 +27,7 @@
 	let restoring = $state<string | null>(null);
 
 	const lists = $derived(splitTeamspaces(store.teamspaces, store.myTeamspaces));
-	const nameOf = (id: string) => store.members.find((m) => m.userId === id)?.name ?? 'Someone';
+	const nameOf = (id: string) => store.members.find((m) => m.userId === id)?.name ?? 'Deleted user';
 	const ownersOf = (id: string) => (rosters[id] ?? []).filter((m) => m.role === 'owner').map((m) => nameOf(m.userId));
 
 	async function loadRosters() {

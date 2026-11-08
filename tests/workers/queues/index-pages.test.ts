@@ -264,7 +264,8 @@ describe('queue consumer routing', () => {
 		const env = {
 			CACHE: testEnv.CACHE,
 			PAGE: testEnv.PAGE,
-			WORKSPACE: { getByName: () => ({ ingestPages: ingest }) }
+			// `ai-property` asks the Workspace DO what to do (nothing is pending here): `ai/property.ts`
+			WORKSPACE: { getByName: () => ({ ingestPages: ingest, aiPropertyPrepare: async () => ({ action: 'skip', reason: 'clean' }) }) }
 		};
 		const messages = [
 			new FakeMessage(job(ws, page, 1)),

@@ -3,6 +3,7 @@
  * (full-text body, outline, references and mentions), and run a deduplicated, throttled batch of
  * `index-page` jobs. Pure extraction is separate from the queue plumbing so both are testable.
  */
+import { metric, type MetricsEnv } from '../metrics';
 import type { JSONBlock, JSONDoc } from 'edytor/crdt/edytor';
 import { PAGE_MENTION_PREFIX } from '../../lib/shared/blocks/page-mention.js';
 import { roomName } from '../rooms/names';
@@ -227,6 +228,8 @@ export async function indexPages(
 					).catch(() => {});
 					message.ack();
 					result.indexed++;
+					// From the edit (the job's version is the room's last-updated time) to a searchable page: "Indexing queue lag".
+					metric(env as unknown as MetricsEnv, 'queue_lag', { labels: ['index'], value: Math.max(0, now - message.body.version), extra: [ready.length] });
 				})
 			);
 		}

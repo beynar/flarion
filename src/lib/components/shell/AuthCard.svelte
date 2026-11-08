@@ -1,6 +1,8 @@
 <script lang="ts">
 	import type { Snippet } from 'svelte';
 	import { Card } from 'entasis/card';
+	// Importing it applies the saved (or the OS's) contrast choice to the page.
+	import '#lib/client/a11y.svelte.ts';
 	import FlarionLogo from './FlarionLogo.svelte';
 
 	let {
@@ -16,7 +18,7 @@
 	} = $props();
 </script>
 
-<main class="flex min-h-dvh flex-col items-center justify-center gap-6 px-4 py-10">
+<main class="auth-main flex min-h-dvh flex-col items-center justify-center gap-6 px-4 py-10">
 	<a
 		href="/"
 		class="flex items-center gap-2 text-[color:var(--app-text)] no-underline"
@@ -43,3 +45,11 @@
 		{/snippet}
 	</Card>
 </main>
+
+<style>
+	/* A link inside a sentence must not rely on its color alone (WCAG 1.4.1): underline them. The logo link has a label. */
+	.auth-main :global(a:not([aria-label])) {
+		text-decoration: underline;
+		text-underline-offset: 2px;
+	}
+</style>
