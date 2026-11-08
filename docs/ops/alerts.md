@@ -2,7 +2,7 @@
 
 docs/PLAN.md "Operating targets" and "Observability" are implemented in three layers. Platform alerts come from Cloudflare
 Notifications (configured once, below); the app's own signals come from Analytics Engine and an alert cron; errors are
-collected by a Tail Worker.
+collected by Cloudflare Workers Observability (Workers Logs), enabled in `wrangler.jsonc`.
 
 ## What is measured (Analytics Engine, `src/server/metrics.ts`)
 
@@ -20,7 +20,7 @@ One dataset per environment (`flarion_metrics`, `flarion_metrics_staging`; the `
 | `reconnect` | `fresh` or `resume` | 1 | workspace socket `hello` |
 | `doc_size` | workspace id, page id | bytes / quota (0 to 1), bytes | Page DO save |
 | `api` | token id, `METHOD route`, status class | latency ms, HTTP status | public API |
-| `error` | where, message, path | 1, exceptions, error logs | Tail Worker, `reportError` |
+| `error` | where, message, path | 1, exceptions, error logs | `reportError` (caught errors in the app) |
 
 Writing is best effort and never throws. Analytics Engine samples under load: sums use `_sample_interval`, percentiles
 `quantileWeighted`. The `api` metric names the token id, never its secret.
@@ -72,20 +72,13 @@ writers (the Page DO enforces the 16 MiB quota).
 
 Each job logs one `[cron] <name>:` line with its counts (Workers Logs).
 
-## Tail Worker (errors)
+## Errors (Workers Observability)
 
-`workers/tail/` is a second small Worker with its own `wrangler.jsonc`. The main Worker lists it in `tail_consumers`
-(staging: `flarion-tail-staging`; production: `flarion-tail`; not in local dev). For every invocation that failed (an
-uncaught exception, `exceededCpu`, `exceededMemory`, an `error` log) it writes an `error` data point to the same dataset
-and one JSON log line. Deploy it **before** the main Worker (a `tail_consumers` entry must name a Worker that exists);
-`scripts/deploy.sh` does it as the step before the main deploy (`--skip-tail` to leave it out), by hand:
-
-```bash
-npx wrangler deploy -c workers/tail/wrangler.jsonc --env staging
-npx wrangler deploy -c workers/tail/wrangler.jsonc --env production
-```
-
-Workers Logs are on (`observability` in `wrangler.jsonc`), with invocation logs.
+There is no Tail Worker: Workers Logs and invocation logs are enabled per environment (`observability` in
+`wrangler.jsonc`), so uncaught exceptions, `exceededCpu`/`exceededMemory` outcomes and `console.error` lines are queryable in
+the dashboard (Workers & Pages → flarion → Observability) and with `wrangler tail flarion --env production`. Caught errors
+the app wants to count also go to Analytics Engine through `reportError` (the `error` signal above). For alerting on
+error rates, add a Workers Observability alert (or the Notifications below) on the `flarion` / `flarion-staging` scripts.
 
 ## Cloudflare Notifications to configure (dashboard, once per account)
 

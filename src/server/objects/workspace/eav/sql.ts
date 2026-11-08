@@ -1,4 +1,5 @@
 import type { WorkspaceDb } from '../../../db/workspace.client';
+import { quiet } from '../../../db/quiet';
 
 /** DO SQLite allows 100 bound parameters per statement; stay under it. */
 export const MAX_PARAMS = 90;
@@ -7,7 +8,7 @@ export const all = <T>(db: WorkspaceDb, sql: string, ...params: unknown[]): Prom
 	db.$queryRawUnsafe<T>(sql, ...params) as Promise<T[]>;
 
 export const run = (db: WorkspaceDb, sql: string, ...params: unknown[]): Promise<number> =>
-	db.$executeRawUnsafe(sql, ...params) as Promise<number>;
+	db.$executeRawUnsafe(quiet(sql), ...params) as Promise<number>;
 
 export const qmarks = (n: number): string => Array.from({ length: n }, () => '?').join(',');
 

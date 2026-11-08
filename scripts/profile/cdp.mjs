@@ -1,0 +1,21 @@
+// Records a V8 CPU profile from the inspector  opens: node scripts/profile/cdp.mjs <delay s> <duration s> <out file>
+import { createRequire } from 'node:module';
+import { writeFileSync } from 'node:fs';
+const require = createRequire(import.meta.url);
+const WebSocket = require('ws');
+const [delay, dur, out] = [Number(process.argv[2]), Number(process.argv[3]), process.argv[4]];
+await new Promise((r) => setTimeout(r, delay * 1000));
+const ws = new WebSocket('ws://localhost:9339/ws');
+let id = 0; const pending = new Map();
+const send = (method, params = {}) => new Promise((res) => { const i = ++id; pending.set(i, res); ws.send(JSON.stringify({ id: i, method, params })); });
+ws.on('message', (d) => { const m = JSON.parse(d); if (m.id && pending.has(m.id)) { pending.get(m.id)(m); pending.delete(m.id); } });
+await new Promise((r) => ws.on('open', r));
+await send('Profiler.enable');
+await send('Profiler.setSamplingInterval', { interval: 200 });
+await send('Profiler.start');
+console.log('profiling');
+await new Promise((r) => setTimeout(r, dur * 1000));
+const res = await send('Profiler.stop');
+writeFileSync(out, JSON.stringify(res.result.profile));
+console.log('saved', out);
+ws.close();

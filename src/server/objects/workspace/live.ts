@@ -43,6 +43,7 @@ import type { LogRow } from './changelog';
 import { RowReader, type AccessOf } from './rows';
 import { chunks, MAX_PARAMS, qmarks } from './util';
 import { filterKey } from '../../../lib/shared/filter-ast';
+import { MatchMemo, type SortTuple } from '../../engine';
 import { loadEavRegistry, type EavRegistry } from './eav/registry';
 import {
 	EDITED,
@@ -1458,7 +1459,11 @@ export class LiveHub {
 		if (editedPages.size > 0) writtenProps.add(EDITED);
 		const indexed = this.#unitsReading([...writtenProps]);
 
-		const tuples = new TupleCache(db, now);
+		// Sort tuples live between commits; the pages a commit wrote (and every page, when definitions, the clock or places changed) are forgotten.
+		this.#forgetTuples(touch, editedPages, full || touch.clock || pageLevel);
+		const tuples = new TupleCache(db, now, this.#tupleStore);
+		const memo = new MatchMemo();
+		await this.#reader.withLiveMemo(async () => {
 		for (const u of viewUnits) {
 			const key = u.unit_key;
 			const timed = touch.clock && (u.flags & 1) !== 0;
@@ -1482,7 +1487,7 @@ export class LiveHub {
 				const list = [...candidates];
 				const liveCount = this.#reader.liveIds(list).size;
 				const incremental =
-					liveCount > MAX_INCREMENTAL ? null : await maintainView({ db, resolved, spec, state: old, candidates: list, reader: this.#reader, tuples, now, bitmaps: this.#host.bitmaps, numOf: (id) => this.#numOf(id) });
+					liveCount > MAX_INCREMENTAL ? null : await maintainView({ db, resolved, spec, state: old, candidates: list, reader: this.#reader, tuples, now, bitmaps: this.#host.bitmaps, numOf: (id) => this.#numOf(id), memo });
 				next = incremental ?? (await evaluateView(db, resolved, spec, { now, bitmaps: this.#host.bitmaps }));
 			}
 			this.evaluations++;
@@ -1493,6 +1498,22 @@ export class LiveHub {
 				this.#writeView(key, next);
 			}
 		}
+		});
+	}
+
+	/** Sort tuples of the units' maintenance, by sort specification and page number, kept between commits. */
+	readonly #tupleStore = new Map<string, Map<number, SortTuple>>();
+
+	#forgetTuples(touch: Touch, editedPages: ReadonlySet<string>, everything: boolean): void {
+		if (this.#tupleStore.size === 0) return;
+		let size = 0;
+		for (const m of this.#tupleStore.values()) size += m.size;
+		if (everything || size > 100_000 || touch.all) {
+			this.#tupleStore.clear();
+			return;
+		}
+		const nums = this.#reader.nums([...new Set([...editedPages, ...touch.valueProps.keys(), ...touch.fields.keys(), ...touch.edited])]);
+		for (const m of this.#tupleStore.values()) for (const n of nums.values()) m.delete(n);
 	}
 
 	/** The pages whose membership, group or position in a view unit may change in this commit. */

@@ -1,4 +1,5 @@
 import type { WorkspaceDb } from '../../db/workspace.client';
+import { quiet } from '../../db/quiet';
 
 /** Durable Object SQLite allows 100 bound parameters per statement; stay under it. */
 export const MAX_PARAMS = 90;
@@ -17,6 +18,10 @@ export const rawAll = <T>(db: WorkspaceDb, sql: string, ...params: unknown[]): P
 
 export const rawRun = (db: WorkspaceDb, sql: string, ...params: unknown[]): Promise<number> =>
 	db.$executeRawUnsafe(sql, ...params) as Promise<number>;
+
+/** `rawRun` for a caller that ignores the affected-row count: one statement fewer per write (`db/quiet.ts`); resolves to 0. */
+export const rawRunQuiet = (db: WorkspaceDb, sql: string, ...params: unknown[]): Promise<number> =>
+	db.$executeRawUnsafe(quiet(sql), ...params) as Promise<number>;
 
 export const isoTime = (ms: number): string => new Date(ms).toISOString();
 

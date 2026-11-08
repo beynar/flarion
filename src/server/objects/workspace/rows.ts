@@ -316,28 +316,65 @@ export class RowReader {
 		return out;
 	}
 
-	/** Dense numbers of pages by id (they never change: callers may cache them). */
+	/** Dense numbers of pages by id: they never change, so every id read is kept (a page that is purged never comes back under its id). */
+	readonly #numCache = new Map<string, number>();
+	/** Liveness answers shared by the reads of one maintenance pass (`withLiveMemo`): nothing is written while it runs. */
+	#liveMemo: Map<string, boolean> | null = null;
+
 	nums(ids: readonly string[]): Map<string, number> {
 		const out = new Map<string, number>();
-		for (const part of chunks(ids, MAX_PARAMS)) {
+		let missing: string[] | null = null;
+		for (const id of ids) {
+			const n = this.#numCache.get(id);
+			if (n !== undefined) out.set(id, n);
+			else (missing ??= []).push(id);
+		}
+		if (!missing) return out;
+		if (this.#numCache.size > 200_000) this.#numCache.clear();
+		for (const part of chunks(missing, MAX_PARAMS)) {
 			for (const r of this.#all<{ id: string; num: number }>(`SELECT id, num FROM page WHERE id IN (${qmarks(part.length)})`, ...part)) {
 				out.set(r.id, r.num);
+				this.#numCache.set(r.id, r.num);
 			}
 		}
 		return out;
 	}
 
+	/** Runs `work` with `liveIds` answers remembered (one pass of view maintenance asks the same candidates once per unit). */
+	async withLiveMemo<T>(work: () => Promise<T>): Promise<T> {
+		this.#liveMemo = new Map();
+		try {
+			return await work();
+		} finally {
+			this.#liveMemo = null;
+		}
+	}
+
 	/** Ids among `ids` that are live pages. */
 	liveIds(ids: readonly string[]): Set<string> {
 		const live = new Set<string>();
-		for (const part of chunks(ids, MAX_PARAMS)) {
+		const memo = this.#liveMemo;
+		let unknown: readonly string[] = ids;
+		if (memo) {
+			const rest: string[] = [];
+			for (const id of ids) {
+				const known = memo.get(id);
+				if (known === undefined) rest.push(id);
+				else if (known) live.add(id);
+			}
+			unknown = rest;
+		}
+		const found = new Set<string>();
+		for (const part of chunks(unknown, MAX_PARAMS)) {
 			for (const r of this.#all<{ id: string }>(
 				`SELECT id FROM page WHERE id IN (${qmarks(part.length)}) AND deleted_at IS NULL`,
 				...part
 			)) {
+				found.add(r.id);
 				live.add(r.id);
 			}
 		}
+		if (memo) for (const id of unknown) memo.set(id, found.has(id));
 		return live;
 	}
 

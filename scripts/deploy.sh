@@ -1,22 +1,20 @@
 #!/usr/bin/env bash
 # Deploy Flarion to one Wrangler environment. Same steps CI runs (.github/workflows/ci.yml):
-#   build -> secrets check -> D1 migrations -> Tail Worker -> main Worker
+#   build -> secrets check -> D1 migrations -> main Worker
 #
 #   scripts/deploy.sh staging                # wrangler deploy --env staging (full, immediate)
 #   scripts/deploy.sh production             # gradual: versions upload, then versions deploy 10% -> 50% -> 100%
 #   scripts/deploy.sh production --full      # plain `wrangler deploy` (first deploy, Durable Object migrations)
 #
-# Options: --full  --skip-build  --skip-checks  --skip-tail  --dry-run  --yes
+# Options: --full  --skip-build  --skip-checks  --dry-run  --yes
 # Env:     CLOUDFLARE_API_TOKEN, CLOUDFLARE_ACCOUNT_ID (or `wrangler login` locally)
 #          ROLLOUT_STEPS="10 50"   percentages before the final 100% (production)
 #          ROLLOUT_WAIT=120        seconds to soak at each step
-#          SKIP_TAIL=1             do not deploy the Tail Worker (same as --skip-tail)
 #          HEALTH_URL=...          override the /healthz base URL (default: APP_ORIGIN of the environment)
 #          FULL_DEPLOY=1           same as --full
 #          SKIP_SECRETS_CHECK=1    bootstrap only: the Worker does not exist yet, so it has no secrets
 #
-# The main Worker names the Tail Worker in `tail_consumers` (wrangler.jsonc): a deploy fails when that service does not exist
-# yet, so workers/tail is deployed first, in every mode (it has no state and is cheap). The secrets the app reads without
+# The secrets the app reads without
 # requiring them (optional: the Worker degrades without them) are listed by the secrets check and in docs/ops/secrets.md.
 #
 # Gradual deployments cannot carry Durable Object migrations, a new Worker or trigger/route changes:
@@ -28,13 +26,12 @@ cd "$(dirname "$0")/.."
 
 ENVIRONMENT="${1:-}"
 shift || true
-FULL="${FULL_DEPLOY:-0}"; SKIP_BUILD=0; SKIP_CHECKS="${SKIP_SECRETS_CHECK:-0}"; SKIP_TAIL="${SKIP_TAIL:-0}"; DRY=0; YES=0
+FULL="${FULL_DEPLOY:-0}"; SKIP_BUILD=0; SKIP_CHECKS="${SKIP_SECRETS_CHECK:-0}"; DRY=0; YES=0
 for arg in "$@"; do
 	case "$arg" in
 		--full) FULL=1 ;;
 		--skip-build) SKIP_BUILD=1 ;;
 		--skip-checks) SKIP_CHECKS=1 ;;
-		--skip-tail) SKIP_TAIL=1 ;;
 		--dry-run) DRY=1 ;;
 		--yes|-y) YES=1 ;;
 		*) echo "Unknown option: $arg" >&2; exit 2 ;;
@@ -42,7 +39,7 @@ for arg in "$@"; do
 done
 case "$ENVIRONMENT" in
 	staging|production) ;;
-	*) echo "Usage: scripts/deploy.sh <staging|production> [--full] [--skip-build] [--skip-checks] [--skip-tail] [--dry-run] [--yes]" >&2; exit 2 ;;
+	*) echo "Usage: scripts/deploy.sh <staging|production> [--full] [--skip-build] [--skip-checks] [--dry-run] [--yes]" >&2; exit 2 ;;
 esac
 
 WRANGLER="pnpm exec wrangler"
@@ -158,13 +155,6 @@ current_version() {
 	'
 }
 
-# The Tail Worker first: `tail_consumers` of the main Worker points at it.
-deploy_tail() {
-	if [ "$SKIP_TAIL" = 1 ]; then log "Tail Worker skipped"; return; fi
-	log "Tail Worker ($ENVIRONMENT)"
-	run $WRANGLER deploy -c workers/tail/wrangler.jsonc --env "$ENVIRONMENT" --message "${DEPLOY_MESSAGE:-tail $(git rev-parse --short HEAD 2> /dev/null || echo local)}"
-}
-
 full_deploy() {
 	log "Full deploy ($ENVIRONMENT)"
 	run $WRANGLER deploy --env "$ENVIRONMENT" --message "${DEPLOY_MESSAGE:-deploy $(git rev-parse --short HEAD 2> /dev/null || echo local)}"
@@ -215,7 +205,6 @@ gradual_deploy() {
 	if [ "$DRY" = 0 ]; then health_check; fi
 }
 
-deploy_tail
 
 if [ "$ENVIRONMENT" = staging ] || [ "$FULL" = 1 ]; then
 	full_deploy

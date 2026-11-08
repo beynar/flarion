@@ -186,6 +186,7 @@ export async function writeValues(
 	if (touch) {
 		set.push('updated_at = ?', 'updated_by = ?');
 		params.push(iso(ctx.now), ctx.actorId);
+		ctx.stamped?.add(page.id);
 	}
 	await run(db, `UPDATE page SET ${set.join(', ')} WHERE id = ?`, ...params, page.id);
 	return changes;

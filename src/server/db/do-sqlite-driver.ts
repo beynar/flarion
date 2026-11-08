@@ -52,6 +52,7 @@
  *   instrumentation extensions for commit certainty) are internal and not emitted; instrumentation
  *   falls back to "committed once the callback returned".
  */
+import { QUIET_WRITE } from './quiet';
 import { SQLiteAdapter } from 'viborm/adapters';
 import type { DatabaseAdapter } from 'viborm/adapters';
 import {
@@ -208,7 +209,9 @@ export class DurableObjectSqliteDriver extends Driver<DurableObjectStorage, Dura
 		return this.run<T>(client, sql, params ?? []);
 	}
 
-	private run<T>(storage: DurableObjectStorage, sql: string, params: unknown[]): QueryResult<T> {
+	private run<T>(storage: DurableObjectStorage, source: string, params: unknown[]): QueryResult<T> {
+		const silent = source.startsWith(QUIET_WRITE);
+		const sql = silent ? source.slice(QUIET_WRITE.length) : source;
 		const statement = hidePlatformTables(sql);
 		try {
 			const cursor = storage.sql.exec(statement, ...params.map(toBindValue));
@@ -218,7 +221,7 @@ export class DurableObjectSqliteDriver extends Driver<DurableObjectStorage, Dura
 			}
 			// Writes and DDL: step the cursor to completion.
 			cursor.toArray();
-			if (!WRITE_KEYWORDS.has(leadingKeyword(statement))) return { rows: [] as T[], rowCount: 0 };
+			if (silent || !WRITE_KEYWORDS.has(leadingKeyword(statement))) return { rows: [] as T[], rowCount: 0 };
 			const meta = storage.sql
 				.exec<{ changes: number; rowid: number }>(
 					'SELECT changes() AS changes, last_insert_rowid() AS rowid'

@@ -10,6 +10,8 @@
 	"workers_dev": true,
 	"preview_urls": true,
 	"find_additional_modules": true,
+	// The code-split chunks of the Worker (`scripts/postbuild.mjs`): uploaded as modules, compiled when a request first imports them.
+	"rules": [{ "type": "ESModule", "globs": ["**/wc-*.js"], "fallthrough": true }],
 	// A WebSocket upgrade is served by a fresh isolate that loads the whole script (measured: +75 ms per MB, docs/ops/load-test.md "Start-up"):
 	// minified, the dial is a third shorter. Names are kept (`keep_names`), maps are uploaded so stack traces stay readable.
 	"minify": true,
@@ -191,6 +193,7 @@
 		"staging": {
 			"name": "flarion-staging",
 			"find_additional_modules": true,
+			"rules": [{ "type": "ESModule", "globs": ["**/wc-*.js"], "fallthrough": true }],
 			"vars": {
 				"APP_NAME": "Flarion",
 				"APP_VERSION": "0.0.1",
@@ -352,16 +355,12 @@
 					"0 4 * * SUN",
 					"*/5 * * * *"
 				]
-			},
-			"tail_consumers": [
-				{
-					"service": "flarion-tail-staging"
-				}
-			]
+			}
 		},
 		"production": {
 			"name": "flarion",
 			"find_additional_modules": true,
+			"rules": [{ "type": "ESModule", "globs": ["**/wc-*.js"], "fallthrough": true }],
 			"vars": {
 				"APP_NAME": "Flarion",
 				"APP_VERSION": "0.0.1",
@@ -522,11 +521,6 @@
 					"*/5 * * * *"
 				]
 			},
-			"tail_consumers": [
-				{
-					"service": "flarion-tail"
-				}
-			],
 			"routes": [
 				{
 					"pattern": "flarion.beynar.dev",

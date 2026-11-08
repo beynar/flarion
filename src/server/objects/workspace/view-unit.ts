@@ -33,7 +33,7 @@ import type { PropertyDef } from '../../../lib/shared/property-types';
 import type { OptionIndex } from '../../bitmaps/option-index';
 import { createBitmap, roaringReady, type Bitmap } from '../../bitmaps/roaring';
 import type { SortTuple } from '../../engine/types';
-import { compareSortTuples, groupKeysOf, matchesFilterMany, runQuery, sortKeyOf } from '../../engine';
+import { compareSortTuples, groupKeysOf, matchesFilterMany, runQuery, sortKeyOf, type MatchMemo } from '../../engine';
 import { orderGroups } from '../../engine/group';
 import type { WorkspaceDb } from '../../db/workspace.client';
 import { readCollection } from './eav';
@@ -286,11 +286,15 @@ export async function evaluateView(db: WorkspaceDb, resolved: ResolvedView, spec
 
 /** Sort tuples loaded once per commit and sort specification. */
 export class TupleCache {
-	readonly #byKey = new Map<string, Map<number, SortTuple>>();
+	readonly #byKey: Map<string, Map<number, SortTuple>>;
 	constructor(
 		readonly db: WorkspaceDb,
-		readonly now: number
-	) {}
+		readonly now: number,
+		/** Tuples kept between commits by the live loop, which forgets the pages and sorts a commit changed (`forgetTuples`). */
+		store?: Map<string, Map<number, SortTuple>>
+	) {
+		this.#byKey = store ?? new Map();
+	}
 
 	async load(sorts: readonly SortSpec[], nums: readonly number[]): Promise<Map<number, SortTuple>> {
 		const key = JSON.stringify(sorts);
@@ -318,6 +322,8 @@ export interface MaintainInput {
 	bitmaps?: OptionIndex | null;
 	/** The live loop's id-to-number cache: the binary search over a unit's stored order looks up many ids, and each miss is a query. */
 	numOf?: (id: string) => number | undefined;
+	/** Candidate-check answers shared by the units of one commit's maintenance. */
+	memo?: MatchMemo;
 }
 
 /**
@@ -325,7 +331,7 @@ export interface MaintainInput {
  * incremental path cannot answer (a page's tuple could not be loaded): the caller evaluates in full.
  */
 export async function maintainView(input: MaintainInput): Promise<ViewState | null> {
-	const { db, resolved, spec, state, candidates, reader, tuples, now, bitmaps, numOf: cachedNumOf } = input;
+	const { db, resolved, spec, state, candidates, reader, tuples, now, bitmaps, numOf: cachedNumOf, memo } = input;
 	const groupBy = resolved.spec.groupBy ?? null;
 	if ((state.groupBy === null) !== (groupBy === null) || JSON.stringify(state.groupBy) !== JSON.stringify(groupBy)) return null;
 	const sorts = resolved.spec.sorts ?? [];
@@ -334,7 +340,7 @@ export async function maintainView(input: MaintainInput): Promise<ViewState | nu
 	const numOf = reader.nums(candidates);
 	const live = reader.liveIds(candidates);
 	const liveNums = candidates.filter((id) => live.has(id) && numOf.has(id)).map((id) => numOf.get(id) as number);
-	const matched = await matchesFilterMany(db, resolved.spec.filter, liveNums, { me: spec.me, now, collectionId: resolved.collectionId, bitmaps });
+	const matched = await matchesFilterMany(db, resolved.spec.filter, liveNums, { me: spec.me, now, collectionId: resolved.collectionId, bitmaps, memo });
 	const matchedNums = [...matched];
 	const keysOf = new Map<number, string[]>();
 	if (groupBy) for (const [n, keys] of await groupKeysOf(db, groupBy, matchedNums, { now })) keysOf.set(n, keys);

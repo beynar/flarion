@@ -17,8 +17,10 @@
 import type { PageIndexItem } from '../queues/types';
 import type { ChangeRecord } from '../objects/workspace/eav';
 import type { WorkspaceClient, WorkspaceDb, WorkspaceTx } from '../db/workspace.client';
-import { chunks, MAX_PARAMS, qmarks, rawAll, rawRun } from '../objects/workspace/util';
+import { chunks, MAX_PARAMS, qmarks, rawAll, rawRun, rawRunQuiet } from '../objects/workspace/util';
 import { chunkForFullText, cleanText } from './chunk';
+import { loadEavRegistry } from '../objects/workspace/eav/registry';
+import { TITLE_PROP_ID } from '../../lib/shared/property-types';
 
 /** Property types whose values are indexed as text. */
 export const INDEXED_PROPERTY_TYPES = ['text', 'url', 'email', 'phone', 'ai'] as const;
@@ -33,7 +35,7 @@ interface Row {
 
 async function insertRows(db: WorkspaceDb, rows: readonly Row[]): Promise<void> {
 	for (const part of chunks(rows, ROWS_PER_INSERT)) {
-		await rawRun(
+		await rawRunQuiet(
 			db,
 			`INSERT INTO search (page_num, field, text) VALUES ${part.map(() => '(?, ?, ?)').join(', ')}`,
 			...part.flatMap((r) => [r.num, r.field, r.text])
@@ -45,7 +47,7 @@ async function insertRows(db: WorkspaceDb, rows: readonly Row[]): Promise<void> 
 async function deleteRows(db: WorkspaceDb, nums: readonly number[], fields: readonly Row['field'][] | null): Promise<void> {
 	for (const part of chunks(nums, MAX_PARAMS - 3)) {
 		const where = fields ? ` AND field IN (${qmarks(fields.length)})` : '';
-		await rawRun(db, `DELETE FROM search WHERE page_num IN (${qmarks(part.length)})${where}`, ...part, ...(fields ?? []));
+		await rawRunQuiet(db, `DELETE FROM search WHERE page_num IN (${qmarks(part.length)})${where}`, ...part, ...(fields ?? []));
 	}
 }
 
@@ -110,7 +112,15 @@ async function reindexPages(db: WorkspaceDb, nums: readonly number[]): Promise<v
 export async function indexChanges(tx: WorkspaceTx, records: ChangeRecord[]): Promise<void> {
 	const pageIds = new Set<string>();
 	const definitionProps = new Set<string>();
+	// A write of a number, a checkbox or a select changes nothing the index holds: only titles and text-like properties re-read the page.
+	const registry = records.some((r) => r.kind === 'setProp' && r.page) ? await loadEavRegistry(tx as unknown as WorkspaceDb) : null;
+	const indexed = (prop: string | null | undefined): boolean => {
+		if (!prop || prop === TITLE_PROP_ID) return true;
+		const type = registry?.get(prop)?.type;
+		return type === undefined || (INDEXED_PROPERTY_TYPES as readonly string[]).includes(type);
+	};
 	for (const r of records) {
+		if (r.kind === 'setProp' && r.page && !indexed(r.prop)) continue;
 		if ((r.kind === 'setProp' || r.kind === 'create') && r.page) pageIds.add(r.page);
 		else if ((r.kind === 'deleteProperty' || r.kind === 'updateProperty') && r.prop) definitionProps.add(r.prop);
 	}

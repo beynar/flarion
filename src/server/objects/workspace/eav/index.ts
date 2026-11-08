@@ -77,6 +77,8 @@ export const isEavOp = (op: Op): op is EavOp => EAV_OP_NAMES.has(op.op);
 export interface EavOpContext {
 	actorId: string;
 	now: number;
+	/** The commit's record of pages whose `updated_*` columns a write already set (to this actor and time): the commit does not stamp them again. */
+	stamped?: Set<string>;
 }
 
 /** One logical change, appended by the Sync core as a `change` row (old/new are JSON-serializable). */

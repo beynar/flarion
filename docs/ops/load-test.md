@@ -244,7 +244,9 @@ loaded the same way (`scripts/postbuild.mjs` rewrites the generated `_worker.js`
 starts, `auth/session.ts` loads better-auth on first use, `wrangler.jsonc` minifies (`keep_names` stays on) and uploads source maps. `wrangler check startup`
 (local profile, `Active` ms: 55 to 65 before, 33 after) and the `Worker Startup Time` of `wrangler deploy` show whether a change put weight back.
 
-What is left: the script carries the server rendering of the whole app (entasis, charts, every page: about 40% of it), the query layer and the editor.
+**Third pass update (2026-11-08):** the single bundle is gone, see "Third pass" below (the table above is the second pass's; 60 ms of `Worker Startup Time` is now 2 ms and the `/healthz` upgrade 240 to 260 ms).
+
+What was left after the second pass: the script carries the server rendering of the whole app (entasis, charts, every page: about 40% of it), the query layer and the editor.
 Further down means splitting what a socket dial loads from what the app renders: a front Worker for `/ws`, `/rpc` and the Durable Objects with the
 SvelteKit app behind a service binding (a design decision for the orchestrator: it adds a Worker and a deploy). The dial is also cheaper when an isolate is
 already warm: with other tabs connected, the cold probes measured 112 to 186 ms to open; with nothing warm, 450 to 700 ms.
@@ -270,6 +272,8 @@ Staging, `https://flarion-staging.beynar.workers.dev`, from France (Cloudflare c
 | 2026-11-08 (second pass) | A/B on one deployment, `--shards 4 --local 64` then `--shards 0`, twice | 1,000 | 20 | 500 / 8 | in-DC | shards 185 / 700 and 77 / 522 ms; direct 84 / 268 ms and a saturated run (13.4 s / 14.0 s) | | 0 | 0 | |
 | 2026-11-08 (second pass) | bare delivery, `--echo 200`, 20 per second, no commit | 1,000 | 20 | 500 / 8 | in-DC | direct 34 / 98 ms (object MXP), 86 / 222 ms (object MRS); 4 shards 14 / 50 ms; 8 shards 24 / 82 ms | | | | |
 | 2026-11-08 (second pass) | cold probes from the laptop, `run.ts --cold-probes 5 --cold-idle 20` | 10 | 2 | 50 / 5 | laptop | | | | | first window p50 593 to 674 ms, max 745 to 997 ms (open 530 to 600, hello to snapshot 65) |
+| 2026-11-08 (third pass) | split script, thin object classes, per-commit memos, six official-style runs of 60 s (two builds, three runs each), see "Third pass" | 1,000 | 20 | 500 / 8 | in-DC | object MXP: **67 / 182 / 300 ms** and 77 / 333 / 811 ms; object CDG: 435 / 1,617 ms (degraded, commit call p50 225 ms); saturated (3 of 6, one with the object in MRS, two not recorded): 4.5 s / 11.3 s, 7.0 s / 10.1 s (684 of 1,200 writes refused), 26 s / 35 s | commit call 54 / 117 ms and 59 / 189 ms when not saturated | 0 of 1,200 except the one run that refused 684 | 0 except two saturated runs (225,548 and 250,009 not delivered by the end of the run) | |
+| 2026-11-08 (third pass) | cold probes from the laptop, `run.ts --cold-probes 5 --cold-idle 25`, split script and thin classes | 10 | 2 | 50 / 5 | laptop | | | | | first window p50 545 ms, max 937 ms (open 483, hello to snapshot 62) against 593 to 674 before |
 
 The server side of the 1,000-tab runs, whatever the client saw: the Worker's `/rpc/mutate` took 54 ms at p50 and 190 ms at the maximum (`wrangler tail`, a 1,000-tab run at 5 writes a second), a
 commit with its fan-out to 1,000 tabs (15,000 frames a second from inside) leaves no queue behind it, and the object's CPU per commit at 200 tabs went from 40 ms
@@ -286,6 +290,8 @@ on a server socket, so the object cannot see one): see "What is left".
 
 ## What is left
 
+The third pass (below) moved the commit CPU, the script and the cold dial; its own "What is left" is the current list, the bullets here are the second pass's.
+
 - **The 150 ms line at 1,000 tabs and 20 writes a second is not met.** Second pass (docs/spikes/p4-scale.md "Second pass"): the best runs reach a p95 of 157 to 183 ms (p50 66 to 75), a typical run 250 to 360
   ms, and a quarter to a third of the runs saturate the object's thread completely (a slow host: one `setProp` commit costs 19 to 25 ms of CPU against 9 to 11 ms on a fast one, then 20 commits a second with the
   fan-out of 17,000 frames are more than it can do). Socket shards (`SOCKET_SHARDS`, off by default, on in staging) halve the delivery of a bare fan-out at p95 but add a 15 to 19 ms hop and land in
@@ -301,3 +307,95 @@ on a server socket, so the object cannot see one): see "What is left".
 
 Local smoke on the development server, for reference (2026-11-08, 10 tabs, 5 writes/s, 5 views, 50 rows): edit-to-diff
 p50 11.5 ms, p95 24 ms; cold first window 17 ms.
+
+## Third pass: commit CPU, output gate, script size
+
+Targets of this pass (at 1,000 tabs, 20 writes a second, inside Cloudflare): edit-to-diff p95 150 ms, cold first window 300 ms, no saturated run. **Not met**; what moved, with the
+evidence, and what is left is below. Tools added: `tests/workers/scale/sql-trace.test.ts` (the statements of one commit, by shape and caller; `VITE_TRACE_PRINT=1`, `VITE_TRACE_WHERE=1`), `scripts/profile/`
+(a V8 CPU profile of the built Worker through `wrangler dev`'s inspector, see its header) and, in `scripts/postbuild.mjs`, `WORKER_MINIFY=off` (readable frames), `WORKER_META=<file>` (the esbuild metafile) and
+`WORKER_SPLIT=off` (the old single bundle).
+
+### 1. Commit CPU
+
+A local profile at 1,000 tabs (`wrangler dev`, unminified build, object samples only) put the object at 10% of a thread at 20 writes a second: the send of the frames (`ws.send`, native) 32%, SQLite `exec`
+14%, view maintenance and derivation the rest. The statements per commit were the measurable lever (the Worker's HTTP path, which dominates the same profile, runs in another isolate in production):
+a `setProp` of a number on a workspace with 10 tabs x 8 views made **107 statements**, of which 80 were view maintenance: every touched unit asked the same questions again (are these candidate pages live,
+are they in the collection, what is the collection's source, what is the page-number bound), the sort tuples of the neighbours were read again for each binary-search probe, and a write that no index holds
+rewrote the search index.
+
+| Per commit (10 tabs, 8 views, 500 rows) | statements before / after | local wall before / after |
+| --- | --- | --- |
+| `setProp` amount (3 sorted or filtered units touched) | 107 / 38 | 2.2 / 1.5 ms |
+| `setProp` status (hot option property) | 93 / 37 | 1.8 / 1.3 ms |
+| `setProp` notes (text no view reads) | 28 / 21 | 1.1 / 0.9 ms |
+
+(Local wall time is a ms-granular clock averaged over 100 commits and noisy by 20%; the statement counts are exact and guarded by the trace test.) On staging, `wrangler tail` `cpuTime` of `apply` at 1,000 tabs on a slow host
+(CDG): p50 15 ms, mean 16.6, p95 29 (the second pass measured 19 to 25 ms on slow hosts at 10 tabs). That is **about a third less, not two thirds**: the base of a commit (authorization, the op, the change rows, 21 statements) is
+untouched and the sends are native cost.
+
+What changed:
+- **`MatchMemo`** (`engine/index.ts`): the candidate checks of one commit's maintenance share what is the same for every unit: liveness per page, collection membership per page, the collection's source, the page-number bound.
+  `RowReader.nums` keeps ids for good (a dense number never changes), `RowReader.liveIds` is remembered for the length of one maintenance pass (`withLiveMemo`; nothing is written while it runs).
+- **A sort-tuple store between commits** (`LiveHub.#tupleStore`, handed to `TupleCache`): the probes of the binary search over a unit's order read each neighbour's tuple once, not once per commit. The tuples of the pages a
+  commit wrote (`valueProps`, `fields`, `edited`) are forgotten, all of them when a definition, the clock, a lifecycle or a move changed, or past 100,000 entries. The fuzz (`staleUnits` compares each unit with a fresh evaluation) passes with it.
+- **Writes that are not read back**: the driver asks SQLite for `changes()` after every write; the EAV writes and the search index writes do not read the count, so their statements carry `/*quiet*/` (`db/quiet.ts`) and skip that read (7 statements
+  a commit). The ORM-visible `$executeRaw` keeps its count (the driver's contract tests).
+- **The search index is not rewritten for a number, checkbox or select** (`indexChanges`: only titles and text-like properties re-read the page), and **a page stamped by its own write is not stamped again** by the commit
+  (`EavOpContext.stamped`).
+
+Asked for and not done, with the reason:
+- *In-memory candidate membership from a per-unit value cache*: with the memos above a value-only commit asks SQLite for 6 to 8 statements of membership and tuples; evaluating the filter AST in memory needs the page's current values (a `p_*` read
+  per page and property: the same statement) and a second implementation of every operator that the oracle tests would have to cover again. The measured gain left is a few statements.
+- *Compiled SQL and plans per filter shape*: workerd keeps prepared statements by text and the plan per filter (`compileFilter`) is two statements a commit now; the JavaScript that builds them did not show in the profile.
+- *Grouping queued commits into one transaction*: nested transactions are savepoint frames in this driver (`do-sqlite-driver.ts`), so isolating a failing commit inside a group is possible, but what a group would share is the
+  transaction's begin and end, not the statements, which are the cost; the fan-outs of queued value-only commits are already merged (`mergeCommits`) and each mutation keeps its own `seq`, `mid` and change rows. Not worth the risk to the `seq` semantics.
+- *Allocation churn in the fan-out*: the profile shows 0.6% in the collector.
+
+### 2. The output gate
+
+Durable Objects hold every outgoing message until the writes made before it are durable: HTTP responses, RPC answers and calls, subrequests and `WebSocket.send` alike (the "output gate"). So the frames of a commit leave about 17 to 22
+ms after its transaction (the measured `storage.sync()` of the second pass), and so do the `push` calls to the socket shards and the writer's own answer. Findings:
+- There is **no per-message escape**. `allowUnconfirmed` exists on `storage.put/delete` (the key-value API), not on the SQL API the change log uses, and it would let a diff reach collaborators before the write it describes is durable: after a crash they
+  would show a change the workspace does not have. The plan does not relax durability for the writer's ack and collaborators see what the writer's ack promises, so **nothing was changed**.
+- What the platform does allow is overlap: the gate waits for the last write issued before the send, and the fan-out's CPU (maintenance, derivation) runs while the confirmation is in flight. The commit's transaction is issued first
+  and the fan-out follows, so the CPU of the fan-out is already hidden behind the wait (the first-tab p50 of a write, 25 to 50 ms, is that wait plus a cross-data-center hop).
+- The unit rows (`UPDATE sub_unit SET ids`) are plain writes issued during maintenance: they move the end of the wait by the length of the maintenance (3 to 8 ms of CPU on staging). Persisting them after the sends would hide that and was
+  **not done**: after a crash between the two a stored unit would be older than the log, and incremental maintenance would then diff against it.
+
+### 3. Script size and cold start
+
+Measured model of the dial of a fresh isolate (`/healthz` with `Upgrade: websocket`, 12 requests, p50): about **66 ms + 75 ms per MB of module evaluated + 45 ms per MB uploaded but never imported**. A lazily imported chunk is not free: the
+measurements say workerd takes in every uploaded module when it loads the script (parse or compile, we cannot see which), so a chunk nothing imports still costs about 60% of what an evaluated one does. Splitting alone therefore helps less than it looks (second row), and what a start-up needs is both a small evaluated
+closure and a small upload.
+
+| Deployed (staging) | uploaded | evaluated at start | `/healthz` upgrade p50 | `Worker Startup Time` |
+| --- | ---: | ---: | ---: | ---: |
+| second pass: one minified module | 5.75 MB | 5.75 MB | 338 to 349 ms | 60 to 100 ms |
+| split into `wc-*.js` chunks (esbuild `splitting`, uploaded as ESModule rules) | 5.14 MB | 2.05 MB (the object classes' imports) | 319 to 333 ms | 34 ms |
+| + thin object classes, SSR components of `ssr = false` routes stubbed, roaring's embedded wasm dropped | 4.03 MB (1.30 MiB gzip) | 8 KB | **243 to 262 ms** | 2 ms |
+
+How: `scripts/postbuild.mjs` rebuilds the Worker from `src/worker.ts` with code splitting (the plugin's single-file bundle inlines every `import()`), `wrangler.jsonc` has `rules: [{ type: ESModule, globs: ['**/wc-*.js'] }]`
+at the top level and in both environments (a rule written `wc-*.js` does not match the `./wc-...` specifier and wrangler then inlines the chunks again), `.assetsignore` has `wc-*.js`. `src/server/objects/lazy.ts` makes `WorkspaceDO`, `PageDO` and `SocketShardDO` thin classes
+whose constructor loads the implementation inside `blockConcurrencyWhile` and whose methods forward (`WORKSPACE_METHODS`... are checked against the real classes by `tests/workers/objects/lazy.test.ts`; edytor's `attachRoom` installs `alarm` on the instance, which a first version missed and the
+P3 gate's search test caught). Every route of the app is `ssr = false`: SvelteKit never calls the components it imports lazily for them, so their server build (1.4 MB: entasis, charts, `SloDashboard` 493 KB, `DataTable` 247 KB) is replaced by a stub that throws; the root layout and the error page keep theirs.
+
+What the 4.03 MB is (minified bytes in the split output, 3,985 KB): viborm 1,177 KB (two copies of its client, 573 KB: `viborm/migrations` pulls a second one; the dialects the app never uses are in too), SvelteKit server runtime plus the root layout and error page 436 KB,
+edytor 364 KB, the object, engine and live loop 293 KB (the generated migration estate 82 KB), the better-auth stack about 850 KB (better-auth 196, kysely 184, `@better-auth/core` 131, zod 105, simplewebauthn 62, asn1js 62, x509 50, jose 47), the rest under 30 KB each.
+Before this pass the one bundle also held 1,512 KB of SvelteKit server output and 257 KB of roaring's embedded wasm (workerd compiles it from the `CompiledWasm` module; the base64 copy was dead).
+
+**Cold first window, from the laptop** (`run.ts --cold-probes 5 --cold-idle 25`): p50 545 ms, max 937 ms (open 483 ms, hello to snapshot 62 ms), against 593 to 674 ms. **Not 300 ms.** A dial still evaluates 1.85 MB on the Worker side (the `auth` chunk: better-auth, the viborm D1 client, kysely)
+and a cold object wake evaluates 1.93 MB (the `workspace-do` chunk and viborm), at about 75 ms a MB, before four client round trips. Getting under 300 ms means those two closures near 0.5 MB each: a session check that does not load better-auth when the cookie cache is valid (its `getSession`
+also decides refreshes, versions and restricted sessions, so a copy of it is a security decision, not a build change), and the object's rarely used parts (files, export, import, backup, AI, embeddings) behind `import()`.
+
+### 4. Earlier work that cost something
+
+Nothing was removed. The socket shards were re-measured against the object holding every socket, same build, alternated (30 s runs): shards 4 / local 64 gave 71 / 271 ms (object CDG) and one saturated run (395 / 2,266 ms); direct gave 159 / 887 ms (CDG) and 129 / 730 ms (MXP) with a
+commit call p50 of 155 to 175 ms, because the object's thread then also does the 1,000 sends. The shards stay (staging only). The merged fan-outs and the head coalescing are the cheap parts of the hot path.
+
+### What the runs say
+
+Six runs of 60 s (the official shape), two builds, spaced: the two objects that landed in MXP kept up (p50 67 and 77 ms, p95 182 and 333 ms, no failed write, nothing missing, commit call p95 117 and 189 ms); one in CDG ran slow (p50 435 ms, p95 1.6 s, not saturated)
+and three saturated (one in MRS, two whose data center the report did not print: the commit queue grows to a p50 of 4 to 26 s, in one run 684 of 1,200 writes refused with "Durable Object is overloaded", which the store retries). Placement decides: hosts differ by 1.5x to 2.5x and the same code lands in a different data center on each run. The p95 line of 150 ms is **not met in any run** (best 182 ms), the 300 ms
+cold window is not met (545 ms), and half of these six runs saturated (the second pass: a quarter to a third; the three runs of each build cannot tell the difference, and no run of this pass was captured by `tail` while saturated). What remains, with the evidence: on a slow host one commit is still 15 ms of object CPU (`tail`) plus the 1,000-tab fan-out, with the 20 ms
+output gate and a 13 ms hop to the shards on top of every frame, and the probes' own isolates add a few ms to each sample (above). Next steps in order of expected gain: the base of a commit (21 statements and the ORM's per-call overhead: authorization and the change rows in raw SQL), the two start-up closures above,
+and fewer cross-data-center hops (the shards of one workspace land in different data centers, second pass).

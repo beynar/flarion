@@ -1134,7 +1134,7 @@ export class WorkspaceDO extends DurableObject<Env> {
 
 	#applyOp(tx: Parameters<typeof applyPageOp>[0], op: Op, env: Parameters<typeof applyPageOp>[2]): Promise<ChangeRecord[]> {
 		if (isPageOp(op)) return applyPageOp(tx, op, env);
-		if (isEavOp(op)) return applyEavOp(tx, op, { actorId: env.actorId, now: env.now });
+		if (isEavOp(op)) return applyEavOp(tx, op, { actorId: env.actorId, now: env.now, stamped: env.stamped });
 		throw new WorkspaceError('BAD_REQUEST', `Unknown op "${(op as { op: string }).op}"`);
 	}
 

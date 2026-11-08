@@ -21,6 +21,8 @@ export interface PageOpEnv {
 	allocateNum(): Promise<number>;
 	/** Called before an op changes the children of `parentId` (null: the root level), to track `$hasChildren`. */
 	noteParent(parentId: string | null): Promise<void>;
+	/** The commit's set of pages a write already stamped (see `EavOpContext.stamped`). */
+	stamped?: Set<string>;
 }
 
 export type PageOp = Extract<Op, { op: 'create' | 'move' | 'setPage' | 'trash' | 'restore' }>;

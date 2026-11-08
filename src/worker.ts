@@ -7,7 +7,8 @@
  * `/healthz` takes 15 ms plain and 350 to 420 ms with the header, for a 10 MiB script, against 75 ms for a stub), so
  * everything evaluated when the script loads is paid by every socket dial and by every cold object. Hence:
  *   - the entry imports no route: each handler is loaded with `import()` the first time its path is served, so a
- *     request pays only for its own route (the bundler keeps one file and evaluates a module when it is first imported);
+ *     request pays only for its own route (`scripts/postbuild.mjs` rebuilds the bundle with code splitting: every `import()` is a
+ *     separate `wc-*.js` module, and an uploaded module costs a start-up about 60% of an evaluated one, so the closure of this file is kept tiny);
  *   - SvelteKit itself (the server rendering of the app: entasis, the charts, every page) is loaded the same way
  *     (`scripts/postbuild.mjs` rewrites the generated `_worker.js` to import it lazily);
  *   - nothing here runs at the top level except exports.
@@ -22,6 +23,7 @@ import type { ExportParams } from './server/workflows/export';
 import type { PurgeParams } from './server/workflows/purge';
 import type { BackupParams } from './server/workflows/backup';
 import { LOAD_TEST_PREFIX } from './server/auth/load-test-guard';
+import { lazyObject, PAGE_METHODS, SHARD_METHODS, WORKSPACE_METHODS } from './server/objects/lazy';
 
 type Env = App.Platform['env'];
 
@@ -51,9 +53,11 @@ export const fetch: WorkerFetch<Env> = async (request, env, ctx, next) => {
 export const queue: WorkerQueue<Env> = async (batch, env, ctx) => (await import('./server/queues/consumer')).queue(batch, env, ctx);
 export const scheduled: WorkerScheduled<Env> = async (controller, env, ctx) => (await import('./server/scheduled')).scheduled(controller, env, ctx);
 
-export { WorkspaceDO } from './server/objects/workspace/workspace-do';
-export { PageDO } from './server/objects/page/page-do';
-export { SocketShardDO } from './server/objects/workspace/socket-shard';
+// The object classes are thin: their implementations (the ORM, the engine, edytor, the live loop: 2 MB) load when an object is first
+// constructed, not when an isolate that only holds a stub starts (`server/objects/lazy.ts`).
+export class WorkspaceDO extends lazyObject<import('./server/objects/workspace/workspace-do').WorkspaceDO>(async () => (await import('./server/objects/workspace/workspace-do')).WorkspaceDO, WORKSPACE_METHODS) {}
+export class PageDO extends lazyObject<import('./server/objects/page/page-do').PageDO>(async () => (await import('./server/objects/page/page-do')).PageDO, PAGE_METHODS) {}
+export class SocketShardDO extends lazyObject<import('./server/objects/workspace/socket-shard').SocketShardDO>(async () => (await import('./server/objects/workspace/socket-shard')).SocketShardDO, SHARD_METHODS) {}
 
 // The Workflows are declared here, as thin classes that load their implementation (`server/workflows/*.ts`, which the tests
 // use directly) when a run starts: those modules pull in the export renderer, the zip writer and the D1 client, which no

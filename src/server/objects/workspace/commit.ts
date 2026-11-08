@@ -15,6 +15,8 @@ export interface CommitEnv extends PageOpEnv {
 	 * does not stamp them as edited. The body fills it; a page it also wrote itself is stamped as usual.
 	 */
 	unstamped: Set<string>;
+	/** Pages a write already stamped (`EavOpContext.stamped`): the commit's own stamp would repeat it. */
+	stamped: Set<string>;
 }
 
 export interface CommitResult {
@@ -55,6 +57,7 @@ export async function runCommit(db: WorkspaceClient, input: CommitInput): Promis
 				(await tx.page.count({ where: { parentId: id, deletedAt: null } })) > 0;
 			const env: CommitEnv = {
 				unstamped: new Set(),
+				stamped: new Set(),
 				commitId: crypto.randomUUID(),
 				actorId: input.actorId,
 				now: input.now,
@@ -88,7 +91,7 @@ export async function runCommit(db: WorkspaceClient, input: CommitInput): Promis
 
 			// Pages edited by the commit get their edit stamp (creates carry it already).
 			const edited = new Set<string>();
-			for (const r of records) if (r.page && r.kind !== 'create' && r.kind !== 'links' && !env.unstamped.has(r.page)) edited.add(r.page);
+			for (const r of records) if (r.page && r.kind !== 'create' && r.kind !== 'links' && !env.unstamped.has(r.page) && !env.stamped.has(r.page)) edited.add(r.page);
 			if (edited.size > 0) {
 				for (let i = 0, ids = [...edited]; i < ids.length; i += 90) {
 					await tx.page.updateMany({

@@ -66,6 +66,8 @@ export interface CompileOptions {
 	estimate?: boolean;
 	/** The option index: select, status, multi-select and person conditions read Roaring bitmaps when given. */
 	bitmaps?: OptionIndex | null;
+	/** Answers shared by the calls of one commit (`MatchMemo`): the bound is read once. */
+	boundMemo?: { bound: number | undefined };
 }
 
 const TRUE: ConstNode = { kind: 'const', value: true };
@@ -73,6 +75,7 @@ const FALSE: ConstNode = { kind: 'const', value: false };
 
 export class CompileEnv {
 	#bound: number | undefined;
+	readonly #memo: { bound: number | undefined } | undefined;
 	readonly dctx: DateCtx;
 	readonly estimate: boolean;
 	readonly me: string | undefined;
@@ -87,6 +90,8 @@ export class CompileEnv {
 		this.estimate = opts.estimate !== false;
 		this.me = opts.me;
 		this.bitmaps = opts.bitmaps && roaringReady() ? opts.bitmaps : null;
+		this.#memo = opts.boundMemo;
+		this.#bound = opts.boundMemo?.bound;
 	}
 
 	/** Whether conditions on this property are answered from the option index. */
@@ -99,6 +104,7 @@ export class CompileEnv {
 		if (this.#bound === undefined) {
 			const [r] = await all<{ m: number }>(this.db, 'SELECT COALESCE(MAX(num), 0) AS m FROM page');
 			this.#bound = r?.m ?? 0;
+			if (this.#memo) this.#memo.bound = this.#bound;
 		}
 		return this.#bound;
 	}

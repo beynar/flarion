@@ -216,6 +216,18 @@ export async function explainQuery(db: WorkspaceDb, spec: QuerySpec, opts: Query
 
 // ───────────────────────────── helpers for the live loop ─────────────────────────────
 
+/**
+ * What the candidate checks of one commit share (the live loop's `maintainViews` makes one `matchesFilterMany` call per touched unit, and
+ * every call asks the same questions about the same candidate pages): which are live, which belong to the collection, the collection's
+ * source, the page-number bound. Valid while nothing is written: the loop makes one per commit's maintenance and drops it afterwards.
+ */
+export class MatchMemo {
+	readonly live = new Map<number, boolean>();
+	readonly source = new Map<string, FilterGroup | null | undefined>();
+	readonly members = new Map<string, Map<number, boolean>>();
+	bound: number | undefined;
+}
+
 export interface MatchOptions {
 	me?: string;
 	now: number;
@@ -226,6 +238,8 @@ export interface MatchOptions {
 	collectionId?: string;
 	/** The option index (see `QueryOptions.bitmaps`). */
 	bitmaps?: QueryOptions['bitmaps'];
+	/** Answers shared between the calls of one commit (see {@link MatchMemo}). */
+	memo?: MatchMemo;
 }
 
 const filterOf = (x: FilterNode | QuerySpec | null | undefined): FilterNode | undefined =>
@@ -277,24 +291,54 @@ export async function sortKeyOf(
  */
 export async function matchesFilterMany(db: WorkspaceDb, spec: FilterNode | QuerySpec | null | undefined, pageNums: readonly number[], opts: MatchOptions): Promise<Set<number>> {
 	if (pageNums.length === 0) return new Set();
+	const { memo } = opts;
 	const { ctx } = await makeCtx(db, { ...opts, visible: opts.visible ?? null });
-	const env = new CompileEnv(db, ctx.registry, { me: opts.me, now: opts.now, weekStartsOn: opts.weekStartsOn, estimate: false, bitmaps: opts.bitmaps });
-	const cands = await ctx.restrict(pageNums);
+	const env = new CompileEnv(db, ctx.registry, { me: opts.me, now: opts.now, weekStartsOn: opts.weekStartsOn, estimate: false, bitmaps: opts.bitmaps, boundMemo: memo });
+	let cands: Set<number>;
+	if (memo) {
+		// Liveness is asked once per page and commit, whichever unit asks.
+		cands = new Set();
+		const unknown: number[] = [];
+		for (const n of pageNums) {
+			const known = memo.live.get(n);
+			if (known === undefined) unknown.push(n);
+			else if (known) cands.add(n);
+		}
+		if (unknown.length > 0) {
+			const alive = await ctx.restrict(unknown);
+			for (const n of unknown) {
+				const ok = alive.has(n);
+				memo.live.set(n, ok);
+				if (ok) cands.add(n);
+			}
+		}
+	} else cands = await ctx.restrict(pageNums);
 	if (cands.size === 0) return cands;
 	if (opts.collectionId) {
-		const source = await loadCollection(ctx, opts.collectionId);
-		if (source === undefined) return new Set();
-		const member = new Set<number>();
-		if (source) for (const n of await evalNode(await compileFilter(env, source), new Set(cands), ctx)) member.add(n);
-		for (const part of chunks([...cands], IN_CHUNK)) {
-			const picked = await ctx.q<{ num: number }>(
-				`SELECT p.num AS num FROM collection_member m JOIN page p ON p.id = m.page_id WHERE m.collection_id = ? AND p.num IN (${qmarks(part.length)})`,
-				opts.collectionId,
-				...part
-			);
-			for (const r of picked) member.add(r.num);
+		let source: FilterGroup | null | undefined;
+		if (memo?.source.has(opts.collectionId)) source = memo.source.get(opts.collectionId);
+		else {
+			source = await loadCollection(ctx, opts.collectionId);
+			memo?.source.set(opts.collectionId, source);
 		}
-		for (const n of [...cands]) if (!member.has(n)) cands.delete(n);
+		if (source === undefined) return new Set();
+		let known = memo?.members.get(opts.collectionId);
+		if (memo && !known) memo.members.set(opts.collectionId, (known = new Map()));
+		const ask = known ? [...cands].filter((n) => !known!.has(n)) : [...cands];
+		const member = new Set<number>();
+		if (ask.length > 0) {
+			if (source) for (const n of await evalNode(await compileFilter(env, source), new Set(ask), ctx)) member.add(n);
+			for (const part of chunks(ask, IN_CHUNK)) {
+				const picked = await ctx.q<{ num: number }>(
+					`SELECT p.num AS num FROM collection_member m JOIN page p ON p.id = m.page_id WHERE m.collection_id = ? AND p.num IN (${qmarks(part.length)})`,
+					opts.collectionId,
+					...part
+				);
+				for (const r of picked) member.add(r.num);
+			}
+			if (known) for (const n of ask) known.set(n, member.has(n));
+		}
+		for (const n of [...cands]) if (!(known ? (known.get(n) ?? member.has(n)) : member.has(n))) cands.delete(n);
 		if (cands.size === 0) return cands;
 	}
 	const plan = await compileFilter(env, filterOf(spec));

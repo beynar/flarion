@@ -244,4 +244,10 @@ itself on `E2E_PORT` and reuses when one is already there. Three Playwright conf
   Measured: shards halve the delivery of a bare fan-out but not the p95 of real writes (docs/spikes/p4-scale.md "Second pass"); the 1,000-tab p95 and the 300 ms cold window are not met.
 - **Commits cost CPU per ORM call**: build the policy client once per facts (`AccessService.governed` caches), give a transaction the registry (`primeRegistry`), and remember that `Date.now()` and `performance.now()` do not advance inside
   synchronous code on Cloudflare: read CPU from `wrangler tail` (`cpuTime`) with a diagnostic RPC that repeats the work, not from timers in the object.
-
+- **The Worker is code-split and its object classes are thin (third pass)**: `scripts/postbuild.mjs` rebuilds `_worker.js` from `src/worker.ts` with esbuild `splitting`; the chunks are `wc-*.js` modules (the `rules` entry of
+  `wrangler.jsonc`, top level and both environments, glob `**/wc-*.js`; `.assetsignore` has `wc-*.js`). A start-up costs about 66 ms + 75 ms per MB evaluated + 45 ms per MB uploaded, so keep the evaluated closure of `worker.ts` tiny and drop dead weight:
+  the server build of `ssr = false` routes is stubbed in that script, roaring's embedded wasm is cut. `WorkspaceDO`, `PageDO` and `SocketShardDO` exported by `worker.ts` forward to the implementation loaded in their constructor
+  (`server/objects/lazy.ts`): **a new public method of those classes must be added to `WORKSPACE_METHODS`/`PAGE_METHODS`/`SHARD_METHODS`** (`tests/workers/objects/lazy.test.ts` fails otherwise), and a handler that a library installs on the instance
+  (edytor's `attachRoom` does it for `alarm`) must be listed too. `WORKER_SPLIT=off` builds the old single bundle.
+- **Commit statements are counted** (`tests/workers/scale/sql-trace.test.ts`): view maintenance shares liveness, membership and the collection's source per commit (`MatchMemo`), sort tuples live between commits (`LiveHub.#tupleStore`), and raw
+  writes nobody reads the count of go through `run`/`rawRunQuiet` (`/*quiet*/`, `db/quiet.ts`). Use `rawRun` when the affected-row count is read.

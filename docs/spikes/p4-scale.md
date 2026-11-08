@@ -363,3 +363,7 @@ server rendering and the Durable Object implementations loaded as separate modul
 - Fan-out sharding (second pass): the plan shards the property index by type or tag when a workspace outgrows one object; here the object stays whole and only its sockets are sharded
   (`SocketShardDO`, "Second pass" above), because the measured limit was the delivery of 17,000 frames a second, not the data. Off by default (`SOCKET_SHARDS`), on in staging: it cut the delivery
   of a bare fan-out by half at p95 but its hop, and the data centers the shards land in, cost as much in the p95 of real writes, so it is not turned on in production.
+
+## Third pass
+
+Commit statements (107 to 38 for a value write that touches views), the output gate, the split script and the cold dial: `docs/ops/load-test.md` "Third pass". Targets still not met (best p95 182 ms, cold window 545 ms, saturated runs on slow hosts).
