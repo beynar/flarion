@@ -159,14 +159,27 @@ const sketchCreate = {
 } as const;
 
 /**
- * Where a page may be created: under a page the caller can edit, at the root of a teamspace where the
- * caller can edit (admins: any), or at the root of the caller's own Private section (not for guests).
- * Tighter than the plan's sketch on one point: a teamspace member needs the teamspace's `update` level,
+ * A page lives where its parent lives: the same teamspace, or no teamspace when the parent has none. `$row` +
+ * `up: 1` reads the new row's own `teamspaceId` from inside the `parent` subquery (viborm 1.12.1's spelling, the
+ * form the viborm maintainers tested). `{ parent: 'update' }` alone says nothing about `teamspaceId`: a guest
+ * could create under a page they edit with `teamspaceId: null`, a member with another teamspace they read.
+ */
+const sameTeamspaceAsParent = {
+	OR: [
+		{ teamspaceId: null, parent: { is: { teamspaceId: null } } },
+		{ parent: { is: { teamspaceId: { $row: 'teamspaceId', up: 1 } } } }
+	]
+} as const;
+
+/**
+ * Where a page may be created: under a page the caller can edit, in that page's teamspace; at the root of a
+ * teamspace where the caller can edit (admins: any), or at the root of the caller's own Private section (not for
+ * guests). Tighter than the plan's sketch on one point: a teamspace member needs the teamspace's `update` level,
  * not just membership, so a read-only member cannot add pages.
  */
 const pageCreate = {
 	OR: [
-		{ parent: 'update' },
+		{ AND: [{ parent: 'update' }, sameTeamspaceAsParent] },
 		{ parentId: null, actor: { admin: true } },
 		{ parentId: null, teamspaceId: { in: { actor: 'teamspaces.update' } } },
 		{ parentId: null, teamspaceId: null, createdById: { actor: 'userId' }, actor: { guest: false } }

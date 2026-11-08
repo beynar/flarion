@@ -220,9 +220,13 @@ async function fitsLimits(p: Policy, peakParams: number) {
 }
 
 // P2 final: peak 58 (`$access` reads), 62 with a share token; the pin leaves the headroom to the platform's 100.
-test('policy (actor facts): the largest reads and the write checks fit the platform limits', () => fitsLimits(policy, 64));
+// 2026-11-08: the page `create` rule states "same teamspace as the parent", and a move (which sets `parentId`) asks it
+// of the new row: the peak is now the move, 66 values (it was 56).
+test('policy (actor facts): the largest reads and the write checks fit the platform limits', () => fitsLimits(policy, 66));
 
-test('joinedPolicy (teamspace rows): fits too, with less headroom', () => fitsLimits(joinedPolicy, 90));
+// The fallback the Worker does not use: its move takes 99 of 100 values since the create rule states the teamspace
+// (it was 84). No headroom left, which is the reason `policy` reads actor facts.
+test('joinedPolicy (teamspace rows): fits too, with less headroom', () => fitsLimits(joinedPolicy, 99));
 
 // The plan's sketch used to breach SQLite's expression depth on a move; that was viborm's DEFAULT SQL form, not the
 // sketch (viborm maintainers' review, 2026-11-08). The driver now asks for `deepExpressions: false`, and the sketch
