@@ -25,6 +25,7 @@
 				rpc,
 				// The server render replaces the browser cache's instant first paint (and the server render must not touch IndexedDB).
 				cache: null,
+				renderingOnServer: typeof window === 'undefined',
 				reauth: refreshSession,
 				// Page locks are pushed over the workspace socket (no polling).
 				onLock: (lock) => pageLocks.apply(lock.pageId, lock),

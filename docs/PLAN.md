@@ -25,7 +25,7 @@ Build a Notion-class workspace as one SvelteKit project deployed as a single Clo
 ## Stack and constraints
 Every piece is either one of your libraries or a Cloudflare primitive. The constraints below shape the design more than any library choice.
 | Layer | Choice | Role here | 
-| App | SvelteKit, Svelte 5 | Routes, UI, client-rendered app shell | 
+| App | SvelteKit, Svelte 5 | Routes, UI, server-rendered app shell that hydrates | 
 | Deploy glue | [sveltekit-cloudflare-worker](https://github.com/beynar/sveltekit-cloudflare-worker) | `src/worker.ts` adds Durable Objects, Workflows, queue and cron handlers to the SvelteKit Worker | 
 | UI | [entasis](https://entasis.beynar.workers.dev/) | Shell, sidebar, tree, data table, kanban, calendar, Gantt, menus, AI chat | 
 | Editor | [edytor](https://edytor.dev/) | Blocks on a Yjs v14 engine, presence, offline copy, comments, history, Durable Object room | 
@@ -78,7 +78,7 @@ notion-clone/
 │  │  └─ components/            # page header, property editors, views, editor plugins
 │  └─ routes/
 │     ├─ (auth)/                # login, signup, invite/[token]
-│     ├─ (app)/[ws]/            # +layout.ts: export const ssr = false
+│     ├─ (app)/[ws]/            # +layout.server.ts: session, workspace, sidebar seed (server-rendered)
 │     │  ├─ [page]/             # page or full-page database
 │     │  ├─ trash/ and settings/
 │     └─ (public)/share/[token]/ # published pages: rendered by the Worker (server/share/route.ts), not by SvelteKit
@@ -476,8 +476,8 @@ Files go to R2 through the Worker, keyed by workspace and page, and are served o
 - Purge deletes files referenced only by purged pages, and a weekly sweep removes uploads that were never committed.
 
 ## Frontend
-The signed-in app is a client-rendered SvelteKit area (`ssr = false` in the `(app)` layout) that talks to the Worker through the oRPC client, the workspace socket and edytor rooms. Only published pages render on the server.
-Client rendering avoids the dev-mode deadlock and costs little, because every screen is behind sign-in and filled from live subscriptions anyway.
+Every page is server-rendered by SvelteKit and then hydrated: the session comes from the cookie in `hooks.server.ts`, the `+layout.server.ts` / `+page.server.ts` loads read the sidebar, the page, a database's first window and a document's body as the signed-in actor through the Workspace and Page Durable Objects (`import { env } from 'cloudflare:workers'`), and the browser store is seeded from that data so its socket resumes where the server read stopped. After hydration the app talks to the Worker through the oRPC client, the workspace socket and edytor rooms as before. Published pages (`/share/:token`) are still rendered by the Worker itself.
+(The first version of this plan chose client rendering because Durable Object calls from SvelteKit server code deadlocked `vite dev`; sveltekit-cloudflare-worker's Miniflare runtime removed that limit.)
 | Route | Purpose | Main entasis components | 
 | `/login`, `/signup`, `/invite/[token]` | Passkey flows | Card, Form, Text input, Button, Alert | 
 | `/[ws]` | Home: recent and favorite pages | App shell, Sidebar, Tree | 

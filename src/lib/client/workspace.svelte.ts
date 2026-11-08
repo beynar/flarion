@@ -175,6 +175,8 @@ export interface WorkspaceStoreOptions {
 	onLock?: (lock: { pageId: string; locked: boolean; lockedBy: string | null; lockedAt: number | null }) => void;
 	/** The socket reconnected: pushes were missed, so what is cached outside the store (page locks) is read again. */
 	onReconnect?: () => void;
+	/** The store of a server render (`+layout.svelte`): it schedules nothing and never reads the network. */
+	renderingOnServer?: boolean;
 	appVersion?: string;
 	storage?: Pick<Storage, 'getItem' | 'setItem'> | null;
 	/** Debounce of title edits, ms. */
@@ -464,9 +466,9 @@ export class WorkspaceStore {
 		if (this.#directoryTimer) this.#clock.clearTimeout(this.#directoryTimer);
 	}
 
-	/** True while the server renders: nothing may schedule work or read the network then (the render answers one request). */
+	/** True for the store the server renders with: nothing may schedule work or read the network then (the render answers one request). */
 	get #renderingOnServer(): boolean {
-		return typeof window === 'undefined';
+		return this.#o.renderingOnServer === true;
 	}
 
 	get #clock(): Clock {
@@ -851,6 +853,12 @@ export class WorkspaceStore {
 				this.#advance(msg.seq);
 				// The end of a replay: the cached state has caught up with the log.
 				if (this.stale && this.#resumedMode === 'replay') this.stale = false;
+				// Nothing the held windows show changed up to `seq` (a `head` says so, and a replay ends with one), so they are current as of it. A
+				// window that was read earlier (seeded by the server render, or kept across a reconnect) must not look older than the log: the answer to a
+				// resize is a diff at the log's head, and one "at or below" the window's position is taken for a duplicate (`#applyDiff`).
+				for (const [id, w] of this.windows) {
+					if (w.status === 'ready' && w.seq !== null && w.seq < msg.seq && this.#subs.has(id)) this.windows.set(id, { ...w, seq: msg.seq });
+				}
 				return;
 			case 'presence':
 				for (const entry of msg.entries) {

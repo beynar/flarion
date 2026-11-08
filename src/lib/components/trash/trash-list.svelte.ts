@@ -25,6 +25,14 @@ export class TrashList {
 		this.#limit = limit;
 	}
 
+	/** Starts from the first page the server render read (no request: the screen is already complete). */
+	seed(page: { items: TrashEntry[]; nextCursor: string | null }): void {
+		this.items = page.items;
+		this.#cursor = page.nextCursor;
+		this.more = page.nextCursor !== null;
+		this.status = 'ready';
+	}
+
 	#input(cursor?: string) {
 		const q = this.q.trim();
 		return { sort: this.sort, limit: this.#limit, ...(q ? { q } : {}), ...(cursor ? { cursor } : {}) };

@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { onMount } from 'svelte';
+	import { onMount, untrack } from 'svelte';
 	import { Alert } from 'entasis/alert';
 	import { Button } from 'entasis/button';
 	import { Card } from 'entasis/card';
@@ -13,10 +13,11 @@
 	import { listTheme } from '#lib/components/lists/list-theme.ts';
 
 	/** A report to show instead of asking the server (the dev preview and the e2e check). */
-	let { initial = null, refreshMs = 60_000 }: { initial?: SloReport | null; refreshMs?: number } = $props();
+	let { initial = null, seed = null, refreshMs = 60_000 }: { initial?: SloReport | null; seed?: SloReport | null; refreshMs?: number } = $props();
 
-	let report = $state<SloReport | null>(null);
-	let loading = $state(true);
+	// `seed` is the report the server render read: on screen from the first paint, then kept fresh like any other.
+	let report = $state<SloReport | null>(untrack(() => seed));
+	let loading = $state(untrack(() => !seed));
 	let error = $state('');
 
 	async function load() {
@@ -35,7 +36,7 @@
 		}
 	}
 	onMount(() => {
-		void load();
+		if (!seed || initial) void load();
 		const timer = refreshMs > 0 && !initial ? setInterval(load, refreshMs) : undefined;
 		return () => timer && clearInterval(timer);
 	});

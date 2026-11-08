@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { onMount } from 'svelte';
+	import { onMount, untrack } from 'svelte';
 	import { Alert } from 'entasis/alert';
 	import { Button } from 'entasis/button';
 	import { Chip } from 'entasis/chip';
@@ -38,8 +38,10 @@
 		{ value: '365', label: 'In a year' }
 	];
 
-	let tokens = $state<ApiToken[]>([]);
-	let loading = $state(true);
+	let { initial = null }: { initial?: { tokens: ApiToken[] } | null } = $props();
+
+	let tokens = $state<ApiToken[]>(untrack(() => initial?.tokens ?? []));
+	let loading = $state(untrack(() => !initial));
 	let error = $state('');
 
 	let creating = $state(false);
@@ -69,7 +71,9 @@
 			loading = false;
 		}
 	}
-	onMount(load);
+	onMount(() => {
+		if (!initial) void load();
+	});
 
 	function openCreate() {
 		name = '';

@@ -38,14 +38,15 @@
 	 * creator (a Combobox of members), last edited (presets or a DateInput range) and location (a page picker), a sort
 	 * and cursor paging. The state lives in the URL, so a search can be shared and survives a reload.
 	 */
-	let { store, ws }: { store: WorkspaceStore; ws: string } = $props();
+	let { store, ws, initial = null }: { store: WorkspaceStore; ws: string; initial?: { hits: SearchHit[]; nextCursor: string | null } | null } = $props();
 
 	const PAGE_SIZE = 20;
 	let filters = $state<SearchFilters>(untrack(() => filtersFromParams(route.url.searchParams)));
 	let typed = $state(untrack(() => filters.q));
-	let hits = $state.raw<SearchHit[]>([]);
-	let cursor = $state<string | null>(null);
-	let status = $state<'idle' | 'loading' | 'more' | 'ready' | 'error'>('idle');
+	// The server render ran the search the URL names: its results are on screen from the first paint and are not asked for again.
+	let hits = $state.raw<SearchHit[]>(untrack(() => initial?.hits ?? []));
+	let cursor = $state<string | null>(untrack(() => initial?.nextCursor ?? null));
+	let status = $state<'idle' | 'loading' | 'more' | 'ready' | 'error'>(untrack(() => (initial ? 'ready' : 'idle')));
 	let errorText = $state('');
 	let serial = 0;
 	let timer: ReturnType<typeof setTimeout> | undefined;
@@ -91,7 +92,9 @@
 	}
 	const patch = (change: Partial<SearchFilters>, wait = 0) => commit({ ...filters, ...change }, wait);
 
-	onMount(() => void run());
+	onMount(() => {
+		if (!initial) void run();
+	});
 	onDestroy(() => clearTimeout(timer));
 
 	// Landing here again from ⌘K ("Search everything for …") changes `q` while this page stays mounted.

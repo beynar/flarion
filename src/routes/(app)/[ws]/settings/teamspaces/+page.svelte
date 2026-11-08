@@ -1,5 +1,7 @@
 <script lang="ts">
 	import TeamspacesTab from '#lib/components/settings/TeamspacesTab.svelte';
+
+	let { data } = $props();
 </script>
 
-<TeamspacesTab />
+<TeamspacesTab initial={data.initial} />

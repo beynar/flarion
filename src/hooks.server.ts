@@ -13,7 +13,7 @@
  * - **CSRF** is unchanged: SvelteKit's origin check for form posts stays on, `/rpc` keeps its own three layers.
  */
 import { env } from 'cloudflare:workers';
-import type { Handle } from '@sveltejs/kit';
+import type { Handle } from '@sveltejs/kit/hooks';
 import { resolveSession } from './server/auth/session';
 import { NONCE_HEADER, newNonce } from './server/security/csp';
 

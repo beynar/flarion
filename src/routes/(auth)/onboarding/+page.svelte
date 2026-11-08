@@ -1,33 +1,19 @@
 <script lang="ts">
 	import { goto } from '$app/navigation';
-	import { onMount } from 'svelte';
+	import { untrack } from 'svelte';
 	import { Alert } from 'entasis/alert';
 	import { Button } from 'entasis/button';
 	import { warningIcon } from 'entasis/icons/warning';
 	import { TextInput } from 'entasis/text-input';
 	import AuthCard from '#lib/components/shell/AuthCard.svelte';
-	import { authClient, authRpc, errorMessage } from '#lib/client/auth.ts';
+	import { authRpc, errorMessage } from '#lib/client/auth.ts';
 
-	let name = $state<string | null>('');
+	// The server (`+page.server.ts`) has checked the session and that no workspace exists yet: the form is there from the first paint.
+	let { data } = $props();
+	let name = $state<string | null>(untrack(() => data.name));
 	let busy = $state(false);
 	let error = $state<string | null>(null);
-	let ready = $state(false);
-
-	onMount(async () => {
-		const session = await authClient.getSession();
-		if (!session.data?.user) {
-			await goto('/login?next=/onboarding', { replaceState: true });
-			return;
-		}
-		const me = await authRpc.me().catch(() => null);
-		if (me?.workspaces[0]) {
-			await goto(`/${me.workspaces[0].slug}`, { replaceState: true });
-			return;
-		}
-		const first = session.data.user.name?.split(' ')[0];
-		name = first ? `${first}'s workspace` : '';
-		ready = true;
-	});
+	const ready = true;
 
 	async function create() {
 		busy = true;

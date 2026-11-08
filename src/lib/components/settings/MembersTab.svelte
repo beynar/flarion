@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { onMount } from 'svelte';
+	import { onMount, untrack } from 'svelte';
 	import { Alert } from 'entasis/alert';
 	import { Avatar } from 'entasis/avatar';
 	import { Button } from 'entasis/button';
@@ -13,13 +13,16 @@
 	import type { Invite, Member } from '#lib/shared/schemas.ts';
 	import { listTheme } from '#lib/components/lists/list-theme.ts';
 
+	let { initial = null }: { initial?: { invites: Invite[] } | null } = $props();
+
 	const store = useWorkspace();
 	const ROLES = ['admin', 'member', 'guest'] as const;
 	type Role = (typeof ROLES)[number];
 
-	let members = $state<Member[]>([]);
-	let invites = $state<Invite[]>([]);
-	let loading = $state(true);
+	// The server render read the people and the pending invitations: on screen from the first paint, and not asked for again.
+	let members = $state<Member[]>(untrack(() => (initial ? store.members : [])));
+	let invites = $state<Invite[]>(untrack(() => (initial ? initial.invites.filter((x) => !x.acceptedAt) : [])));
+	let loading = $state(untrack(() => !initial));
 	let error = $state('');
 	let email = $state('');
 	let role = $state<Role>('member');
@@ -44,7 +47,9 @@
 			loading = false;
 		}
 	}
-	onMount(load);
+	onMount(() => {
+		if (!initial) void load();
+	});
 
 	async function invite(event?: SubmitEvent) {
 		event?.preventDefault();

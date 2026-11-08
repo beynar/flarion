@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { onMount } from 'svelte';
+	import { onMount, untrack } from 'svelte';
 	import { Button } from 'entasis/button';
 	import { DataTable, type DataTableColumn } from 'entasis/data-table';
 	import { Empty } from 'entasis/empty';
@@ -18,8 +18,10 @@
 		createdAt?: string | Date | null;
 	}
 
-	let passkeys = $state<PasskeyInfo[]>([]);
-	let loading = $state(true);
+	let { initial = null }: { initial?: { passkeys: PasskeyInfo[] } | null } = $props();
+
+	let passkeys = $state<PasskeyInfo[]>(untrack(() => initial?.passkeys ?? []));
+	let loading = $state(untrack(() => !initial));
 	let busy = $state(false);
 	let unavailable = $state(false);
 
@@ -44,7 +46,9 @@
 		}
 		loading = false;
 	}
-	onMount(load);
+	onMount(() => {
+		if (!initial) void load();
+	});
 
 	async function add() {
 		busy = true;

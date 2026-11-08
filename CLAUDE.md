@@ -131,8 +131,7 @@ itself on `E2E_PORT` and reuses when one is already there. Three Playwright conf
   it. There is no polling of either. New kinds of workspace-level data that live outside a subscription should
   join `registryScopesOf` instead of adding a timer.
 - **Published pages** (`/share/:token`) are rendered by the Worker (`src/server/share/route.ts`, called from
-  `src/worker.ts`), not SvelteKit: a Worker cannot reliably fetch its own hostname and SvelteKit server code must not call
-  Durable Objects. P4 passes the `edytor/export` HTML to `renderSharedPage(page, bodyHtml)`. The response carries its own
+  `src/worker.ts`), not SvelteKit (they are public, script-free and cached by version in KV). P4 passes the `edytor/export` HTML to `renderSharedPage(page, bodyHtml)`. The response carries its own
   CSP; `img-src` and `media-src` name `env.FILES_ORIGIN`. **Any CSP added to the app (the plan's per-request nonce)
   must allow `FILES_ORIGIN` in `img-src`, `media-src` and `connect-src`**; the app sets none today.
 - **Room tokens only narrow.** `resolveRoomAccess` returns `min(token claim, current level)`, so a redial after a grant was
@@ -216,6 +215,30 @@ itself on `E2E_PORT` and reuses when one is already there. Three Playwright conf
 - **A new property opens its own editor** (`PropertiesPanel` focuses it): tests wait for that editor instead of clicking the cell, and
   `PropertyEditor.open()` is idempotent. A click that lands after the auto-open used to close the select popover (the old `p2-app` flake under load).
 
+## SSR (every page is server-rendered, then hydrated)
+- **Session**: `src/hooks.server.ts` resolves it from the cookie with `resolveSession` (pass 4's signed cookie-cache fast path, full better-auth fallback; a request with no
+  session cookie never loads either) onto `event.locals.session`/`user`, makes the **per-request CSP nonce** (`locals.nonce`; the root `+layout.server.ts` hands it to entasis's
+  `<Theme nonce>` so the server markup and the hydrated markup agree, and `NONCE_HEADER` carries it to the Worker's `withCsp`) and sets `Cache-Control: private, no-store` on every
+  HTML and `__data.json` response. Redirects (signed out to `/login?next=`, no workspace to `/onboarding`, unknown `[ws]` to the last or first workspace, `/` to the last) are server
+  `redirect()`s in `(app)/[ws]/+layout.server.ts`, `routes/+page.server.ts` and the auth pages' loads.
+- **Data**: `src/server/ssr/shell.ts` (`shellOf(event)`, memoized on `event.locals`: session, `listWorkspaces`, the actor with the D1 role, the Workspace DO stub), `workspace.ts` (layout seed: tree,
+  teamspaces, registry, members) and `page.ts` (page row, backlinks, a database's collection and first window, a document's body, lock and room token). They call **one** DO method,
+  `WorkspaceDO.ssrRead(actor, request)` (`objects/workspace/ssr-read.ts`), which answers the snapshots a socket subscribing to the same things would be sent (`LiveHub.oneShot`, `queryView`
+  for a view), with the `seq` they were read at, under the actor's permissions. No permission rule is written in the loads. `PageDO.readForRender` gives the body and the lock.
+  **A client-side navigation (`event.isDataRequest`) answers nothing from the server for page, home, trash, search, settings and admin loads**: the live store and the old client fetches fill them; only
+  the workspace layout (a different `[ws]`) reads again. Read URL state a client-side change must not re-run a load for (`?v=`, the page param in the layout) with `event.untrack`.
+- **Store seeding** (`lib/shared/seed.ts`, `WorkspaceStore.seed`): the layout creates the store while it renders (keyed on the workspace id, `renderingOnServer` on the server: no timers, no network) and
+  seeds it, the page seeds its own windows. The socket's first `hello` carries `lastSeq` = the oldest seeded position and the seeded windows the components claimed (a `subscribe` for a seeded id and an
+  identical subscription is a claim and sends nothing; unclaimed seeded windows are dropped at `hello`), so the server answers `resumed: replay` and no snapshot is sent twice. The registry and directory
+  are not fetched again unless the first `welcome`'s `seq` is past the seed's. A view's subscription is built by `hostSubscription` (`view-model.ts`), shared by `ViewHost` and the server, so the ids match.
+  Never leave initial state to an `$effect.pre`/`$effect` in a component that renders on the server (effects do not run there): initialize it with `untrack(() => ...)`.
+- **UI choices the server needs** (`lib/client/ui-cookies.ts`): favorites, recents, expanded branches and folded sections are mirrored to the `fl_ui_<workspace id>` cookie besides localStorage.
+- **The document body**: edytor renders on the server natively (`<Edytor snapshot={doc}>`, read-only, the same plugins and DOM as the live view, inside `[data-edytor-snapshot]`); the live view replaces it
+  in one update when its document is ready. `Editor.svelte` takes `body` (doc, lock, room token) and mounts `EditorView` straight away. It is not the `/share` export HTML: that path (export + sanitizer) stays for published pages.
+- **Browser tests**: a page is live only after hydration. `tests/e2e/hydration.mjs` (preloaded by every config through `waitForHydration()`) makes `goto`/`reload` wait for `<html data-hydrated="true">`;
+  the editor is `[data-flarion-editor]:not(:has([data-edytor-snapshot])) [data-edytor]` (the read-only snapshot is also a `[data-edytor]`). `tests/e2e/ssr.spec.ts` loads pages with JavaScript off.
+- **Not server-rendered**: `?mock=1` (the P0 mock mode needs no session; the mock modules remain for unit tests), the `(dev)` routes. Sidebar width (`flarion.sidebar.width`, entasis) is still read from localStorage on mount.
+
 ## Integration notes (P4 load test and start-up)
 - **`src/worker.ts` imports no route.** A WebSocket upgrade is served by a fresh isolate that loads the whole script (staging: `/healthz` 15 ms plain,
   350 to 420 ms with `Upgrade: websocket`; a 1 KB script 75 ms, 6 MB of dead code 520 ms, i.e. about 75 ms per MB), so every `import` that is evaluated when the
@@ -243,7 +266,7 @@ itself on `E2E_PORT` and reuses when one is already there. Three Playwright conf
   synchronous code on Cloudflare: read CPU from `wrangler tail` (`cpuTime`) with a diagnostic RPC that repeats the work, not from timers in the object.
 - **The Worker is code-split and its object classes are thin (third pass)**: `scripts/postbuild.mjs` rebuilds `_worker.js` from `src/worker.ts` with esbuild `splitting`; the chunks are `wc-*.js` modules (the `rules` entry of
   `wrangler.jsonc`, top level and both environments, glob `**/wc-*.js`; `.assetsignore` has `wc-*.js`). A start-up costs about 66 ms + 75 ms per MB evaluated + 45 ms per MB uploaded, so keep the evaluated closure of `worker.ts` tiny and drop dead weight:
-  the server build of `ssr = false` routes is stubbed in that script, roaring's embedded wasm is cut. `WorkspaceDO`, `PageDO` and `SocketShardDO` exported by `worker.ts` forward to the implementation loaded in their constructor
+  only the `(dev)` routes' server build is stubbed in that script (every app route is server-rendered, see "SSR"), roaring's embedded wasm is cut. `WorkspaceDO`, `PageDO` and `SocketShardDO` exported by `worker.ts` forward to the implementation loaded in their constructor
   (`server/objects/lazy.ts`): **a new public method of those classes must be added to `WORKSPACE_METHODS`/`PAGE_METHODS`/`SHARD_METHODS`** (`tests/workers/objects/lazy.test.ts` fails otherwise), and a handler that a library installs on the instance
   (edytor's `attachRoom` does it for `alarm`) must be listed too. `WORKER_SPLIT=off` builds the old single bundle.
 - **Commit statements are counted** (`tests/workers/scale/sql-trace.test.ts`): view maintenance shares liveness, membership and the collection's source per commit (`MatchMemo`), sort tuples live between commits (`LiveHub.#tupleStore`), and raw

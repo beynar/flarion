@@ -44,7 +44,8 @@ if (existsSync(entry)) {
 // without `splitting` inlines every dynamic `import()` into it, so a socket dial parsed all 5.6 MB. Rebuild the entry here with code splitting:
 // `_worker.js` keeps what the Worker evaluates at start (the exports, the object classes and what they import), every route, SvelteKit, the
 // renderers and the workflows become `wc-*.js` chunks that wrangler uploads as separate modules (`rules` in wrangler.jsonc) and workerd only
-// compiles when a request first imports them.
+// compiles when a request first imports them. The routes are server-rendered (`ssr` is on everywhere), so their server build (entasis, charts,
+// every page: about 1.4 MB) is part of the SvelteKit chunks; it loads with SvelteKit on the first page request and never on a socket dial.
 if (existsSync(entry) && readFileSync(entry, 'utf8').includes("'./_user-worker.js'") && process.env.WORKER_SPLIT !== 'off') {
 	const pluginRequire = createRequire(realpathSync(resolve('node_modules/sveltekit-cloudflare-worker/package.json')));
 	const { build } = pluginRequire('esbuild');
@@ -75,11 +76,10 @@ if (existsSync(entry) && readFileSync(entry, 'utf8').includes("'./_user-worker.j
 				setup(b) {
 					// The plugin's single-file bundle of the user Worker is replaced by the source, so its dynamic imports stay dynamic.
 					b.onResolve({ filter: /^\.\/_user-worker\.js$/ }, () => ({ path: join(root, 'src/worker.ts') }));
-					// Every route of the app is client-rendered (`ssr = false`): SvelteKit never calls the components it imports lazily for them,
-					// and their server build is 1.4 MB of entasis, charts and pages that every isolate would still have to receive. The root layout and
-					// the error page (the 404 render) keep theirs.
-					b.onLoad({ filter: /output[\\/]server[\\/]entries[\\/]pages[\\/](?:\([^\\/]+\)[\\/].*|_page)\.svelte\.js$/ }, () => ({
-						contents: "export default function () { throw new Error('This route is rendered in the browser (ssr = false)'); }",
+					// The `(dev)` routes (the editor test page, the SLO preview, the views bench) are development tools: their server build is dead weight
+					// in the Worker (and each answers 404 or fails without a development server anyway).
+					b.onLoad({ filter: /output[\\/]server[\\/]entries[\\/]pages[\\/]\(dev\)[\\/].*\.svelte\.js$/ }, () => ({
+						contents: "export default function () { throw new Error('This page is for the development server'); }",
 						loader: 'js',
 					}));
 					// roaring-wasm carries its own copy of the module as a base64 string (230 KB of every start); the Worker passes the compiled module.

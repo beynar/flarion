@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { goto } from '$app/navigation';
 	import { page } from '$app/state';
-	import { onMount } from 'svelte';
+	import { onMount, untrack } from 'svelte';
 	import { Alert } from 'entasis/alert';
 	import { Button } from 'entasis/button';
 	import { envelopeSimpleIcon } from 'entasis/icons/envelopeSimple';
@@ -22,8 +22,10 @@
 
 	const inviteToken = $derived(page.params.token ?? '');
 
-	let info = $state<InviteInfo | null>(null);
-	let signedInAs = $state<string | null>(null);
+	// What the server read (`+page.server.ts`): the invitation and who is signed in, there from the first paint.
+	let { data } = $props();
+	let info = $state<InviteInfo | null>(untrack(() => data.info));
+	let signedInAs = $state<string | null>(untrack(() => data.signedInAs));
 	let name = $state<string | null>('');
 	let token = $state('');
 	let resetKey = $state(0);
@@ -31,6 +33,8 @@
 	let error = $state<string | null>(null);
 
 	onMount(async () => {
+		// The server's answer stands unless it could not read the invitation (then the browser asks, as it always did).
+		if (info?.valid || info?.email) return;
 		info = await loadInviteInfo(inviteToken);
 		const session = await authClient.getSession();
 		signedInAs = session.data?.user?.email?.toLowerCase() ?? null;

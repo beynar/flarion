@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { onMount } from 'svelte';
+	import { onMount, untrack } from 'svelte';
 	import { Button } from 'entasis/button';
 	import { Chip } from 'entasis/chip';
 	import { DataTable, type DataTableColumn } from 'entasis/data-table';
@@ -17,13 +17,16 @@
 
 	const store = useWorkspace();
 
-	let loading = $state(true);
+	let { initial = null }: { initial?: { rosters: Record<string, TeamspaceMember[]>; archived: ArchivedTeamspace[] } | null } = $props();
+
+	// The server render read the rosters and the archived teamspaces: on screen from the first paint, and not asked for again.
+	let loading = $state(untrack(() => !initial));
 	let createOpen = $state(false);
 	let settingsId = $state<string | null>(null);
 	let settingsOpen = $state(false);
 	let joining = $state<string | null>(null);
-	let rosters = $state.raw<Record<string, TeamspaceMember[]>>({});
-	let archived = $state.raw<ArchivedTeamspace[]>([]);
+	let rosters = $state.raw<Record<string, TeamspaceMember[]>>(untrack(() => initial?.rosters ?? {}));
+	let archived = $state.raw<ArchivedTeamspace[]>(untrack(() => initial?.archived ?? []));
 	let restoring = $state<string | null>(null);
 
 	const lists = $derived(splitTeamspaces(store.teamspaces, store.myTeamspaces));
@@ -50,14 +53,20 @@
 	}
 
 	onMount(async () => {
+		if (initial) return;
 		await store.refreshDirectory();
 		loading = false;
 		await Promise.all([loadRosters(), loadArchived()]);
 	});
 
 	// Memberships changed elsewhere in the app (joined, left, archived): keep the counts in step.
+	let fromServer = untrack(() => !!initial);
 	$effect(() => {
 		void store.teamspaces;
+		if (fromServer) {
+			fromServer = false;
+			return;
+		}
 		if (!loading) void Promise.all([loadRosters(), loadArchived()]);
 	});
 

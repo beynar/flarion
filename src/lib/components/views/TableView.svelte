@@ -83,16 +83,22 @@
 
 	// ───────────── infinite window ─────────────
 	let root = $state<HTMLElement | null>(null);
+	// A capturing listener on the table's root sees the scroll of whichever element the table scrolls in (the viewport is created, and
+	// replaced, while the page hydrates: a listener on the first match could be on an element that is gone before anyone scrolls).
 	$effect(() => {
-		const el = root?.querySelector<HTMLElement>('[data-slot="scroll-viewport"], [data-scroll-viewport], .overflow-auto, [style*="overflow"]');
+		const host = root;
 		void items.length;
-		if (!el) return;
-		const near = () => {
+		if (!host) return;
+		const near = (el: HTMLElement) => {
 			if (el.scrollTop + el.clientHeight > el.scrollHeight - 6 * ROW) untrack(() => env.loadMore());
 		};
-		el.addEventListener('scroll', near, { passive: true });
-		near();
-		return () => el.removeEventListener('scroll', near);
+		const onScroll = (event: Event) => {
+			if (event.target instanceof HTMLElement && event.target !== document.documentElement) near(event.target);
+		};
+		host.addEventListener('scroll', onScroll, { capture: true, passive: true });
+		const el = host.querySelector<HTMLElement>('[data-slot="scroll-viewport"], [data-scroll-viewport], .overflow-auto, [style*="overflow"]');
+		if (el) near(el);
+		return () => host.removeEventListener('scroll', onScroll, { capture: true });
 	});
 
 	// ───────────── writes ─────────────

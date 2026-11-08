@@ -14,7 +14,8 @@
 
 
 	type Stage = 'ask' | 'sent' | 'redeeming' | 'register' | 'invalid';
-	let stage = $state<Stage>('ask');
+	// A recovery link is redeemed in the browser (it is single use): the server render already shows that step.
+	let stage = $state<Stage>(page.url.searchParams.get('token') ? 'redeeming' : 'ask');
 	let email = $state<string | null>('');
 	let who = $state<string | null>(null);
 	let token = $state('');

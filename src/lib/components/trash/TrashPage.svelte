@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { onMount } from 'svelte';
+	import { onMount, untrack } from 'svelte';
 	import { goto } from '$app/navigation';
 	import { toast } from 'entasis/toast';
 	import { Alert } from 'entasis/alert';
@@ -14,14 +14,16 @@
 	import { TrashList } from './trash-list.svelte.ts';
 	import { deletedAgo, purgePage, restorePage, type TrashEntry } from './trash-actions.ts';
 
-	let { store, ws }: { store: WorkspaceStore; ws: string } = $props();
+	let { store, ws, initial = null }: { store: WorkspaceStore; ws: string; initial?: { items: TrashEntry[]; nextCursor: string | null } | null } = $props();
 
 	const list = new TrashList(rpc);
+	// The server render read the first page: it is on screen from the first paint, and not asked for again.
+	if (untrack(() => initial)) list.seed(untrack(() => initial)!);
 	const nameOf = (userId: string | null) => (userId ? (store.members.find((m) => m.userId === userId)?.name ?? 'Deleted user') : '');
 	const titleOf = (e: TrashEntry) => e.title || 'Untitled';
 
 	onMount(() => {
-		void list.reload();
+		if (list.status !== 'ready') void list.reload();
 		// Another tab or person may have trashed pages meanwhile: read again when the screen is back in front.
 		const refresh = () => document.visibilityState === 'visible' && void list.reload();
 		window.addEventListener('focus', refresh);
