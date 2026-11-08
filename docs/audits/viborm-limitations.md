@@ -1,5 +1,59 @@
 # viborm: limitations found while building Flarion, and the fixes we need
 
+## Review outcome (2026-11-08)
+
+The viborm maintainers reviewed this audit twice (two adversarial passes, real workerd, our own driver, schema and policy; evidence in
+`/Users/arnaud/code/viborm-evidence/flarion-2026-11/`, verdicts in `reviews.md`). The sections below are left as we wrote them. Read them with
+this section first.
+
+### What was wrong in our audit
+
+- **#2 (governed `update`/`delete` do nothing, silently) was a misunderstanding.** We had the claim only in comments. Under `$as`, a hidden, missing or
+  readable-but-not-updatable row throws `NotFoundError` (V6001), nested writes throw `NestedWriteError` (V7001), `upsert` throws `ForbiddenError`; only
+  `updateMany` / `deleteMany` answer `{ count: 0 }`. Verified on our driver (`tests/workers/db/governed-writes.test.ts`).
+- **#5 (`$as` is expensive to build) was a misunderstanding.** Models are wrapped lazily, the policy is compiled once per schema and the actor goes in as
+  parameters: `$as()` costs about 9.6 µs with our policy. Our "half of `apply`'s CPU" came from a local profile through the inspector. The cache we added is harmless,
+  but the production gain was the registry hand-off (`docs/spikes/p4-scale.md`, corrected).
+- **#4's cause was right, its consequence was not.** The four copies of a rule are the rule R1 (a body written `level = 'read'`, `level = 'comment'`...);
+  we already write `level: { in: [...] }` bodies, so the compiler repeats nothing for us now. The depth failures that made us design around the limit
+  came from **our adapter options** (`new SQLiteAdapter({ temporaryObjects: false })`, viborm's deep SQL form), not from the policy: with
+  `deepExpressions: false` the plan's own sketch moves a page on workerd and `can` x4 fits (97 of 100 values, no headroom). The `level >= ?` fix we asked for is
+  infeasible; we do not need it.
+- **#1 is true and intended** (R4: a governed write's foreign key must target a row the actor can read, so that a missing and a hidden row give the same
+  answer, no existence oracle) and our `reference: 'unchecked'` ask would have reopened that oracle. It also exposed a **hole in our own `create` rule**:
+  `{ parent: 'update' }` said nothing about `teamspaceId`, so the policy accepted a guest's page under a shared parent with `teamspaceId: null` (or a
+  member's with another teamspace). Only our raw INSERT enforced the equality.
+- **#8: the maintainers called two of our five workarounds unnecessary; one was.** `annotateSqliteError` is dropped (viborm maps the same errors, codes and columns from the message).
+  The maintainers said the same of the `ctx.storage.sync()` before `PRAGMA foreign_keys = OFF`; that one is **not** covered: viborm's base class only
+  *declares* the `beforeForeignKeysOff` hook and does nothing in it (its doc says a Durable Object driver calls `sync()` there), so our override is the
+  implementation, kept and now tested on its own.
+- **#3 is fully true on Durable Objects** (the "refound once without `tables`" advice only works on D1: the DO cannot run without `tables`, which keeps
+  FTS5 and `_cf_*` out of the managed set). `docs/ops/migrations.md` said "only ever append" for tables, which contradicted this entry; corrected.
+- Our driver declares viborm's migration capability with `reservedTablePrefixes: "none"` and `BEGIN IMMEDIATE` exclusion, which a Durable Object cannot
+  provide. Documented in the driver's header ("Known"); viborm 1.12.1 admits no other values.
+
+### What Flarion changed
+
+- `do-sqlite-driver.ts`: `deepExpressions: false` (not `sharedRelationBodies`: +30 to 45% CPU on `can`, transactions and `$access`, against about +5 to 10% for
+  `deepExpressions: false`); `annotateSqliteError` removed; header note on the migration capability. `policy-limits.test.ts` now shows the sketch moving on
+  workerd and keeps the default form as the failing reference.
+- `policy.ts`: the page `create` rule states the equality with the parent's teamspace (`$row` / `up: 1`); `policy-create.test.ts` drives the governed create
+  (a move now takes 66 bound values, was 56). Raw create and move stay raw.
+- Governed single-row `update` / `delete` in `page-ops.ts`, `teamspaces.ts`, `grants.ts` no longer ask `can` first (`governed.ts`: one `can('read')` after a refusal
+  keeps 404 vs 403 and the messages); `restorePage` checks the `updateMany` count; the edit stamp's `updateMany` is left unchecked on purpose.
+- Docs: `docs/spikes/p0-policy-limits.md` (dated section with the numbers), `docs/spikes/p4-scale.md`, `docs/ops/migrations.md`.
+
+### What viborm will ship
+
+The `viborm/durable-object` driver (first party, `deepExpressions: false` by default, a depth test on workerd, widened migration-capability values and a real
+migration lock hook); per-table **adoption** of existing tables (so a managed set can grow and our seven raw tables can come under it; 3 to 5 days);
+the **R4 relaxation** (a reference is satisfied when the create rule equates it through `$row` to a key of a row it already proves readable: the oracle stays
+closed and guests can create governed pages, which lets us drop the raw INSERT later); `.withoutRowid()`; governed `$rows` (a read-only governed raw surface);
+the `TransactionClient` / `TransactionClientOf<Client>` type exports; a schema-validation refusal of a nullable field in a compound primary key; and the
+`permissions.mdx` fixes (teach `level: { in }`, drop "walks once"). Page `move` stays outside viborm (it rewrites a subtree), by their decision too.
+
+---
+
 *viborm 1.12.1 on Cloudflare (Durable Object SQLite and D1), 2026-11-08. The evidence is in this repository:
 `src/server/db/do-sqlite-driver.ts`, `docs/spikes/p0-policy-limits.md` (P0 and P2 sections),
 `docs/ops/migrations.md` and `docs/ops/load-test.md`.*

@@ -338,6 +338,10 @@ commits a second. The remaining work is in the commit and the view maintenance t
 - **The policy client is built once per set of actor facts** (`AccessService.governed`; `$as(facts)` snapshots the facts and wraps every model: it was about half of `apply`'s CPU in a
   local profile) and **a commit's transaction is handed the property registry** (`primeRegistry`: each transaction object is new, so each op read the property table again through the
   policy's client). In production this took a commit from 10.5 to 9.3 ms (fast host); the local profile had promised more, and a profile taken through the inspector inflates allocation-heavy code.
+  **Attribution, corrected (2026-11-08)**: the gain is mostly the registry hand-off, not the client cache (the two were not measured separately: this is by elimination). The viborm maintainers' review measured `$as()` with our real policy, schema and driver
+  at about **9.6 µs** per call (`review-permissions/ascost2.ts`: models are wrapped lazily, the policy is compiled once per schema and the actor is passed as parameters), i.e. 0.1% of a
+  9 ms commit, so caching it can explain at most about 0.01 ms of the 1.2 ms. The "half of `apply`" of the local profile was an artifact of that profile. The cache stays (it is free and it
+  keeps the per-client caches alive), but it is not what moved the commit.
 - **Fan-outs merge whenever work waits behind the commit**, not only when the governor says overloaded (value-only commits; `mergeCommits`): writes that cluster cost one derivation and one frame per socket.
   `inside.ts` judges the p95 on the stricter of "frames for exactly this write" and "diff frames including merged ones".
 - Not done: answering the RPC before the fan-out (it would not move the collaborators' latency: the answer and the frames wait for the same storage confirmation); value-only diffs are already

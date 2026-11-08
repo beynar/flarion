@@ -173,3 +173,61 @@ member that also holds a token.
   through the DO's API; after every step the lazily invalidated sets of all callers equal a fresh evaluation of
   the model, and the access answers of a rotating subset do too.
 - A share on a 720-page subtree (more than `MAX_SUBTREE`) takes the full-rebuild fallback and still matches.
+
+# 2026-11-08: adapter options, the create rule and governed writes (viborm maintainers' review)
+
+The viborm maintainers reviewed `docs/audits/viborm-limitations.md` against workerd with our driver, schema and policy
+(evidence: `/Users/arnaud/code/viborm-evidence/flarion-2026-11/`). The sections above are left as they were written; this one
+corrects what they got wrong. Tests: `tests/workers/db/policy-limits.test.ts`, `policy-create.test.ts`, `governed-writes.test.ts`.
+
+## Expression depth was the adapter, not the sketch
+
+The failure on a move ("Expression tree is too large (maximum depth 100)") came from viborm's default SQL form. The driver now builds
+`new SQLiteAdapter({ temporaryObjects: false, deepExpressions: false })` (`do-sqlite-driver.ts`). `sharedRelationBodies` stays off.
+
+| Statement (4,000 pages, bound values / SQL bytes) | default (deep) | `deepExpressions: false` |
+| --- | --- | --- |
+| the plan's sketch, move | **refused** by workerd (11 / 19,705 B) | **runs** (11 / 20,939 B) |
+| the plan's sketch, `can` x4 | 97 / 10,734 B | 97 / 11,470 B (no headroom either way) |
+| `policy`, `findMany(num)` as a member | 13 / 1,035 B | 13 / 1,071 B |
+| `policy`, `can` x4 on a depth-50 page | 44 / 3,970 B | 44 / 4,114 B |
+| `policy`, `$access` over every live page | 56 / 5,244 B | 56 / 5,442 B |
+| `policy`, move | 56 / 8,501 B | 56 / 8,771 B |
+
+Values do not change; SQL grows 2 to 5%. The sketch policy now moves a page on workerd, so the test that said it could not
+("the plan's sketch breaches SQLite's expression depth on a move") is rewritten: it asserts the move runs (one statement, 11 values), that
+`can` x4 still takes 97 of 100 values, and a second test keeps the default form as the reference that still fails. The compact policies stay:
+they are the ones with headroom (peak 63 of 100 for `$access`).
+`node:sqlite`'s expression depth does not predict workerd (the sketch's move measures 137 deep and 208 deep on `node:sqlite` before and after, and
+workerd refuses the first and accepts the second): trust the workers test, not a depth number.
+
+Cost, measured on workerd through `@cloudflare/vitest-plugin` (the harness timer is coarse; three runs each, medians; the default form was the baseline):
+`tests/workers/scale/sql-trace.test.ts` per commit, `amount` 2.52 to 2.39 ms, `status` 2.19 to 2.05 ms, `notes` 2.17 to 2.15 ms with the same
+22.6 / 21.2 / 18.3 statements; a loop of governed calls on `policy` (microseconds per call, default then shallow): `can` x4 116.7 / 106.7,
+`findMany $access` x50 2,060 / 2,040, visibility set of 4,000 pages 16.9 / 17.0 ms, title update 70.0 / 66.7, move 175 / 180, create 110 / 120.
+No difference outside the noise. The maintainers measured about +5 to 10% CPU for `deepExpressions: false` and +30 to 45% for `sharedRelationBodies`;
+we did not reproduce a cost this size, and the extra SQL text is the only certain one.
+
+## The create rule now states where the page lives
+
+A governed `page.create` under a parent the actor could edit used to be accepted with `teamspaceId: null` (a guest) or with another teamspace
+they read (a member): the rule said `{ parent: 'update' }` and nothing about `teamspaceId`. Our raw INSERT (`createPage`) copied the parent's
+teamspace, so the commit path was safe; the policy's statement of the rule was not. `policy.ts` now says
+`{ AND: [{ parent: 'update' }, { OR: [{ teamspaceId: null, parent: { is: { teamspaceId: null } } }, { parent: { is: { teamspaceId: { $row: 'teamspaceId', up: 1 } } } }] }] }`
+(`$row` with `up: 1` is viborm 1.12.1's spelling, the form the maintainers tested). `policy-create.test.ts` drives the governed create: a member's create in
+the parent's teamspace is accepted, another teamspace or none (set or left out) is refused; a guest's create under a shared page of a teamspace
+is refused with no teamspace, with the wrong one or a missing one; under a shared Private page only `teamspaceId: null` passes.
+Cost: a move (which sets `parentId`) now asks the rule of the new row: `policy` 56 to 66 values and 10,241 B, `joinedPolicy` 84 to **99** values and
+13,748 B (the pins in `policy-limits.test.ts` are 66 and 99; `joinedPolicy`, which the Worker does not use, has no headroom left).
+Not done, by decision: the guest's create with the *right* teamspace is still refused by viborm's R4 (a guest cannot read the teamspace row), so
+page creation stays a raw INSERT; widening `teamspace.read` for the governed path is a separate change.
+
+## Governed `update` / `delete` do not do nothing
+
+The P2 note above ("a governed `update` or `delete` that matches no row the actor may change does nothing, silently; only `create` throws") is
+wrong. Under `$as`, on our driver and policy (`governed-writes.test.ts`): a hidden, missing or readable-but-not-allowed row throws `NotFoundError`
+(V6001) for `update` and `delete`, inside a transaction too; nested writes throw `NestedWriteError` (V7001); `upsert` throws `ForbiddenError`;
+only `updateMany` / `deleteMany` answer `{ count: 0 }` (a mixed set updates exactly the rows allowed). So the Workspace DO no longer asks `can` before a
+governed single-row write (`governed.ts`: `orExplain`): the write is the check, and one `can('read')` after a refusal keeps `NOT_FOUND` vs `FORBIDDEN`
+with the same messages. `can` first remains where the write is raw SQL (page create and move) or absent.
+
