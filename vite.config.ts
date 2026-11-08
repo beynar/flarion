@@ -6,68 +6,36 @@ import { cloudflareWorker } from 'sveltekit-cloudflare-worker';
 import { defineConfig } from 'vite';
 
 /**
- * Local dev (Distilled/workerd) cannot emulate AI, Email, Images, Vectorize or cron triggers.
- * In `vite dev` we derive wrangler.dev.jsonc from wrangler.jsonc without them; app code treats
- * those bindings as optional and degrades (AI banner, mail logged to console, no vectors).
+ * `vite dev` runs the Worker in wrangler's own Miniflare, configured from wrangler.jsonc: AI, Email, Images, Vectorize and
+ * the cron triggers are no longer stripped. Only what the browser's origin changes is derived: `APP_ORIGIN` (CSRF, WebSocket
+ * Origin, better-auth baseURL) and `FILES_ORIGIN` must be the origin the browser really uses, and wrangler.jsonc says
+ * `localhost:5173`. A dev server on another port (`vite dev --port 5273`, the e2e suites) or with `E2E_FILES_HOST` set gets a
+ * generated `wrangler.dev-<port>.jsonc`; the default server uses wrangler.jsonc as it is.
+ *
+ * The worker name carries the port too, because wrangler's dev registry is keyed by name: two `flarion` workers would
+ * overwrite each other's entry. Local state needs no per-resource suffix any more: `persistState.path` separates it.
  */
-function devWranglerConfig(): string {
-	const source = JSON.parse(
-		readFileSync('wrangler.jsonc', 'utf8').replace(/^\s*\/\/.*$/gm, '')
-	) as Record<string, unknown>;
-	for (const key of ['ai', 'send_email', 'images', 'vectorize', 'triggers', 'env', 'account_id'])
-		delete source[key];
-	// APP_ORIGIN (CSRF, WebSocket Origin, better-auth baseURL) must be the origin the browser really uses.
-	// wrangler.jsonc says `localhost:5173`; a dev server on another port (`vite dev --port 5273`, the e2e
-	// suites) gets its own origin and its own generated config, so two servers never overwrite each other.
+const devConfigIsDerived = () => devPort() !== DEFAULT_DEV_PORT || Boolean(process.env.E2E_FILES_HOST);
+
+function devWranglerConfig(): string | undefined {
 	const port = devPort();
+	const filesHost = process.env.E2E_FILES_HOST;
+	if (!devConfigIsDerived()) return undefined;
+	const source = JSON.parse(readFileSync('wrangler.jsonc', 'utf8').replace(/^\s*\/\/.*$/gm, '')) as Record<string, unknown>;
+	const vars = (source.vars ?? {}) as Record<string, string>;
 	if (port !== DEFAULT_DEV_PORT) {
-		const vars = (source.vars ?? {}) as Record<string, string>;
 		for (const name of ['APP_ORIGIN', 'FILES_ORIGIN'])
 			if (vars[name]) vars[name] = vars[name].replace(`:${DEFAULT_DEV_PORT}`, `:${port}`);
-		source.vars = vars;
-		isolateDevState(source, port);
+		source.name = `${source.name as string}-${port}`;
 	}
 	// `E2E_FILES_HOST=[::1]` (the e2e configs' default) serves user files from another host than the app (as `FILES_ORIGIN` does in
 	// production): uploads stay on the app origin, downloads redirect to a signed URL on that host. The browser
 	// sees two origins, so a Content-Security-Policy or a cookie assumption that only holds on one fails the suites.
-	const filesHost = process.env.E2E_FILES_HOST;
-	if (filesHost) {
-		const vars = (source.vars ?? {}) as Record<string, string>;
-		if (vars.FILES_ORIGIN) vars.FILES_ORIGIN = vars.FILES_ORIGIN.replace('//localhost', `//${filesHost}`);
-		source.vars = vars;
-	}
-	const file = port === DEFAULT_DEV_PORT ? 'wrangler.dev.jsonc' : `wrangler.dev-${port}.jsonc`;
+	if (filesHost && vars.FILES_ORIGIN) vars.FILES_ORIGIN = vars.FILES_ORIGIN.replace('//localhost', `//${filesHost}`);
+	source.vars = vars;
+	const file = `wrangler.dev-${port}.jsonc`;
 	writeFileSync(file, JSON.stringify(source, null, '\t'));
 	return file;
-}
-
-/**
- * Gives a dev server on a non-default port its own local state. Distilled registers every worker in a
- * machine-wide registry (`$XDG_STATE_HOME/alchemy/registry/<script name>.json`) and keeps Durable Object, D1,
- * KV, R2, queue and workflow state under `.sveltekit-cloudflare-worker/local/<name or id>`; two dev servers
- * that share the script name `flarion` therefore overwrite each other's registry entry and open the same
- * SQLite files. A per-port suffix on the worker name and on each local resource id separates them, so the
- * e2e suites (and a developer's own `pnpm dev` on 5173) can run side by side without copying the repo.
- */
-function isolateDevState(config: Record<string, unknown>, port: number) {
-	const tag = `-${port}`;
-	const each = (value: unknown, apply: (item: Record<string, string>) => void) => {
-		if (Array.isArray(value)) for (const item of value) apply(item as Record<string, string>);
-	};
-	const suffix = (item: Record<string, string>, key: string) => {
-		if (item[key]) item[key] += tag;
-	};
-	config.name = `${config.name as string}${tag}`;
-	each(config.d1_databases, (db) => {
-		suffix(db, 'database_name');
-		suffix(db, 'database_id');
-	});
-	each(config.kv_namespaces, (kv) => suffix(kv, 'id'));
-	each(config.r2_buckets, (bucket) => suffix(bucket, 'bucket_name'));
-	each(config.workflows, (workflow) => suffix(workflow, 'name'));
-	const queues = (config.queues ?? {}) as { producers?: unknown; consumers?: unknown };
-	each(queues.producers, (queue) => suffix(queue, 'queue'));
-	each(queues.consumers, (queue) => suffix(queue, 'queue'));
 }
 
 const DEFAULT_DEV_PORT = 5173;
@@ -89,14 +57,26 @@ export default defineConfig(({ command }) => ({
 	// which only development and test servers accept (src/server/objects/workspace/versions.ts). The Worker's
 	// `APP_VERSION` var in wrangler.jsonc must equal package.json's version (tests/unit/app-version.test.ts).
 	define: command === 'build' ? { 'import.meta.env.VITE_APP_VERSION': JSON.stringify(APP_VERSION) } : {},
+	// SvelteKit narrows `server.fs.allow` to src/, .svelte-kit/ and node_modules; the Worker's module runner enforces it for `?raw`
+	// imports, so `import.meta.glob('/migrations/d1/*.sql', { query: '?raw' })` (src/server/db/dev-migrate.ts) needs this entry.
+	// Miniflare's local `send_email` writes every message under `.wrangler/tmp/email` (inside the root): without the ignore each mail
+	// is a Vite "page reload" for every open tab.
+	server: { fs: { allow: ['migrations'] }, watch: { ignored: ['**/.wrangler/**'] } },
 	plugins: [
 		tailwindcss(),
 		sveltekit(
 			cloudflareWorker(
 				{ preprocess: vitePreprocess() },
-				// Binding types (src/app.d.ts) are generated only from the full wrangler.jsonc at build time;
-				// the dev config strips AI/Email/Images/Vectorize, which must not leak into the types.
-				command === 'serve' ? { config: devWranglerConfig(), typesFile: false } : {}
+				command === 'serve'
+					? {
+							config: devWranglerConfig(),
+							// The generated `Cloudflare.Env` block (src/app.d.ts) types `vars` as literals, so a derived config (another port's
+							// origin) would rewrite the committed file on every start: only the real wrangler.jsonc writes it (default port).
+							...(devConfigIsDerived() ? { typesFile: false as const } : {}),
+							// A server on another port keeps its own state; the default, `.wrangler/state/v3`, is shared with `wrangler dev`.
+							...(devPort() !== DEFAULT_DEV_PORT ? { persistState: { path: `.wrangler/state-${devPort()}` } } : {})
+						}
+					: {}
 			)
 		)
 	]

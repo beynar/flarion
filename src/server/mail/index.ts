@@ -1,8 +1,10 @@
 /**
  * The one way the server sends mail. With the Email Service `send_email` binding (`env.EMAIL`, from
- * `env.MAIL_FROM`) mail really goes out. Without it (local dev, tests) the mail is logged to the console
- * and kept in KV under {@link DEV_MAIL_KEY} (the last {@link DEV_MAIL_LIMIT}, newest first), so invite and
- * recovery links can be read back. Production never uses the fallback: a missing binding is an error.
+ * `env.MAIL_FROM`) mail really goes out (under `vite dev` and `wrangler dev` Miniflare's local `send_email` only writes the
+ * message to `.wrangler/tmp/email`). In development and tests the mail is also logged to the console and kept in KV under
+ * {@link DEV_MAIL_KEY} (the last {@link DEV_MAIL_LIMIT}, newest first), so invite and recovery links can be read back
+ * (`/api/auth/dev/mails`, the e2e suites): the local binding delivers nothing a test could read. Without the binding, anything but
+ * production keeps the mail in KV only, and production throws.
  */
 export interface MailMessage {
 	to: string;
@@ -34,9 +36,8 @@ export async function sendMail(env: MailEnv, message: MailMessage): Promise<void
 			html: message.html,
 			text: message.text
 		});
-		return;
-	}
-	if (isProduction(env)) throw new Error('Email Service binding (EMAIL) is not configured');
+		if (env.ENVIRONMENT !== 'development' && env.ENVIRONMENT !== 'test') return;
+	} else if (isProduction(env)) throw new Error('Email Service binding (EMAIL) is not configured');
 	console.log(`[mail] to=${message.to} subject=${JSON.stringify(message.subject)}\n${message.text}`);
 	const stored: StoredMail = { ...message, from: env.MAIL_FROM, sentAt: new Date().toISOString() };
 	try {
