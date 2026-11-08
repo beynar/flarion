@@ -1,7 +1,7 @@
 /**
  * Single Worker entry (sveltekit-cloudflare-worker). Routes API, socket and file traffic before
  * SvelteKit, in the order fixed by docs/PLAN.md "Project structure". Every Durable Object access
- * lives here (or in modules called from here), never in SvelteKit server code (dev deadlock).
+ * lives here (or in modules called from here); SvelteKit server code may also reach the objects through `cloudflare:workers`.
  *
  * **Start-up matters here.** A request that carries `Upgrade: websocket` is served by a fresh isolate (measured on staging:
  * `/healthz` takes 15 ms plain and 350 to 420 ms with the header, for a 10 MiB script, against 75 ms for a stub), so

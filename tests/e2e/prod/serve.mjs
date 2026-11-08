@@ -2,8 +2,8 @@
 // (tests/e2e/prod/csp-build.spec.ts). Run by that suite's Playwright config; to start it by hand:
 //   PROD_PORT=8790 node tests/e2e/prod/serve.mjs
 //
-// The config is derived from wrangler.jsonc the way vite.config.ts derives the dev one (no AI, Email, Images, Vectorize, cron or
-// `env` sections: they need a Cloudflare login or real resources), with `ENVIRONMENT=staging` so the Worker sends the policy it
+// The config is derived from wrangler.jsonc without the `ai` and `vectorize` bindings (wrangler's remote proxy session needs a Cloudflare
+// login and a real index) and without the `env` sections; Email, Images and the cron triggers run locally, with `ENVIRONMENT=staging` so the Worker sends the policy it
 // sends in production (nonce-only styles, `upgrade-insecure-requests`), the app on https://localhost:<port> and user files on
 // https://127.0.0.1:<port> (another origin, as `FILES_ORIGIN` is in production). State lives in .wrangler/prod-csp-<port>, fresh on each start.
 import { spawn, spawnSync } from 'node:child_process';
@@ -15,7 +15,7 @@ if (!existsSync('.svelte-kit/cloudflare/_worker.js')) {
 	process.exit(1);
 }
 const source = JSON.parse(readFileSync('wrangler.jsonc', 'utf8').replace(/^\s*\/\/.*$/gm, ''));
-for (const key of ['ai', 'send_email', 'images', 'vectorize', 'triggers', 'env', 'account_id']) delete source[key];
+for (const key of ['ai', 'vectorize', 'env']) delete source[key];
 source.name = `flarion-prod-csp-${port}`;
 source.vars = {
 	...source.vars,

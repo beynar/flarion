@@ -24,12 +24,13 @@ console.log('[postbuild] roaring.wasm copied to', outDir);
 const entry = join(outDir, '_worker.js');
 if (existsSync(entry)) {
 	let source = readFileSync(entry, 'utf8');
-	const eager = "import worker_default from './_sveltekit-worker.js';\n";
-	const call = 'nextResponse ??= worker_default.fetch(request, env, __waitUntilLast.ctx);';
+	// The facade of sveltekit-cloudflare-worker 0.1 (`createWorkerFacade`): SvelteKit's Worker is `svelteKit`, `next()` calls it once.
+	const eager = "import svelteKit from './_sveltekit-worker.js';\n";
+	const call = 'const next = () => (response ??= svelteKit.fetch(request, env, context));';
 	if (source.includes(eager) && source.includes(call)) {
 		source = source
 			.replace(eager, '')
-			.replace(call, "nextResponse ??= import('./_sveltekit-worker.js').then((m) => m.default.fetch(request, env, __waitUntilLast.ctx));");
+			.replace(call, "const next = () => (response ??= import('./_sveltekit-worker.js').then((m) => m.default.fetch(request, env, context)));");
 		writeFileSync(entry, source);
 		console.log('[postbuild] _worker.js loads SvelteKit lazily');
 	} else if (source.includes("import('./_sveltekit-worker.js')")) {

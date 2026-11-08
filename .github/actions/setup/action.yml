@@ -1,7 +1,7 @@
 name: Set up Flarion
 description: >
-  Install this repository's dependencies. sveltekit-cloudflare-worker is vendored as
-  vendor/sveltekit-cloudflare-worker-0.0.1.tgz (it is not on npm), so no sibling checkout is needed.
+  Install this repository's dependencies. sveltekit-cloudflare-worker is a GitHub
+  commit (github:beynar/sveltekit-cloudflare-worker#<sha>, not on npm), so no sibling checkout is needed.
 runs:
   using: composite
   steps:
