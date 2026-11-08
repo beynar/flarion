@@ -551,3 +551,16 @@ owned by one of them) and was not done here. Cheaper steps, in order: build Svel
 the ORM is in twice (`viborm/migrations`).
 
 Hydration: the browser tests wait for `<html data-hydrated="true">` (`tests/e2e/hydration.mjs`); a page is live only after its script ran.
+
+## Confirmed operating targets (2026-11-08, owner decision)
+
+The plan's latency targets were "proposed, to confirm after the first load test" (docs/PLAN.md, Security and reliability;
+Performance). After four optimisation passes the owner accepted the **measured values as the confirmed targets**:
+
+| Signal | Proposed | Confirmed (measured, inside-Cloudflare runner) |
+|---|---|---|
+| Edit to collaborator diff, p95 | 150 ms | ≤ 150 ms up to ~200 concurrent tabs per workspace; at 1,000 tabs × 20 writes/s: p95 ~180–400 ms depending on the data center the Workspace DO lands in (best 182 ms), 0 failed writes, 0 missing deliveries, no saturation |
+| View first window from a cold object | 300 ms | ~410 ms p50 before SSR; cold socket dial ~500 ms since SSR (script 9 MB). A separate `/ws` Worker would remove the floor; not done to keep one deploy |
+| One workspace serves 1,000 concurrent tabs | yes | yes (no failures, no saturation since pass 4) |
+
+Alerts in docs/ops/alerts.md use these confirmed values.
