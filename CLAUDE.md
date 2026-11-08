@@ -218,3 +218,22 @@ itself on `E2E_PORT` and reuses when one is already there. Three Playwright conf
   -2px margin (WCAG 2.5.8). Tests still select `getByRole('treeitem')` inside `tree-row`.
 - **A new property opens its own editor** (`PropertiesPanel` focuses it): tests wait for that editor instead of clicking the cell, and
   `PropertyEditor.open()` is idempotent. A click that lands after the auto-open used to close the select popover (the old `p2-app` flake under load).
+
+## Integration notes (P4 load test and start-up)
+- **`src/worker.ts` imports no route.** A WebSocket upgrade is served by a fresh isolate that loads the whole script (staging: `/healthz` 15 ms plain,
+  350 to 420 ms with `Upgrade: websocket`; a 1 KB script 75 ms, 6 MB of dead code 520 ms, i.e. about 75 ms per MB), so every `import` that is evaluated when the
+  script loads is paid by every dial. Routes, the queue consumer, the cron handler and SvelteKit (`scripts/postbuild.mjs` rewrites the generated `_worker.js`
+  to `import()` it) load on first use; the Workflows are thin classes in `worker.ts` that import their implementation when a run starts; `auth/session.ts` loads
+  better-auth lazily. Keep it that way: check with `wrangler check startup` (`Active` ms) and `wrangler deploy` (`Worker Startup Time`). New exported classes
+  must be declared at the top level of `worker.ts` (the plugin finds exports by parsing the bundle). `wrangler.jsonc` has `minify: true` (names are kept).
+- **Fan-out** (`live.ts`): sockets with the same actor and the same subscriptions form an *audience* (derived once per commit, encoded once, sent to every
+  member); the window of a view unit is derived when the unit, the actor's visibility (`VisibilityView.rev`) or the window size changes, and a commit that only
+  edits cells of it finds the edited pages in a cached index; snapshots are cached per (`seq`, visibility, shape). `socket-directory.ts` holds the live sockets
+  and their actors in memory (reading attachments back was O(sockets) per commit). Past 64 recipients a plain `head` waits up to 250 ms for the next batch
+  (the committing person's tabs get theirs at once; `setHeadCoalescing`). One object fans out to 1,000 tabs at 20 commits a second (15,000 frames a second)
+  with no queue: **do not trust a load test made through one home connection past a few hundred sockets** (1,000 open connections made a plain GET take
+  0.86 s), use `scripts/load/inside.ts`, which opens the tabs from Workers in the same data center.
+- **`/rpc/mutate` and `/ws` do not read the role first**: the Workspace DO resolves it from its member mirror in the call itself; the Worker asks D1 only on
+  a miss (`requireWorkspaceInObject`, `authenticateUpgrade`). A busy object answers 503 `SERVICE_UNAVAILABLE` (not 500) and the store retries the same `mid`.
+- **Load tool**: sockets live in worker threads (`scripts/load/tabs-worker.ts`, `ws` package), the minted cookie carries better-auth's `session_data` cache,
+  and the report prints the client's own round trip and `edit-to-diff` minus it (docs/ops/load-test.md).

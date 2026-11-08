@@ -1,7 +1,7 @@
 /**
- * Helpers of the load-test tool (`scripts/load/run.ts`). Plain Node (>= 22): global `fetch` and `WebSocket`
- * only, no dependencies. The global WebSocket is undici's, which accepts `{ headers }` as a second argument
- * (a browser's does not): that is how a tab carries its session cookie and `Origin`.
+ * Helpers of the load-test tool (`scripts/load/run.ts`). Plain Node (>= 22): global `fetch`, and the `ws` package for the
+ * sockets (much cheaper per frame than Node's global WebSocket, which matters when 1,000 sockets receive 20 commits a
+ * second; it also takes `{ headers }`, which is how a tab carries its session cookie and `Origin`).
  */
 import { evenRanks } from '../../src/lib/shared/sort-keys.ts';
 
@@ -31,6 +31,10 @@ export interface Options {
 	p95Ms: number;
 	coldMs: number;
 	runId: string;
+	/** Worker threads that hold the sockets (the client's own CPU is a limit at 1,000 tabs). 0: one per ~125 tabs, at most 8. */
+	procs: number;
+	/** Judge `edit-to-diff` on the raw numbers instead of minus the client's own round trip to the edge. */
+	raw: boolean;
 }
 
 const PRESETS: Record<string, Partial<Options>> = {
@@ -55,7 +59,9 @@ const DEFAULTS: Options = {
 	cleanup: true,
 	p95Ms: 150,
 	coldMs: 300,
-	runId: ''
+	runId: '',
+	procs: 0,
+	raw: false
 };
 
 const NUMERIC: Record<string, keyof Options> = {
@@ -70,7 +76,8 @@ const NUMERIC: Record<string, keyof Options> = {
 	'ramp-batch': 'rampBatch',
 	'ramp-delay-ms': 'rampDelayMs',
 	'p95-ms': 'p95Ms',
-	'cold-ms': 'coldMs'
+	'cold-ms': 'coldMs',
+	procs: 'procs'
 };
 
 export function parseArgs(argv: string[]): Options {
@@ -99,6 +106,7 @@ export function parseArgs(argv: string[]): Options {
 		else if (name === 'run-id') opts.runId = take();
 		else if (name === 'no-assert') opts.assert = false;
 		else if (name === 'no-cleanup') opts.cleanup = false;
+		else if (name === 'raw') opts.raw = true;
 		else if (name in NUMERIC) {
 			const value = Number(take());
 			if (!Number.isFinite(value) || value < 0) throw new Error(`--${name} must be a number`);
@@ -132,7 +140,8 @@ export function summarize(values: number[]): Summary {
 }
 
 export const ms = (x: number) => (Number.isFinite(x) ? `${x.toFixed(1)} ms` : 'n/a');
-export const now = () => performance.now();
+/** Epoch milliseconds with sub-millisecond resolution: comparable between the worker threads of one run. */
+export const now = () => performance.timeOrigin + performance.now();
 export const sleep = (t: number) => new Promise<void>((resolve) => setTimeout(resolve, t));
 
 /** Counts errors by kind. */
@@ -220,7 +229,9 @@ export class Api {
 				cookie: user.cookie,
 				...(workspaceId ? { 'x-workspace-id': workspaceId } : {})
 			},
-			body: JSON.stringify({ json: input ?? {} })
+			body: JSON.stringify({ json: input ?? {} }),
+			// A write that takes longer than this is a failed write (and a saturated run ends in seconds, not minutes).
+			signal: AbortSignal.timeout(30_000)
 		});
 		const text = await res.text();
 		if (!res.ok) throw new Error(`rpc ${path} answered ${res.status}: ${text.slice(0, 300)}`);
@@ -329,11 +340,8 @@ export function mulberry(seed: number): () => number {
 const TRY_AGAIN = 4503;
 
 export interface Recorder {
-	/** Whether arrivals count (writes are running). */
+	/** Whether frame arrivals are kept (writes are running). */
 	measuring: boolean;
-	/** seq -> arrival times (ms, `performance.now()`) of the frames that carried it. */
-	diffs: Map<number, number[]>;
-	heads: Map<number, number[]>;
 	errors: ErrorLog;
 	counters: { opens: number; reconnects: number; unexpectedCloses: number; resyncs: number; connectFailures: number; connectRetries: number; frames: number; errorFrames: number };
 }
@@ -341,14 +349,10 @@ export interface Recorder {
 export function newRecorder(): Recorder {
 	return {
 		measuring: false,
-		diffs: new Map(),
-		heads: new Map(),
 		errors: new ErrorLog(),
 		counters: { opens: 0, reconnects: 0, unexpectedCloses: 0, resyncs: 0, connectFailures: 0, connectRetries: 0, frames: 0, errorFrames: 0 }
 	};
 }
-
-const FRAME = /^\{"t":"(diff|head)","seq":(\d+)/;
 
 export interface DialResult {
 	/** Dial to socket open (the upgrade: Worker, auth, and the object's wake). */
@@ -359,15 +363,50 @@ export interface DialResult {
 	firstViewMs: number;
 }
 
+/** The frame the server pushes after a commit: `{"t":"diff","seq":N,...` or `{"t":"head","seq":N}`; both are 18 bytes up to the number. */
+function frameSeq(data: Uint8Array): number {
+	let n = 0;
+	for (let i = 18; i < data.length; i++) {
+		const d = data[i] - 48;
+		if (d < 0 || d > 9) break;
+		n = n * 10 + d;
+	}
+	return n;
+}
+
+/** Whether `data` is text starting with `prefix` (compared on the bytes: no string is built for a frame that is not looked at). */
+function startsWith(data: Uint8Array, prefix: string): boolean {
+	if (data.length < prefix.length) return false;
+	for (let i = 0; i < prefix.length; i++) if (data[i] !== prefix.charCodeAt(i)) return false;
+	return true;
+}
+
+type WebSocketCtor = new (url: string, options?: unknown) => {
+	on(event: string, listener: (...args: any[]) => void): void;
+	send(data: string): void;
+	close(code?: number, reason?: string): void;
+};
+
+let wsCtor: WebSocketCtor | null = null;
+async function loadWs(): Promise<WebSocketCtor> {
+	// `ws` is far cheaper per frame than Node's global WebSocket, which matters when 1,000 sockets receive 20 commits a second.
+	if (!wsCtor) wsCtor = ((await import('ws')) as unknown as { default: WebSocketCtor }).default;
+	return wsCtor;
+}
+
 /** One browser tab: a socket on `/ws/:workspaceId` with its subscriptions. Reconnects (with `lastSeq`) when dropped. */
 export class Tab {
-	ws: WebSocket | null = null;
+	ws: InstanceType<WebSocketCtor> | null = null;
 	lastSeq: number | null = null;
 	closedByUs = false;
 	/** Arrivals before this time are replays of a (re)connection, not live fan-out. */
 	settledAt = 0;
 	/** Resolves with the dial timings once every subscription has its snapshot. */
 	ready: Promise<DialResult> | null = null;
+	/** The frames that carry a commit's `seq`, in arrival order (kept while writes run): seq, epoch ms, 1 for a diff and 0 for a head. */
+	readonly frameSeqs: number[] = [];
+	readonly frameTimes: number[] = [];
+	readonly frameDiffs: number[] = [];
 
 	readonly index: number;
 	readonly api: Api;
@@ -416,7 +455,8 @@ export class Tab {
 		throw last;
 	}
 
-	private attempt(timeoutMs: number): Promise<DialResult> {
+	private async attempt(timeoutMs: number): Promise<DialResult> {
+		const WebSocketImpl = await loadWs();
 		const started = now();
 		const expected = this.subs.length;
 		const firstViewId = this.subs.find((s) => s.sub.kind === 'view')?.id;
@@ -434,70 +474,71 @@ export class Tab {
 				else resolve(result as DialResult);
 			};
 			const timer = setTimeout(() => finish(new Error(`no snapshots after ${timeoutMs} ms (${snapshots}/${expected})`)), timeoutMs);
-			const ws = new (WebSocket as unknown as new (url: string, init?: unknown) => WebSocket)(this.url(), {
-				headers: { cookie: this.user.cookie, origin: this.api.origin }
-			});
+			const ws = new WebSocketImpl(this.url(), { headers: { cookie: this.user.cookie, origin: this.api.origin }, perMessageDeflate: false });
 			this.ws = ws;
-			ws.addEventListener('open', () => {
+			ws.on('open', () => {
 				opened = now();
 				this.recorder.counters.opens++;
 				helloAt = opened;
 				ws.send(JSON.stringify({ t: 'hello', appVersion: this.api.appVersion, clientId: this.clientId, lastSeq: this.lastSeq, subs: this.subs }));
 			});
-			ws.addEventListener('message', (event) => {
-				const data = event.data;
-				if (typeof data !== 'string') return;
+			ws.on('message', (data: Uint8Array, isBinary: boolean) => {
+				if (isBinary) return;
 				this.recorder.counters.frames++;
 				const t = now();
-				const m = FRAME.exec(data);
-				if (m) {
-					const seq = Number(m[2]);
+				const kind = data[6];
+				if (kind === 0x64 /* d */ || kind === 0x68 /* h */) {
+					const seq = frameSeq(data);
 					if (this.lastSeq === null || seq > this.lastSeq) this.lastSeq = seq;
 					if (this.recorder.measuring && t >= this.settledAt) {
-						const book = m[1] === 'diff' ? this.recorder.diffs : this.recorder.heads;
-						let list = book.get(seq);
-						if (!list) book.set(seq, (list = []));
-						list.push(t);
+						this.frameSeqs.push(seq);
+						this.frameTimes.push(t);
+						this.frameDiffs.push(kind === 0x64 ? 1 : 0);
 					}
 					return;
 				}
-				if (data.startsWith('{"t":"snapshot"')) {
+				if (startsWith(data, '{"t":"snapshot"')) {
 					snapshots++;
-					const id = /"id":"([^"]+)"/.exec(data.slice(0, 200))?.[1];
+					const id = /"id":"([^"]+)"/.exec(Buffer.from(data.buffer, data.byteOffset, Math.min(data.length, 200)).toString('utf8'))?.[1];
 					if (id === firstViewId && !firstView) firstView = t;
 					if (snapshots >= expected && !done) {
 						this.settledAt = t + 1500;
 						finish(undefined, { openMs: opened - started, snapshotsMs: t - helloAt, firstViewMs: (firstView || t) - started });
 					}
-				} else if (data.startsWith('{"t":"error"')) {
+				} else if (startsWith(data, '{"t":"error"')) {
+					const text = Buffer.from(data).toString('utf8');
 					this.recorder.counters.errorFrames++;
-					const code = /"code":"([^"]+)"/.exec(data)?.[1] ?? 'unknown';
-					this.recorder.errors.add(`error_frame:${code}`, data);
-				} else if (data.startsWith('{"t":"resumed"')) {
+					const code = /"code":"([^"]+)"/.exec(text)?.[1] ?? 'unknown';
+					this.recorder.errors.add(`error_frame:${code}`, text);
+				} else if (startsWith(data, '{"t":"resumed"')) {
 					// A resume replays or resnapshots; either way the subscriptions are served again.
 					snapshots = expected;
 					this.settledAt = t + 1500;
 					finish(undefined, { openMs: opened - started, snapshotsMs: t - helloAt, firstViewMs: t - started });
 				}
 			});
-			ws.addEventListener('error', (event) => {
+			ws.on('error', (error: Error) => {
 				if (!opened) {
-					const e = event as unknown as { message?: string; error?: { message?: string; cause?: { message?: string } } };
-					const why = e.error?.cause?.message ?? e.error?.message ?? e.message ?? 'unknown';
 					this.recorder.counters.connectFailures++;
-					finish(new Error(`socket failed before it opened: ${why}`));
+					finish(new Error(`socket failed before it opened: ${error?.message ?? 'unknown'}`));
 				}
 			});
-			ws.addEventListener('close', (event) => {
+			ws.on('unexpected-response', (_req: unknown, res: { statusCode?: number }) => {
 				if (!opened) {
-					finish(new Error(`socket closed before it opened (${event.code})`));
+					this.recorder.counters.connectFailures++;
+					finish(new Error(`socket failed before it opened: HTTP ${res.statusCode}`));
+				}
+			});
+			ws.on('close', (code: number, reason: Buffer) => {
+				if (!opened) {
+					finish(new Error(`socket closed before it opened (${code})`));
 					return;
 				}
 				if (this.closedByUs) return;
 				this.recorder.counters.unexpectedCloses++;
-				if (event.code === TRY_AGAIN) this.recorder.counters.resyncs++;
-				this.recorder.errors.add(`ws_closed:${event.code}`, event.reason);
-				finish(new Error(`closed during setup (${event.code})`));
+				if (code === TRY_AGAIN) this.recorder.counters.resyncs++;
+				this.recorder.errors.add(`ws_closed:${code}`, reason?.toString());
+				finish(new Error(`closed during setup (${code})`));
 				// Reconnect after a short jittered pause, as a client does.
 				setTimeout(() => {
 					if (this.closedByUs) return;
@@ -517,4 +558,29 @@ export class Tab {
 			// already closed
 		}
 	}
+}
+
+/**
+ * For each write (`seq`, sent at `t0`), what this tab saw: the time of its own `diff` frame (`diff`), or of the first frame
+ * that carries a later or equal `seq` when it got no frame of its own (a `head`, or a diff that merged several commits:
+ * `delivered`); a write no frame covers by the end of the run is `missing`. A tab that a commit does not touch is
+ * sent its `head` with the next batch of heads (docs/spikes/p4-scale.md), so "delivered" is the first frame at or past the seq.
+ */
+export function deliveries(tab: Pick<Tab, 'frameSeqs' | 'frameTimes' | 'frameDiffs'>, writes: readonly { t0: number; seq: number }[]): { diff: number[]; delivered: number[]; missing: number } {
+	const diff: number[] = [];
+	const delivered: number[] = [];
+	let missing = 0;
+	let j = 0;
+	const n = tab.frameSeqs.length;
+	for (const w of writes) {
+		while (j < n && tab.frameSeqs[j] < w.seq) j++;
+		if (j >= n) {
+			missing++;
+			continue;
+		}
+		const latency = tab.frameTimes[j] - w.t0;
+		if (tab.frameSeqs[j] === w.seq && tab.frameDiffs[j] === 1) diff.push(latency);
+		else delivered.push(latency);
+	}
+	return { diff, delivered, missing };
 }

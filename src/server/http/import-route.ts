@@ -8,7 +8,7 @@ import { MAX_IMPORT_BYTES } from '../../lib/shared/import/schemas';
 import { authenticateFileCaller, isAppOrigin } from '../files/request-auth';
 import { uploadBody } from '../files/serve';
 import { importKey } from '../import/start';
-import { isFilesHost } from './files-route';
+import { isFilesHost } from './files-host';
 import type { RouteHandler } from './types';
 
 const reply = (status: number, message: string, headers: Record<string, string> = {}) =>

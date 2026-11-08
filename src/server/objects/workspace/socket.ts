@@ -108,13 +108,18 @@ export class HibernatableSocketTransport<TContext extends Context, TActor = Sock
 
 	/** Accept an upgrade: returns the 101 response. Throws `AttachmentTooLargeError` before accepting. */
 	accept(actor: TActor): Response {
+		return this.acceptSocket(actor).response;
+	}
+
+	/** Like `accept`, with the handle of the accepted socket (so an owner that keeps its own directory does not read attachments back). */
+	acceptSocket(actor: TActor): { response: Response; handle: SocketHandle<TActor> } {
 		const attachment: SocketAttachment<TActor> = { socketId: crypto.randomUUID(), actor };
 		assertAttachmentSize(attachment);
 		const pair = new WebSocketPair();
 		const [client, server] = [pair[0], pair[1]];
 		this.#ctx.acceptWebSocket(server, this.#options.tag ? [this.#options.tag] : undefined);
 		server.serializeAttachment(attachment);
-		return new Response(null, { status: 101, webSocket: client });
+		return { response: new Response(null, { status: 101, webSocket: client }), handle: { ws: server, socketId: attachment.socketId, actor } };
 	}
 
 	/** The persisted identity of a socket. Works on a socket that survived hibernation. */

@@ -6,11 +6,15 @@
  *   sessions (restricted to registering a passkey) never resolve: they are not usable for the app.
  * - `resolveMembership`: the Workspace DO's cached mirror first (`getMemberRole`), then D1.
  */
-import { getAuth, SESSION_EXPIRES_SECONDS } from './auth';
 import { resignSessionCookie } from './secret-rotation';
 import { workspaceIdentity } from './workspace-rpc';
-import { createDirectoryClient } from '../db/global.client';
 import { ensureDevSchema } from '../db/dev-migrate';
+
+// better-auth (with passkeys, kysely and the viborm D1 client) is loaded by the first call that needs it, not when this module
+// loads: the Durable Objects and the Workflows import this file for its types and for `resolveMembership`, and the whole
+// worker script is evaluated by every isolate, which a socket dial waits for (docs/ops/load-test.md "Start-up").
+const authModule = () => import('./auth');
+const directoryClient = async (db: Env['DB']) => (await import('../db/global.client')).createDirectoryClient(db);
 
 export type WorkspaceRole = 'owner' | 'admin' | 'member' | 'guest';
 
@@ -37,6 +41,7 @@ export async function resolveSession(request: Request, env: Env): Promise<Sessio
 	try {
 		await ensureDevSchema(env);
 		// Secret rotation overlap: read a cookie signed with the previous secret as if it were signed with the current one.
+		const { getAuth, SESSION_EXPIRES_SECONDS } = await authModule();
 		const { request: effective } = await resignSessionCookie(request, env, SESSION_EXPIRES_SECONDS);
 		result = await getAuth(env).api.getSession({ headers: effective.headers });
 	} catch (error) {
@@ -73,7 +78,7 @@ export async function resolveMembership(env: Env, userId: string, workspaceId: s
 }
 
 export async function resolveMembershipFromD1(env: Pick<Env, 'DB'>, userId: string, workspaceId: string): Promise<WorkspaceRole | null> {
-	const db = createDirectoryClient(env.DB);
+	const db = await directoryClient(env.DB);
 	// `softDelete()` hides tombstones: a deleted workspace or a removed membership resolves to null.
 	const [workspace, membership] = await Promise.all([
 		db.workspace.findFirst({ where: { id: workspaceId }, select: { id: true } }),

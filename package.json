@@ -21,6 +21,7 @@
     "db:generate": "node --experimental-strip-types scripts/db-generate.ts",
     "load": "node --experimental-strip-types scripts/load/run.ts",
     "load:smoke": "node --experimental-strip-types scripts/load/run.ts --smoke",
+    "load:inside": "node --experimental-strip-types scripts/load/inside.ts",
     "scale:profile": "node scripts/scale/profile.mjs"
   },
   "devDependencies": {
@@ -40,7 +41,8 @@
     "typescript": "6.0.3",
     "vite": "8.3.6",
     "vitest": "4.1.12",
-    "wrangler": "4.158.0"
+    "wrangler": "4.158.0",
+    "ws": "8.22.1"
   },
   "pnpm": {
     "onlyBuiltDependencies": [

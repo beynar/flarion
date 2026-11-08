@@ -10,7 +10,7 @@
  * ignored everywhere else.
  */
 import { APP_VERSION_HEADER, APP_VERSION_PARAM } from '../../lib/shared/protocol';
-import { resolveMembership, resolveSession, type Actor, type WorkspaceRole } from '../auth/session';
+import { resolveMembershipFromD1, resolveSession, type Actor, type WorkspaceRole } from '../auth/session';
 import { ACTOR_HEADER, encodeActorHeader } from '../objects/workspace/socket';
 import type { Env, RouteHandler } from './types';
 
@@ -60,21 +60,21 @@ export function devActor(request: Request, env: Pick<Env, 'ENVIRONMENT'>, worksp
 /**
  * The actor of an upgrade: the session's user and its role in the workspace, or null (with the status to
  * answer) when there is none.
+ *
+ * `role` is left out unless the dev seam gives one: the Workspace DO, which the upgrade goes to anyway, reads it from its member
+ * mirror (`WorkspaceDO.fetch`), so a dial no longer makes a Durable Object call of its own before the real one. The route asks
+ * D1 only when the object says the mirror does not know the user (see `handleWorkspaceSocket`).
  */
 export async function authenticateUpgrade(
 	request: Request,
 	env: Env,
 	workspaceId: string
-): Promise<{ actor: Actor } | { status: 401 | 403 }> {
+): Promise<{ actor: Omit<Actor, 'role'> & { role?: WorkspaceRole } } | { status: 401 | 403 }> {
 	const dev = devActor(request, env, workspaceId);
 	if (dev) return { actor: dev };
 	const session = await resolveSession(request, env);
 	if (!session) return { status: 401 };
-	const role = await resolveMembership(env, session.userId, workspaceId);
-	if (!role) return { status: 403 };
-	return {
-		actor: { userId: session.userId, sessionId: session.sessionId, workspaceId, role, name: session.name }
-	};
+	return { actor: { userId: session.userId, sessionId: session.sessionId, workspaceId, name: session.name } };
 }
 
 export const handleWorkspaceSocket: RouteHandler = async (request, env) => {
@@ -97,8 +97,16 @@ export const handleWorkspaceSocket: RouteHandler = async (request, env) => {
 	headers.delete(DEV_ACTOR_HEADER);
 	headers.delete(DEV_ROLE_HEADER);
 	headers.delete(DEV_NAME_HEADER);
-	headers.set(ACTOR_HEADER, encodeActorHeader(auth.actor));
 	const version = headers.get(APP_VERSION_HEADER) ?? url.searchParams.get(APP_VERSION_PARAM);
 	if (version) headers.set(APP_VERSION_HEADER, version);
-	return env.WORKSPACE.getByName(workspaceId).fetch(new Request(request, { headers }));
+	const forward = (actor: typeof auth.actor) => {
+		headers.set(ACTOR_HEADER, encodeActorHeader(actor));
+		return env.WORKSPACE.getByName(workspaceId).fetch(new Request(request, { headers }));
+	};
+	const first = await forward(auth.actor);
+	// The object's mirror of the members has not seen this user (an invite accepted a moment ago): D1 is the source of truth.
+	if (first.status !== 403 || first.webSocket || auth.actor.role) return first;
+	const role = await resolveMembershipFromD1(env, auth.actor.userId, workspaceId);
+	if (!role) return first;
+	return forward({ ...auth.actor, role });
 };

@@ -79,15 +79,17 @@ export class LoadGovernor {
 }
 
 /** The fan-out of several value-only commits as one: rows in order, the last `seq`, flips and backlink targets merged. */
-export function mergeCommits<T extends { seq: number; rows: readonly unknown[]; hasChildrenFlips?: ReadonlyMap<string, boolean>; backlinkTargets?: readonly string[] }>(infos: readonly T[]): T {
+export function mergeCommits<T extends { seq: number; rows: readonly unknown[]; hasChildrenFlips?: ReadonlyMap<string, boolean>; backlinkTargets?: readonly string[]; actorIds?: readonly string[] }>(infos: readonly T[]): T {
 	const last = infos[infos.length - 1];
 	const flips = new Map<string, boolean>();
 	const targets = new Set<string>();
+	const actors = new Set<string>();
 	for (const info of infos) {
 		for (const [id, value] of info.hasChildrenFlips ?? []) flips.set(id, value);
 		for (const id of info.backlinkTargets ?? []) targets.add(id);
+		for (const id of info.actorIds ?? []) actors.add(id);
 	}
-	return { ...last, seq: last.seq, rows: infos.flatMap((i) => i.rows), hasChildrenFlips: flips, backlinkTargets: [...targets] };
+	return { ...last, seq: last.seq, rows: infos.flatMap((i) => i.rows), hasChildrenFlips: flips, backlinkTargets: [...targets], actorIds: [...actors] };
 }
 
 /** Change kinds whose commits may share a fan-out: plain value writes, no structure, no definitions, no access. */

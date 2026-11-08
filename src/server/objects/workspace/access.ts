@@ -91,6 +91,8 @@ interface Entry {
 	 */
 	bits: Bitmap | null;
 	dirty: 'full' | Set<number> | null;
+	/** Unique across entries and bumped by every recompute: what a cached window derived from this entry was derived from. */
+	rev: number;
 	/** Facts must be re-read before the next recompute (a teamspace membership or default level changed). */
 	staleFacts: boolean;
 	delta: Map<number, PageDelta>;
@@ -111,6 +113,8 @@ export interface VisibilityView {
 	readonly delta: ReadonlyMap<number, PageDelta>;
 	/** The visible pages as a bitmap (`has` for sets), or null when bitmaps are off. */
 	readonly bits: Bitmap | null;
+	/** Changes whenever the actor's levels do (a cached window of this actor is valid for one `rev`). */
+	readonly rev: number;
 }
 
 const EMPTY_DELTA: ReadonlyMap<number, PageDelta> = new Map();
@@ -120,7 +124,8 @@ const NOTHING: VisibilityView = {
 	level: () => 'read',
 	levelBefore: () => null,
 	delta: EMPTY_DELTA,
-	bits: null
+	bits: null,
+	rev: 0
 };
 
 export const actorKey = (a: { userId?: string; role?: string; shareToken?: string }): string =>
@@ -155,6 +160,8 @@ export class AccessService {
 	#epoch = 0;
 	readonly #facts = new Map<string, PolicyActor>();
 	#clock = 0;
+	/** Source of `Entry.rev`. */
+	#revs = 0;
 
 	constructor(host: AccessHost) {
 		this.#sql = host.sql;
@@ -310,7 +317,7 @@ export class AccessService {
 				const facts = this.facts(actor);
 				const levels = await this.#fresh(actor, facts);
 				if (epoch !== this.#epoch && attempt < 2) continue;
-				this.#entries.set(key, { key, actor, facts, levels, bits: bitsOf(levels), dirty: null, staleFacts: false, delta: new Map(), used: ++this.#clock });
+				this.#entries.set(key, { key, actor, facts, levels, bits: bitsOf(levels), dirty: null, rev: ++this.#revs, staleFacts: false, delta: new Map(), used: ++this.#clock });
 				this.#evict();
 				return;
 			}
@@ -350,6 +357,7 @@ export class AccessService {
 			}
 			entry.bits = bits;
 		}
+		entry.rev = ++this.#revs;
 		entry.used = ++this.#clock;
 	}
 
@@ -403,9 +411,10 @@ export class AccessService {
 		const resolved = this.resolve(actor);
 		const entry = resolved ? this.#entry(resolved) : undefined;
 		if (!entry) return NOTHING;
-		const { levels, delta, bits } = entry;
+		const { levels, delta, bits, rev } = entry;
 		return {
 			bits,
+			rev,
 			has: (num) => levels.has(num),
 			hadBefore: (num) => {
 				const d = delta.get(num);

@@ -80,6 +80,7 @@ import {
 	type SocketHandle
 } from './socket';
 import { RAW_STREAM, WorkspaceSocketApi } from './socket-api';
+import { SocketDirectory } from './socket-directory';
 import { socketRouter, type SocketContext } from './socket-router';
 import {
 	addTeamspaceMemberRecords,
@@ -193,6 +194,10 @@ const ROOM_BATCH = 16;
 
 /** Protocol frames start with a string `t`; oRPC's have a numeric one. */
 const PROTOCOL_FRAME = /^\s*\{\s*"t"\s*:\s*"/;
+/** Protocol frames that read no live unit: they run in the queue but do not make it send held fan-outs first. */
+const QUIET_FRAME = /^\s*\{\s*"t"\s*:\s*"(?:ping|presence|unsubscribe|notifications\.read)"/;
+
+
 
 const META_INITIALIZED = 'initialized';
 const META_WORKSPACE = 'workspace';
@@ -220,6 +225,8 @@ export class WorkspaceDO extends DurableObject<Env> {
 	/** Value-only commits whose fan-out waits to be merged with the next (overload only), and how many were merged since the wake. */
 	#pendingFanOut: CommitInfo[] = [];
 	#merged = 0;
+	/** `destroy()` ran: the storage is empty and the sockets are closing. */
+	#destroyed = false;
 	/** Tasks in the serial queue, the running one included. */
 	#queued = 0;
 	/** Commits (and their fan-out) run one at a time, so `seq` order is also delivery order. */
@@ -227,7 +234,8 @@ export class WorkspaceDO extends DurableObject<Env> {
 	#alarmChecked = false;
 	/** Lifts the commit-queue hold of a running backup (null when none is running). */
 	#backupRelease: (() => void) | null = null;
-	#socketCache: Map<string, SocketHandle<WorkspaceSocketActor>> | null = null;
+	/** Live sockets with their actors, read from the attachments once per wake (see `socket-directory.ts`). */
+	#directory: SocketDirectory<WorkspaceSocketActor> | null = null;
 
 	constructor(ctx: DurableObjectState, env: Env) {
 		super(ctx, env);
@@ -279,13 +287,13 @@ export class WorkspaceDO extends DurableObject<Env> {
 
 	// ───────────────────────── sockets ─────────────────────────
 
-	/** Live sockets by id, cached for the current turn (a fan-out looks up every socket). */
+	#sockets(): SocketDirectory<WorkspaceSocketActor> {
+		return (this.#directory ??= new SocketDirectory(this.#transport.sockets()));
+	}
+
+	/** A live socket by id (a fan-out looks up every socket: no attachment is read for it). */
 	#socket(socketId: string): SocketHandle<WorkspaceSocketActor> | null {
-		if (!this.#socketCache) {
-			this.#socketCache = new Map(this.#transport.sockets().map((s) => [s.socketId, s]));
-			queueMicrotask(() => (this.#socketCache = null));
-		}
-		return this.#socketCache.get(socketId) ?? null;
+		return this.#sockets().get(socketId);
 	}
 
 	/** Pushes a message on the socket's stream: a raw JSON frame, or an event of its oRPC `hello` iterator. */
@@ -308,8 +316,14 @@ export class WorkspaceDO extends DurableObject<Env> {
 		if (request.headers.get('Upgrade')?.toLowerCase() !== 'websocket') {
 			return new Response('Expected a WebSocket upgrade', { status: 426 });
 		}
-		const actor = decodeActorHeader<WorkspaceSocketActor>(request.headers.get(ACTOR_HEADER));
+		let actor = decodeActorHeader<WorkspaceSocketActor>(request.headers.get(ACTOR_HEADER));
 		if (!actor) return new Response('Missing actor', { status: 401 });
+		if (!actor.role) {
+			// The Worker leaves the role out: it is the member mirror's (a Durable Object call of its own less on every dial).
+			const role = this.#access.memberRole(actor.userId);
+			if (!role) return new Response('Not a member', { status: 403 });
+			actor = { ...actor, role };
+		}
 		const appVersion = request.headers.get(APP_VERSION_HEADER) ?? new URL(request.url).searchParams.get(APP_VERSION_PARAM);
 		if (checkVersions(this.env, appVersion) === 'reload') {
 			// Accept, then close with the "reload" code: a browser only sees a close code on an open socket.
@@ -321,7 +335,9 @@ export class WorkspaceDO extends DurableObject<Env> {
 		try {
 			// The actor's visibility set is built before the socket is served, so every handler can read it synchronously.
 			await this.#access.ensure(actor);
-			return this.#transport.accept(actor);
+			const accepted = this.#transport.acceptSocket(actor);
+			this.#sockets().add(accepted.handle);
+			return accepted.response;
 		} catch (error) {
 			if (error instanceof AttachmentTooLargeError) return new Response(error.message, { status: 413 });
 			throw error;
@@ -339,7 +355,12 @@ export class WorkspaceDO extends DurableObject<Env> {
 		if (sender) await this.#access.ensure(sender.actor);
 		// In the commits' queue: a view is evaluated through the engine (asynchronously), and a socket message
 		// must never observe a commit that is half fanned out.
-		if (typeof message === 'string' && PROTOCOL_FRAME.test(message)) return this.#serializeFlushed(() => this.#protocolFrame(ws, message));
+		// A frame that reads no live unit (a ping, presence, a hidden flag, an unsubscribe) does not need the held fan-outs sent first,
+		// and 1,000 tabs pinging would otherwise cut every hold short.
+		if (typeof message === 'string' && PROTOCOL_FRAME.test(message)) {
+			const run = () => this.#protocolFrame(ws, message);
+			return QUIET_FRAME.test(message) ? this.#serialize(run) : this.#serializeFlushed(run);
+		}
 		return this.#serializeFlushed(() => this.#transport.message(ws, message));
 	}
 
@@ -379,11 +400,14 @@ export class WorkspaceDO extends DurableObject<Env> {
 	}
 
 	override webSocketClose(ws: WebSocket, code: number, reason: string): void {
+		// After `destroy()` the registry tables are gone with the rest of the storage: nothing is left to forget.
+		if (this.#destroyed) return;
 		this.#forgetSocket(ws);
 		this.#transport.close(ws, code, reason);
 	}
 
 	override webSocketError(ws: WebSocket): void {
+		if (this.#destroyed) return;
 		this.#forgetSocket(ws);
 		this.#transport.close(ws, 1011, 'socket error');
 	}
@@ -391,6 +415,7 @@ export class WorkspaceDO extends DurableObject<Env> {
 	#forgetSocket(ws: WebSocket): void {
 		const socket = this.#transport.handle(ws);
 		if (!socket) return;
+		this.#directory?.remove(socket.socketId);
 		this.#hidden.delete(socket.socketId);
 		this.#stale.delete(socket.socketId);
 		this.#known.delete(socket.socketId);
@@ -503,11 +528,11 @@ export class WorkspaceDO extends DurableObject<Env> {
 				}
 				const access = this.#access.noteCommit(commit.rows);
 				try {
-					const sockets = this.#transport.sockets();
-					const { cold } = await this.#access.settle(sockets.map((s) => s.actor));
+					const directory = this.#sockets();
+					const { cold } = await this.#access.settle(directory.actors());
 					if (access.affecting && cold.size > 0) {
 						// A socket whose visibility set was lost (the object slept) cannot be diffed: it reconnects.
-						for (const socket of sockets) {
+						for (const socket of directory.all()) {
 							if (!cold.has(actorKey(socket.actor))) continue;
 							this.#hub.dropSocket(socket.socketId);
 							socket.ws.close(CLOSE.TRY_AGAIN, 'resync');
@@ -520,7 +545,8 @@ export class WorkspaceDO extends DurableObject<Env> {
 					seq: commit.seq,
 					rows: commit.rows,
 					hasChildrenFlips: commit.hasChildrenFlips,
-					backlinkTargets: options.backlinkTargets?.()
+					backlinkTargets: options.backlinkTargets?.(),
+					actorIds: [actorId]
 				};
 				// Overloaded, and more work waiting behind this commit that only wrote property values: its fan-out is merged
 				// with the next one (a socket gets one diff for several commits, tagged with the last `seq`). The writes are
@@ -548,7 +574,7 @@ export class WorkspaceDO extends DurableObject<Env> {
 				// Edit to diff: from the start of the commit to the last diff sent (docs/PLAN.md "Operating targets").
 				const elapsed = since(startedAt);
 				metric(this.env, 'mutation', { labels: ['ok'], value: elapsed, extra: [commit.rows.length] });
-				metric(this.env, 'fanout', { value: this.#hub.streamSockets().length, extra: [elapsed, commit.rows.length] });
+				metric(this.env, 'fanout', { value: this.#hub.streamCount(), extra: [elapsed, commit.rows.length] });
 				if (this.#governor.record(elapsed, this.#queued - 1) && this.#governor.shouldAlert()) {
 					const workspaceId = this.ctx.id.name ?? '';
 					console.error(`[workspace] ${workspaceId} is overloaded: commit and fan-out average ${Math.round(this.#governor.average)} ms, ${this.#queued - 1} tasks waiting. Hidden tabs are skipped and value-only commits share fan-outs until it clears.`);
@@ -820,7 +846,7 @@ export class WorkspaceDO extends DurableObject<Env> {
 				socket.ws.serializeAttachment({ socketId: socket.socketId, actor: { ...socket.actor, name } });
 			}
 		}
-		this.#socketCache = null;
+		this.#directory = null;
 	}
 
 	/** Puts a user in the default teamspace the workspace was created with (`init`), when it is still live. */
@@ -1809,6 +1835,7 @@ export class WorkspaceDO extends DurableObject<Env> {
 	 * alarm and wipes the storage. The Purge workflow has already taken the rooms, the R2 prefix and the vectors.
 	 */
 	async destroy(): Promise<void> {
+		this.#destroyed = true;
 		for (const socket of this.#transport.sockets()) {
 			try {
 				socket.ws.close(CLOSE.WORKSPACE_GONE, 'workspace deleted');
@@ -1825,6 +1852,11 @@ export class WorkspaceDO extends DurableObject<Env> {
 	/** Operators and tests: counts the object as overloaded for `ms` milliseconds (0 clears it). */
 	async forceOverload(ms: number): Promise<void> {
 		this.#governor.force(ms);
+	}
+
+	/** Operators and tests: how many plain heads a commit sends at once and how long the rest wait (`HeadCoalescing`). */
+	async setHeadCoalescing(options: { min?: number; ms?: number }): Promise<void> {
+		this.#hub.setHeadCoalescing(options);
 	}
 
 	/** Tests: occupies the commits' queue for `ms`, so what arrives meanwhile queues behind it (the busy object the governor reacts to). */
@@ -1979,7 +2011,7 @@ export class WorkspaceDO extends DurableObject<Env> {
 				// already closed
 			}
 		}
-		this.#socketCache = null;
+		this.#directory = null;
 	}
 
 	/**

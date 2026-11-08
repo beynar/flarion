@@ -86,6 +86,25 @@ describe('mutate', () => {
 	});
 });
 
+describe('mutate resolves the caller inside the object', () => {
+	test('a member the object mirrors needs no D1 or object call before the write; one it has not mirrored yet is found in D1', async () => {
+		const { ws, owner } = await setup();
+		// Mirrored (`ann`, in setup): the role comes from the object's own mirror, in the same call as the write.
+		const viaMirror = await clientFor(ws.id, 'ann').mutate({ mid: 'm-1', appVersion: '0.0.1', ops: [{ op: 'create', id: 'by-ann', parentId: null, rank: r1, teamspaceId: ws.generalId, values: { title: 'Ann' } }] });
+		expect(viaMirror.seq).toBeGreaterThan(0);
+		// An invite accepted a moment ago: D1 has the membership, the object's mirror does not yet (the outbox is late).
+		members.set(`${ws.id}:late`, 'admin');
+		const late = await clientFor(ws.id, 'late').mutate({ mid: 'm-2', appVersion: '0.0.1', ops: [{ op: 'create', id: 'by-late', parentId: null, rank: r2, teamspaceId: ws.generalId, values: { title: 'Late' } }] });
+		expect(late.seq).toBeGreaterThan(viaMirror.seq);
+		expect((await owner.page.get({ id: 'by-late' })).createdBy).toBe('late');
+		// Neither the mirror nor D1 knows this user: refused, whatever role the Worker did not look up.
+		const stranger = clientFor(ws.id, 'stranger-2');
+		const refused = await failure(stranger.mutate({ mid: 'm-3', appVersion: '0.0.1', ops: [{ op: 'create', id: 'by-stranger', parentId: null, rank: r1, teamspaceId: ws.generalId }] }));
+		expect(refused.code).toBe('FORBIDDEN');
+		expect((await failure(owner.page.get({ id: 'by-stranger' }))).code).toBe('NOT_FOUND');
+	});
+});
+
 describe('page', () => {
 	test('create, get, move, trash, restore and the trash list', async () => {
 		const { ws, owner, ann } = await setup();

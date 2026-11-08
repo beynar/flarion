@@ -49,6 +49,14 @@ describe('refusals answer 404 and mint nothing', () => {
 		expect((await call(e, 'users', { runId: runId(), count: 1 }, KEY, 'localhost')).status).toBe(404);
 		expect((await call(e, 'cleanup', { runId: runId() }, KEY, 'localhost')).status).toBe(404);
 		expect((await call(e, 'workspace', { ownerId: 'x' }, KEY, 'localhost')).status).toBe(404);
+		// The route that opens sockets from a Worker is behind the same door.
+		expect((await call(e, 'inside', { workspaceId: 'x', tabs: 1 }, KEY, 'localhost')).status).toBe(404);
+	});
+
+	test('the in-Worker probe only speaks to a workspace of synthetic users', async () => {
+		const stranger = await call(staging, 'inside', { workspaceId: 'a-real-workspace', tabs: 1, subs: [], writes: [], actors: [], writer: {} });
+		expect(stranger.status).toBe(400);
+		expect(await stranger.json()).toMatchObject({ message: 'not a load-test workspace' });
 	});
 
 	test('staging without the secret set, or with a short one', async () => {
@@ -136,6 +144,18 @@ describe('accepted in staging', () => {
 		expect(await gone.json()).toMatchObject({ workspaces: 1, users: 4 });
 		const left = await base.DB.prepare(`SELECT COUNT(*) AS n FROM "user" WHERE "email" LIKE ?1`).bind(`load-${id}-%`).first<{ n: number }>();
 		expect(left?.n).toBe(0);
-		expect((await rpc(owner.cookie, 'me')).status).toBe(401);
+		// The session rows are gone: the token alone is refused. (The minted cookie also carries better-auth's `session_data` cache,
+		// which keeps answering for its five minutes, as it does for a real tab: see `withCookieCache`.)
+		expect((await rpc(owner.cookie.split('; ')[0], 'me')).status).toBe(401);
+	});
+
+	test('the minted cookie carries the session cache a signed-in tab has, and both parts are signed', async () => {
+		const id = runId();
+		const minted = await call(staging, 'users', { runId: id, count: 1 });
+		const [user] = ((await minted.json()) as { users: { cookie: string }[] }).users;
+		const names = user.cookie.split('; ').map((c) => c.split('=')[0]);
+		expect(names.some((n) => /session_token$/.test(n))).toBe(true);
+		expect(names.some((n) => /session_data$/.test(n))).toBe(true);
+		await call(staging, 'cleanup', { runId: id });
 	});
 });

@@ -13,6 +13,7 @@
  * the files origin, which carries no cookie, so its downloads are authorised by short-lived signed URLs
  * (src/server/files/sign.ts). Uploads are refused there, and so is everything but `/files/*`.
  */
+import { filesHostIsSeparate, isFilesHost } from './files-host';
 import { MAX_PARTS, MULTIPART_PART_BYTES, fileKey } from '../files/constants';
 import type { Actor } from '../auth/session';
 import type { WorkspaceDO } from '../objects/workspace/workspace-do';
@@ -28,20 +29,7 @@ const FILE_PATH = /^\/files\/([A-Za-z0-9_.:-]{1,64})(\/parts(?:\/(\d{1,5}))?)?\/
 const reply = (status: number, message: string, headers: Record<string, string> = {}) =>
 	Response.json({ message }, { status, headers: { 'cache-control': 'no-store', 'x-content-type-options': 'nosniff', ...headers } });
 
-/** The host user files are served from (`FILES_ORIGIN`), when it is not the app's own. */
-export function filesHostIsSeparate(env: Pick<Env, 'APP_ORIGIN' | 'FILES_ORIGIN'>): boolean {
-	try {
-		const files = new URL(env.FILES_ORIGIN).host;
-		return String(env.APP_ORIGIN).split(',').every((origin) => new URL(origin.trim()).host !== files);
-	} catch {
-		return false;
-	}
-}
-
-/** True when `request` reached the files host (and that host is not the app's). */
-export function isFilesHost(request: Request, env: Pick<Env, 'APP_ORIGIN' | 'FILES_ORIGIN'>): boolean {
-	return filesHostIsSeparate(env) && new URL(request.url).host === new URL(env.FILES_ORIGIN).host;
-}
+export { filesHostIsSeparate, isFilesHost };
 
 const preflight = (env: Env, request: Request) => {
 	const origin = request.headers.get('origin');

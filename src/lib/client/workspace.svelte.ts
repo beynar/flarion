@@ -1316,7 +1316,7 @@ export class WorkspaceStore {
 		this.#touch(opPages(ops));
 		let result: { seq: number };
 		try {
-			result = await (send ?? ((m) => this.#rpc.mutate({ mid: m, ops, appVersion: this.#o.appVersion ?? APP_VERSION })))(mid);
+			result = await (send ?? ((m) => this.#sendWithRetry(() => this.#rpc.mutate({ mid: m, ops, appVersion: this.#o.appVersion ?? APP_VERSION }))))(mid);
 		} catch (error) {
 			this.#rollback(layer);
 			this.#notify(failure(error));
@@ -1341,6 +1341,21 @@ export class WorkspaceStore {
 			}
 		}
 		return result;
+	}
+
+	/**
+	 * A workspace that is busy answers 503 `SERVICE_UNAVAILABLE` (its object's queue is long): the same mutation, same id, goes out
+	 * again after a pause (the object returns the first answer to a retry it already applied), up to four more times. Anything else fails at once.
+	 */
+	async #sendWithRetry(call: () => Promise<{ seq: number }>): Promise<{ seq: number }> {
+		for (let attempt = 0; ; attempt++) {
+			try {
+				return await call();
+			} catch (error) {
+				if (attempt >= 4 || (error as { code?: unknown } | null)?.code !== 'SERVICE_UNAVAILABLE') throw error;
+				await new Promise<void>((resolve) => this.#clock.setTimeout(resolve, 250 * 2 ** attempt + Math.random() * 100));
+			}
+		}
 	}
 
 	#rollback(layer: Layer): void {

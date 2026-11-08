@@ -89,6 +89,8 @@ export interface CommitInfo {
 	hasChildrenFlips?: ReadonlyMap<string, boolean>;
 	/** Pages whose backlinks changed without a page row changing (index ingestion). */
 	backlinkTargets?: readonly string[];
+	/** Who wrote it (the user ids of the commits this stands for): their tabs get their `head` at once, whatever the load. */
+	actorIds?: readonly string[];
 }
 
 export interface LiveHost {
@@ -112,6 +114,27 @@ export interface LiveHost {
 	paused?(socketId: string): boolean;
 	skipped?(socketId: string): void;
 }
+
+/** What two subscriptions must share for one derived diff to serve both (without the actor): built once per cached row. */
+const shapeOf = (row: SubRow): string =>
+	(row.shape ??= `${row.kind}|${row.unitKeys.join(',')}|${row.lim}|${JSON.stringify(row.glim)}|${row.sub.kind === 'view' ? JSON.stringify(row.sub.props ?? null) : ''}`);
+
+/** Sockets with the same actor and the same subscriptions (ids and shapes): they get the same frames, derived and encoded once. */
+interface Audience {
+	/** '' for the throw-away audience of a socket served on its own. */
+	key: string;
+	actor: Actor;
+	sockets: Set<string>;
+	/** The subscriptions, in registration order (rows of the first socket; the sockets of an audience hold equal ones). */
+	subs: SubRow[];
+}
+
+/** Tabs that would get a plain `head` at least this many, wait up to `ms` for it (a tab of the committing person gets its head at once). */
+export interface HeadCoalescing {
+	min: number;
+	ms: number;
+}
+export const DEFAULT_HEAD_COALESCING: HeadCoalescing = { min: 64, ms: 250 };
 
 const fnv = (text: string): string => {
 	let h = 0x811c9dc5;
@@ -344,15 +367,6 @@ export const resetFanOutPerf = () => {
 	for (const key of Object.keys(fanOutPerf) as (keyof typeof fanOutPerf)[]) fanOutPerf[key] = 0;
 };
 
-/** A number per derived ops array, to tell whether two sockets were given the very same diff. */
-const opsIds = new WeakMap<object, number>();
-let opsSeq = 0;
-const opsKey = (ops: object): number => {
-	let id = opsIds.get(ops);
-	if (id === undefined) opsIds.set(ops, (id = ++opsSeq));
-	return id;
-};
-
 const countEvaluations = { value: 0 };
 /** Test hook: how many unit evaluations ran in this isolate. */
 export const unitEvaluations = () => countEvaluations.value;
@@ -388,6 +402,19 @@ export class LiveHub {
 	readonly #subs = new Map<string, Map<string, SubRow>>();
 	/** Socket id -> its stream's request id (null: no stream), the other half of a send. */
 	readonly #streams = new Map<string, string | null>();
+	/** The sockets that have a stream, in the order they said hello (the SQL table is the truth; this saves reading it per commit). */
+	#streamIds: Set<string> | null = null;
+	readonly #audienceOf = new Map<string, Audience>();
+	readonly #audiences = new Map<string, Audience>();
+	/** Window index (page id -> position) per view state, visibility revision and window size: see `#windowIndex`. */
+	#windowCache = new WeakMap<ViewState, Map<string, Map<string, number>>>();
+	/** Snapshots built since the last commit (see `snapshot`). */
+	#snapshots: { seq: number; messages: Map<string, ServerMessage> } = { seq: -1, messages: new Map() };
+	/** The `seq` of the last commit the loop finished fanning out, and the last `seq` each socket was sent. */
+	#fannedSeq: number | null = null;
+	readonly #sentSeq = new Map<string, number>();
+	#headTimer: ReturnType<typeof setTimeout> | null = null;
+	#headCoalesce: HeadCoalescing = DEFAULT_HEAD_COALESCING;
 
 	constructor(host: LiveHost) {
 		this.#host = host;
@@ -485,6 +512,9 @@ export class LiveHub {
 
 	bindStream(socketId: string, requestId: string, clientId: string, now: number): void {
 		this.#streams.set(socketId, requestId);
+		// `INSERT OR REPLACE` puts a socket that says hello again at the end, and so does this.
+		this.#streamIds?.delete(socketId);
+		this.#streamIds?.add(socketId);
 		this.#run(
 			'INSERT OR REPLACE INTO socket_stream (socket_id, request_id, client_id, opened_at) VALUES (?, ?, ?, ?)',
 			socketId,
@@ -503,12 +533,119 @@ export class LiveHub {
 	}
 
 	streamSockets(): string[] {
-		return this.#all<{ socket_id: string }>('SELECT socket_id FROM socket_stream').map((r) => r.socket_id);
+		return [...this.#streamSet()];
+	}
+
+	/** How many sockets have a stream (no list is built). */
+	streamCount(): number {
+		return this.#streamSet().size;
+	}
+
+	#streamSet(): Set<string> {
+		return (this.#streamIds ??= new Set(this.#all<{ socket_id: string }>('SELECT socket_id FROM socket_stream ORDER BY rowid').map((r) => r.socket_id)));
+	}
+
+	// ───────────────────────── audiences ─────────────────────────
+
+	/** A socket's subscriptions changed (or it is gone): it joins an audience again the next time one is needed. */
+	#detach(socketId: string): void {
+		const audience = this.#audienceOf.get(socketId);
+		if (!audience) return;
+		this.#audienceOf.delete(socketId);
+		audience.sockets.delete(socketId);
+		if (audience.sockets.size === 0 && this.#audiences.get(audience.key) === audience) this.#audiences.delete(audience.key);
+	}
+
+	#attach(socketId: string, actor: Actor): Audience {
+		const held = this.#audienceOf.get(socketId);
+		if (held) return held;
+		const subs: SubRow[] = [];
+		for (const r of this.#all<{ sub_id: string }>('SELECT sub_id FROM socket_sub WHERE socket_id = ? ORDER BY rowid', socketId)) {
+			const row = this.#loadSub(socketId, r.sub_id);
+			if (row) subs.push(row);
+		}
+		const key = `${actor.userId}|${actor.role}\u0001${subs.map((r) => `${r.subId}\u0002${shapeOf(r)}`).join('\u0003')}`;
+		let audience = this.#audiences.get(key);
+		if (!audience) this.#audiences.set(key, (audience = { key, actor, sockets: new Set(), subs }));
+		audience.sockets.add(socketId);
+		this.#audienceOf.set(socketId, audience);
+		return audience;
+	}
+
+	/** The audiences of the sockets that are served (a socket whose actor is unknown belongs to none). */
+	#audiencesOf(streams: readonly string[], paused: (socketId: string) => boolean): Audience[] {
+		const out = new Set<Audience>();
+		for (const socketId of streams) {
+			if (paused(socketId)) continue;
+			const held = this.#audienceOf.get(socketId);
+			if (held) {
+				out.add(held);
+				continue;
+			}
+			const actor = this.#host.actorOf(socketId);
+			if (actor) out.add(this.#attach(socketId, actor));
+		}
+		return [...out];
+	}
+
+	/**
+	 * Page id -> position in the window of a view subscription (every group's window, first occurrence), for an actor whose
+	 * visibility is at `view.rev`. The window of an unchanged unit does not change between commits, so it is derived when
+	 * the unit, the visibility or the window size changes, not on every commit that merely edits a cell of it.
+	 */
+	#windowIndex(state: ViewState, row: SubRow, view: VisibilityView, registry: EavRegistry): Map<string, number> {
+		let byKey = this.#windowCache.get(state);
+		if (!byKey) this.#windowCache.set(state, (byKey = new Map()));
+		const key = `${view.rev}|${row.lim}|${JSON.stringify(row.glim)}`;
+		let index = byKey.get(key);
+		if (!index) {
+			if (byKey.size > 64) byKey.clear();
+			index = new Map();
+			let at = 0;
+			for (const id of this.#windowIds(this.#windows(state, row, view, registry))) index.set(id, at++);
+			byKey.set(key, index);
+		}
+		return index;
+	}
+
+	/** Tests and operators: how long and how wide heads are batched. */
+	setHeadCoalescing(options: Partial<HeadCoalescing>): void {
+		this.#headCoalesce = { ...this.#headCoalesce, ...options };
+	}
+
+	#scheduleHeads(): void {
+		if (this.#headTimer !== null) return;
+		this.#headTimer = setTimeout(() => {
+			this.#headTimer = null;
+			this.flushHeads();
+		}, this.#headCoalesce.ms);
+	}
+
+	/**
+	 * Sends the head of the last finished fan-out to every socket that has not been sent a frame as recent. Everything up to
+	 * that `seq` has been delivered to the socket (or did not concern it), so the head is true for it.
+	 */
+	flushHeads(): void {
+		const seq = this.#fannedSeq;
+		if (seq === null) return;
+		const head: ServerMessage = { t: 'head', seq };
+		for (const socketId of this.streamSockets()) {
+			if ((this.#sentSeq.get(socketId) ?? -1) >= seq) continue;
+			if (this.#host.paused?.(socketId) === true) continue;
+			if (!this.#host.send(socketId, head)) {
+				this.dropSocket(socketId);
+				continue;
+			}
+			this.#sentSeq.set(socketId, seq);
+		}
 	}
 
 	/** Forgets a socket: its stream, its subscriptions, and units nobody watches any more. */
 	dropSocket(socketId: string): void {
 		this.#streams.delete(socketId);
+		this.#streamIds?.delete(socketId);
+		this.#sentSeq.delete(socketId);
+		this.#detach(socketId);
 		this.#subs.delete(socketId);
 		this.#run('DELETE FROM socket_stream WHERE socket_id = ?', socketId);
 		this.#run('DELETE FROM socket_sub WHERE socket_id = ?', socketId);
@@ -532,6 +669,10 @@ export class LiveHub {
 	clearRegistry(): void {
 		for (const table of ['socket_stream', 'socket_sub', 'sub_link', 'sub_unit', 'sub_prop']) this.#run(`DELETE FROM ${table}`);
 		this.#streams.clear();
+		this.#streamIds = new Set();
+		this.#audienceOf.clear();
+		this.#audiences.clear();
+		this.#sentSeq.clear();
 		this.#subs.clear();
 		for (const state of this.#states.values()) state.dispose();
 		this.#states.clear();
@@ -678,6 +819,7 @@ export class LiveHub {
 			await this.#ensureUnit(unit);
 			this.#run('INSERT INTO sub_link (socket_id, sub_id, ord, unit_key) VALUES (?, ?, ?, ?)', socketId, subId, ord, unit.key);
 		}
+		this.#detach(socketId);
 		this.#subs.get(socketId)?.delete(subId);
 	}
 
@@ -687,6 +829,7 @@ export class LiveHub {
 	}
 
 	#unregister(socketId: string, subId: string): void {
+		this.#detach(socketId);
 		this.#subs.get(socketId)?.delete(subId);
 		this.#run('DELETE FROM socket_sub WHERE socket_id = ? AND sub_id = ?', socketId, subId);
 		this.#run('DELETE FROM sub_link WHERE socket_id = ? AND sub_id = ?', socketId, subId);
@@ -889,6 +1032,19 @@ export class LiveHub {
 		const row = this.#loadSub(socketId, subId);
 		if (!row) return null;
 		const view = this.#host.view(actor);
+		// Everything a snapshot holds is a function of the log (`seq`), the actor's visibility (`view.rev`) and the shape of the
+		// subscription, so the tabs of one person that say hello between two commits (a reconnect storm: every tab of the workspace
+		// at once) share one: its rows are read and its window cut once.
+		if (this.#snapshots.seq !== seq || this.#snapshots.messages.size > 2000) this.#snapshots = { seq, messages: new Map() };
+		const cacheKey = `${view.rev}|${shapeOf(row)}`;
+		const held = this.#snapshots.messages.get(cacheKey);
+		if (held) return { ...held, id: subId } as ServerMessage;
+		const built = await this.#buildSnapshot(row, subId, view, seq);
+		if (built && this.#snapshots.seq === seq) this.#snapshots.messages.set(cacheKey, built);
+		return built;
+	}
+
+	async #buildSnapshot(row: SubRow, subId: string, view: VisibilityView, seq: number): Promise<ServerMessage | null> {
 		if (row.kind === 'view') {
 			const state = this.#viewState(row.unitKeys[0]);
 			const registry = await loadEavRegistry(this.#host.db);
@@ -951,6 +1107,7 @@ export class LiveHub {
 			}
 			const sub = { ...row.sub, ...(group === undefined ? { limit } : {}) } as Subscription;
 			this.#run('UPDATE socket_sub SET spec = ?, lim = ?, glim = ? WHERE socket_id = ? AND sub_id = ?', JSON.stringify(sub), next.lim, JSON.stringify(next.glim), socketId, subId);
+			this.#detach(socketId);
 			this.#subs.get(socketId)?.delete(subId);
 			const oldW = this.#windows(state, row, view, registry);
 			const newW = this.#windows(state, next, view, registry);
@@ -965,6 +1122,7 @@ export class LiveHub {
 		}
 		const sub = { ...row.sub, limit } as Subscription;
 		this.#run('UPDATE socket_sub SET spec = ?, lim = ? WHERE socket_id = ? AND sub_id = ?', JSON.stringify(sub), limit, socketId, subId);
+		this.#detach(socketId);
 		this.#subs.get(socketId)?.delete(subId);
 		const all = this.#visible(this.#concat(row.unitKeys), (n) => view.has(n));
 		const oldW = row.lim === null ? all : all.slice(0, row.lim);
@@ -996,6 +1154,8 @@ export class LiveHub {
 		if (touch.definition) {
 			this.#resolved.clear();
 			this.#reader.invalidate();
+			// Group order and shown groups read the registry: no cached window outlives a definition change.
+			this.#windowCache = new WeakMap();
 		}
 		if (touch.subtreeRoots.length > 0 || touch.teamspaceRoots.length > 0) {
 			const sub = this.#reader.subtree([...touch.subtreeRoots, ...touch.teamspaceRoots]);
@@ -1030,22 +1190,27 @@ export class LiveHub {
 		const units = this.#all<{ unit_key: string; kind: UnitKind; spec: string; flags: number }>('SELECT unit_key, kind, spec, flags FROM sub_unit');
 		const streams = this.streamSockets();
 		// Hidden tabs of an overloaded object are not served (the runbook): no derivation, no frame.
-		const paused = new Set(streams.filter((id) => this.#host.paused?.(id) === true));
-		const streaming = new Set(streams.filter((id) => !paused.has(id)));
-		const diffs = new Map<string, { id: string; ops: DiffOp[] }[]>();
-		const resets = new Map<string, string[]>();
+		let paused: Set<string> | null = null;
+		if (this.#host.paused) for (const id of streams) if (this.#host.paused(id) === true) (paused ??= new Set()).add(id);
+		const isPaused = (id: string) => paused !== null && paused.has(id);
+		// Sockets with the same actor and the same subscriptions share one derivation and one encoded frame.
+		let audiences = this.#audiencesOf(streams, isPaused);
+		const views = new Map<Audience, VisibilityView>();
+		const viewOf = (audience: Audience): VisibilityView => {
+			let v = views.get(audience);
+			if (!v) views.set(audience, (v = this.#host.view(audience.actor)));
+			return v;
+		};
+		// Actors whose visibility changed in this commit: every window of theirs is re-derived.
+		let anyHit = false;
+		for (const audience of audiences) if (viewOf(audience).delta.size > 0) anyHit = true;
 
-		// Sockets whose actor's visibility changed in this commit: every window of theirs is re-derived.
-		const visibilityHit: { socketId: string; subId: string }[] = [];
-		for (const socketId of streams) {
-			if (paused.has(socketId)) continue;
-			const actor = this.#host.actorOf(socketId);
-			if (actor && this.#host.view(actor).delta.size > 0) {
-				for (const entry of this.subscriptions(socketId)) visibilityHit.push({ socketId, subId: entry.id });
-			}
-		}
+		const results = new Map<Audience, { subs: { id: string; ops: DiffOp[] }[]; resets: string[] }>();
+		/** Sockets whose registrations changed hands in this commit: served on their own, with a fresh snapshot where they did. */
+		const special = new Map<string, Audience>();
+		const resetsOf = new Map<string, string[]>();
 
-		if ((units.length > 0 && streams.length > 0) || visibilityHit.length > 0) {
+		if ((units.length > 0 && streams.length > 0) || anyHit) {
 			const registry = await loadEavRegistry(this.#host.db);
 			// 1. Re-evaluate the units the commit can touch and keep the ones whose ids changed.
 			const changed = new Map<string, { old: UnitValue; next: UnitValue }>();
@@ -1075,11 +1240,19 @@ export class LiveHub {
 					if (!row || !actor) continue;
 					await this.register(link.socketId, link.subId, row.sub, actor);
 					rescoped.add(`${link.socketId}\u0000${link.subId}`);
-					const list = resets.get(link.socketId) ?? [];
+					const list = resetsOf.get(link.socketId) ?? [];
 					list.push(link.subId);
-					resets.set(link.socketId, list);
+					resetsOf.set(link.socketId, list);
 				}
 				this.#gcUnits();
+				// Registrations moved: the audiences are formed again, and the tabs that moved are served one by one.
+				audiences = this.#audiencesOf(streams, isPaused);
+				for (const socketId of resetsOf.keys()) {
+					const actor = this.#host.actorOf(socketId);
+					const own = actor ? this.#audienceOf.get(socketId) : undefined;
+					if (!actor || !own || isPaused(socketId)) continue;
+					special.set(socketId, { key: '', actor, sockets: new Set([socketId]), subs: own.subs.filter((r) => !rescoped.has(`${socketId}\u0000${r.subId}`)) });
+				}
 			}
 
 			// 2. Units holding a page whose values or fields changed, for `update` ops.
@@ -1089,51 +1262,44 @@ export class LiveHub {
 			// A definition change (options edited...) can reorder or drop groups without moving any page.
 			if (touch.definition) for (const u of units) if (u.kind === 'view') affected.add(u.unit_key);
 
-			const subs = this.#subsOfUnits([...affected]).filter((l) => !paused.has(l.socketId));
-			const seen = new Set(subs.map((l) => `${l.socketId}\u0000${l.subId}`));
-			for (const hit of visibilityHit) if (!seen.has(`${hit.socketId}\u0000${hit.subId}`)) subs.push(hit);
-
-			if (subs.length > 0) {
-				const d0 = performance.now();
-				fanOutPerf.subsDerived += subs.length;
-				const cache = await CommitCache.create(this.#reader, updated);
-				const ids = new Map<string, string[]>();
-				const currentOf = (key: string) => {
-					let v = ids.get(key);
-					if (!v) ids.set(key, (v = this.#unitIds(key)));
-					return v;
-				};
-				// The diff of a subscription is a function of its unit(s), window sizes, shown properties and the actor's
-				// visibility: tabs of one person (and subscriptions of the same shape) share one derivation per commit.
-				const derived = new Map<string, DiffOp[]>();
-				for (const link of subs) {
-					const row = this.#loadSub(link.socketId, link.subId);
-					const actor = this.#host.actorOf(link.socketId);
-					if (!row || !actor || !streaming.has(link.socketId) || rescoped.has(`${link.socketId}\u0000${link.subId}`)) continue;
-					const shape = `${(row.shape ??= `${row.kind}|${row.unitKeys.join(',')}|${row.lim}|${JSON.stringify(row.glim)}|${row.sub.kind === 'view' ? JSON.stringify(row.sub.props ?? null) : ''}`)}|${actor.userId}|${actor.role}`;
-					const shared = derived.get(shape);
-					if (shared) {
-						fanOutPerf.derivationsShared++;
-						if (shared.length) {
-							const list = diffs.get(link.socketId) ?? [];
-							list.push({ id: link.subId, ops: shared });
-							diffs.set(link.socketId, list);
+			const d0 = performance.now();
+			const cache = await CommitCache.create(this.#reader, updated);
+			const ids = new Map<string, string[]>();
+			const currentOf = (key: string) => {
+				let v = ids.get(key);
+				if (!v) ids.set(key, (v = this.#unitIds(key)));
+				return v;
+			};
+			// The diff of a subscription is a function of its unit(s), window sizes, shown properties and the actor's
+			// visibility: tabs of one person (and subscriptions of the same shape) share one derivation per commit.
+			const derived = new Map<string, DiffOp[]>();
+			const derive = async (row: SubRow, actor: Actor, view: VisibilityView): Promise<DiffOp[] | 'reset'> => {
+				const shape = `${shapeOf(row)}|${actor.userId}|${actor.role}`;
+				fanOutPerf.subsDerived++;
+				const shared = derived.get(shape);
+				if (shared) {
+					fanOutPerf.derivationsShared++;
+					return shared;
+				}
+				let ops: DiffOp[];
+				if (row.kind === 'view') {
+					const key = row.unitKeys[0];
+					const next = this.#viewState(key);
+					const old = (changed.get(key)?.old as ViewState | undefined) ?? next;
+					// Ungrouped to grouped (or back): the windows have another shape, a fresh snapshot replaces them.
+					if (old.grouped !== next.grouped) return 'reset';
+					if (old === next && view.delta.size === 0 && !touch.definition) {
+						// Nothing moved in or out of the window: only the cells of the edited pages it holds change. The window itself
+						// is derived once per (unit state, visibility, size) and kept, not once per commit.
+						const index = this.#windowIndex(next, row, view, registry);
+						const hits: [number, string][] = [];
+						for (const id of updated) {
+							const at = index.get(id);
+							if (at !== undefined) hits.push([at, id]);
 						}
-						continue;
-					}
-					const view = this.#host.view(actor);
-					let ops: DiffOp[];
-					if (row.kind === 'view') {
-						const key = row.unitKeys[0];
-						const next = this.#viewState(key);
-						const old = (changed.get(key)?.old as ViewState | undefined) ?? next;
-						if (old.grouped !== next.grouped) {
-							// Ungrouped to grouped (or back): the windows have another shape, a fresh snapshot replaces them.
-							const list = resets.get(link.socketId) ?? [];
-							list.push(link.subId);
-							resets.set(link.socketId, list);
-							continue;
-						}
+						hits.sort((a, b) => a[0] - b[0]);
+						ops = hits.length ? cache.updatesFor(row.sub, row.kind, hits.map((h) => h[1]), touch) : [];
+					} else {
 						const newW = this.#windows(next, row, view, registry);
 						// A unit that did not change, for an actor whose visibility did not change, has the window it had.
 						const oldW = old === next && view.delta.size === 0 ? newW : this.#windows(old, row, view, registry, 'before');
@@ -1143,66 +1309,115 @@ export class LiveHub {
 						ops.push(...cache.updatesFor(row.sub, row.kind, inBoth, touch));
 						ops.push(...this.#accessUpdates(inBoth, view));
 						ops.push(...this.#viewCounts(next.grouped, oldW, newW));
-					} else {
-						const oldMap = new Map<string, UnitValue>();
-						for (const key of row.unitKeys) oldMap.set(key, changed.get(key)?.old ?? currentOf(key));
-						// ANDed with the actor's visibility: before the commit for the old window, after it for the new.
-						const newAll = this.#visible(this.#concat(row.unitKeys), (n) => view.has(n));
-						const oldAll = this.#visible(this.#concat(row.unitKeys, oldMap), (n) => view.hadBefore(n));
-						const lim = row.lim;
-						const oldW = lim === null ? oldAll : oldAll.slice(0, lim);
-						const newW = lim === null ? newAll : newAll.slice(0, lim);
-						const oldSet = new Set(oldW);
-						const added = newW.filter((id) => !oldSet.has(id));
-						const rows = added.length ? await this.#rowsFor(row.sub, added, view.level) : new Map<string, AnyRow>();
-						ops = diffWindows(oldW, newW, (id) => rows.get(id));
-						const inBoth = newW.filter((id) => oldSet.has(id));
-						ops.push(...cache.updatesFor(row.sub, row.kind, inBoth, touch));
-						if (row.kind === 'tree' || row.kind === 'page') ops.push(...this.#accessUpdates(inBoth, view));
-						if (oldAll.length !== newAll.length) ops.push({ op: 'count', total: newAll.length });
 					}
-					derived.set(shape, ops);
-					if (ops.length) {
-						const list = diffs.get(link.socketId) ?? [];
-						list.push({ id: link.subId, ops });
-						diffs.set(link.socketId, list);
-					}
+				} else {
+					const oldMap = new Map<string, UnitValue>();
+					for (const key of row.unitKeys) oldMap.set(key, changed.get(key)?.old ?? currentOf(key));
+					// ANDed with the actor's visibility: before the commit for the old window, after it for the new.
+					const newAll = this.#visible(this.#concat(row.unitKeys), (n) => view.has(n));
+					const oldAll = this.#visible(this.#concat(row.unitKeys, oldMap), (n) => view.hadBefore(n));
+					const lim = row.lim;
+					const oldW = lim === null ? oldAll : oldAll.slice(0, lim);
+					const newW = lim === null ? newAll : newAll.slice(0, lim);
+					const oldSet = new Set(oldW);
+					const added = newW.filter((id) => !oldSet.has(id));
+					const rows = added.length ? await this.#rowsFor(row.sub, added, view.level) : new Map<string, AnyRow>();
+					ops = diffWindows(oldW, newW, (id) => rows.get(id));
+					const inBoth = newW.filter((id) => oldSet.has(id));
+					ops.push(...cache.updatesFor(row.sub, row.kind, inBoth, touch));
+					if (row.kind === 'tree' || row.kind === 'page') ops.push(...this.#accessUpdates(inBoth, view));
+					if (oldAll.length !== newAll.length) ops.push({ op: 'count', total: newAll.length });
 				}
-				fanOutPerf.deriveMs += performance.now() - d0;
-			}
+				derived.set(shape, ops);
+				return ops;
+			};
+			const serve = async (audience: Audience): Promise<void> => {
+				const view = viewOf(audience);
+				const hit = view.delta.size > 0;
+				const subs: { id: string; ops: DiffOp[] }[] = [];
+				const resets: string[] = [];
+				for (const row of audience.subs) {
+					if (!hit && !row.unitKeys.some((k) => affected.has(k))) continue;
+					const ops = await derive(row, audience.actor, view);
+					if (ops === 'reset') resets.push(row.subId);
+					else if (ops.length) subs.push({ id: row.subId, ops });
+				}
+				if (subs.length || resets.length) results.set(audience, { subs, resets });
+			};
+			for (const audience of audiences) if (audience.sockets.size > 0) await serve(audience);
+			for (const audience of special.values()) await serve(audience);
+			fanOutPerf.deriveMs += performance.now() - d0;
 			// The states the commit replaced are not read again: release their bitmaps.
 			for (const { old } of changed.values()) if (old instanceof ViewState) old.dispose();
 		}
 
-		// 3. One frame per socket: its diff, or a head (and a fresh snapshot where a window changed shape).
+		// 3. One frame per audience: its diff, or a head (and a fresh snapshot where a window changed shape). Heads are cheap
+		//    but not free at a thousand tabs: past `headCoalesce.min` recipients, a tab that did not make the commit gets its head
+		//    with the next batch (`flushHeads`), a tab of the committing person at once (it drops its optimistic layer on it).
 		const s0 = performance.now();
-		fanOutPerf.framesSent += streams.length - paused.size;
-		// Sockets with the same diff (same ids, same derived ops) get the same message object, which `encodeServerMessage` serializes once.
+		fanOutPerf.framesSent += streams.length - (paused?.size ?? 0);
 		const head: ServerMessage = { t: 'head', seq: commit.seq };
-		const diffMessages = new Map<string, ServerMessage>();
-		for (const socketId of streams) {
-			if (paused.has(socketId)) {
-				this.#host.skipped?.(socketId);
-				continue;
-			}
-			const subsOf = diffs.get(socketId);
-			let message: ServerMessage = head;
-			if (subsOf) {
-				const signature = subsOf.map((e) => `${e.id}#${opsKey(e.ops)}`).join('|');
-				let shared = diffMessages.get(signature);
-				if (!shared) diffMessages.set(signature, (shared = { t: 'diff', seq: commit.seq, subs: subsOf }));
-				message = shared;
-			}
+		const writers = new Set(commit.actorIds ?? []);
+		let headOnly = 0;
+		const served = new Set<string>();
+		for (const audience of audiences) {
+			if (!results.get(audience)?.subs.length) for (const id of audience.sockets) if (!isPaused(id) && !special.has(id)) headOnly++;
+		}
+		const coalesce = headOnly >= this.#headCoalesce.min;
+		let deferred = false;
+		// The frame itself is synchronous (a thousand tabs make a thousand of these per commit: no promise each); only a window that
+		// changed shape awaits, for its fresh snapshot.
+		const deliver = (socketId: string, message: ServerMessage): boolean => {
+			served.add(socketId);
 			if (!this.#host.send(socketId, message)) {
 				this.dropSocket(socketId);
-				continue;
+				return false;
 			}
+			this.#sentSeq.set(socketId, commit.seq);
+			return true;
+		};
+		const snapshots = async (socketId: string, resets: readonly string[]): Promise<void> => {
 			const actor = this.#host.actorOf(socketId);
-			for (const subId of resets.get(socketId) ?? []) {
+			for (const subId of resets) {
 				const snap = actor ? await this.snapshot(socketId, subId, actor, commit.seq) : null;
 				if (snap) this.#host.send(socketId, snap);
 			}
+		};
+		const targets: Audience[] = [...audiences, ...special.values()];
+		for (const audience of targets) {
+			const out = results.get(audience);
+			const message: ServerMessage = out?.subs.length ? { t: 'diff', seq: commit.seq, subs: out.subs } : head;
+			const lazy = message === head && coalesce && !writers.has(audience.actor.userId) && !out?.resets.length;
+			for (const socketId of [...audience.sockets]) {
+				if (isPaused(socketId)) {
+					this.#host.skipped?.(socketId);
+					served.add(socketId);
+					continue;
+				}
+				// A socket served on its own (`special`) is skipped by the audience it still belongs to.
+				if (audience.key !== '' && special.has(socketId)) continue;
+				const own = resetsOf.get(socketId);
+				if (lazy && !own) {
+					deferred = true;
+					served.add(socketId);
+					continue;
+				}
+				if (!deliver(socketId, message)) continue;
+				const resets = own ? [...(out?.resets ?? []), ...own] : out?.resets;
+				if (resets?.length) await snapshots(socketId, resets);
+			}
 		}
+		// Streams whose actor is unknown (no audience): the commit's head, as before.
+		for (const socketId of streams) {
+			if (served.has(socketId)) continue;
+			if (isPaused(socketId)) {
+				this.#host.skipped?.(socketId);
+				continue;
+			}
+			deliver(socketId, head);
+		}
+		this.#fannedSeq = commit.seq;
+		if (deferred) this.#scheduleHeads();
 		fanOutPerf.sendMs += performance.now() - s0;
 	}
 

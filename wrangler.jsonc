@@ -10,6 +10,10 @@
 	"workers_dev": true,
 	"preview_urls": true,
 	"find_additional_modules": true,
+	// A WebSocket upgrade is served by a fresh isolate that loads the whole script (measured: +75 ms per MB, docs/ops/load-test.md "Start-up"):
+	// minified, the dial is a third shorter. Names are kept (`keep_names`), maps are uploaded so stack traces stay readable.
+	"minify": true,
+	"upload_source_maps": true,
 	"observability": {
 		"enabled": true,
 		"logs": {

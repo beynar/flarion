@@ -6,8 +6,15 @@
 import { ORPCError } from '@orpc/server';
 import { decodeWorkspaceError } from '../../objects/workspace/errors';
 
+/** The error workerd raises when a Durable Object's queue is too long ("Durable Object is overloaded. Requests queued for too long."). */
+export const isObjectOverloaded = (error: unknown): boolean =>
+	(error as { overloaded?: unknown } | null)?.overloaded === true || (error instanceof Error && /Durable Object is overloaded/i.test(error.message));
+
 export function mapWorkspaceError(error: unknown): unknown {
 	if (error instanceof ORPCError) return error;
+	// A busy object is not a bug: say so (503), so the client retries the same mutation (its id makes a retry safe) instead of
+	// rolling the edit back behind an "Internal server error". Writes are never dropped (docs/PLAN.md runbook).
+	if (isObjectOverloaded(error)) return new ORPCError('SERVICE_UNAVAILABLE', { status: 503, message: 'This workspace is busy. Try again in a moment.' });
 	const decoded = decodeWorkspaceError(error);
 	if (!decoded) return error;
 	switch (decoded.code) {

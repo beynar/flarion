@@ -54,6 +54,25 @@ async function inBatches<T, R>(items: readonly T[], size: number, fn: (item: T, 
 	return out;
 }
 
+/**
+ * What a signed-in browser holds: the session token and the short-lived `session_data` cookie cache better-auth sets on its
+ * first `get-session`. With the cache, `/rpc` and `/ws` verify a signature instead of reading D1 (docs/PLAN.md "D1 unavailable:
+ * existing sessions keep working from the cookie cache"), so the load test measures the path real tabs take. Without it
+ * (better-auth refusing, say) the token alone still works, through D1.
+ */
+async function withCookieCache(env: Env, tokenCookie: string): Promise<string> {
+	try {
+		const res = await getAuth(env).api.getSession({ headers: new Headers({ cookie: tokenCookie }), returnHeaders: true });
+		const cache = res.headers
+			.getSetCookie()
+			.map((c) => c.split(';')[0])
+			.filter((c) => /session_data/.test(c.split('=')[0]));
+		return [tokenCookie, ...cache].join('; ');
+	} catch {
+		return tokenCookie;
+	}
+}
+
 async function mintUsers(env: Env, body: { runId?: unknown; count?: unknown; offset?: unknown }): Promise<Response> {
 	const runId = String(body.runId ?? '');
 	const count = Number(body.count ?? 1);
@@ -68,7 +87,8 @@ async function mintUsers(env: Env, body: { runId?: unknown; count?: unknown; off
 		const email = `load-${runId}-${n}@load.invalid`;
 		const user = await auth.internalAdapter.createUser({ name: `Load ${n}`, email, emailVerified: true }, { method: 'load-test' });
 		const session = await auth.internalAdapter.createSession(user.id);
-		return { userId: user.id, name: user.name, email, cookie: `${cookieName}=${await signCookie(session.token, auth.secret)}` };
+		const token = `${cookieName}=${await signCookie(session.token, auth.secret)}`;
+		return { userId: user.id, name: user.name, email, cookie: await withCookieCache(env, token) };
 	});
 	return json({ users });
 }
@@ -97,6 +117,12 @@ async function makeWorkspace(env: Env, ctx: Ctx, body: { ownerId?: unknown; memb
 		return true;
 	});
 	return json({ workspaceId: workspace.id, slug: workspace.slug, members: joined.filter(Boolean).length });
+}
+
+/** Whether a synthetic user belongs to the workspace: the routes that speak to an object on the caller's word only touch those. */
+export async function isLoadTestWorkspace(env: Env, workspaceId: string): Promise<boolean> {
+	const owned = await env.DB.prepare(`SELECT 1 AS ok FROM "membership" m JOIN "user" u ON u."id" = m."userId" WHERE m."workspaceId" = ?1 AND u."email" LIKE 'load-%@load.invalid' LIMIT 1`).bind(workspaceId).first();
+	return !!owned;
 }
 
 /** Removes a run's workspaces (Workspace DO storage wiped, D1 rows deleted for good) and its synthetic users. */
@@ -137,7 +163,7 @@ export async function handleLoadTest(request: Request, env: Env, ctx: Ctx): Prom
 	if (!loadTestAuthEnabled(env as unknown as LoadTestEnv, url.hostname)) return notFound();
 	const key = request.headers.get(LOAD_TEST_KEY_HEADER);
 	if (!key || !safeEqual(key, (env as unknown as LoadTestEnv).LOAD_TEST_KEY as string)) return notFound();
-	if (request.method !== 'POST' || !['users', 'workspace', 'cleanup'].includes(route)) return notFound();
+	if (request.method !== 'POST' || !['users', 'workspace', 'cleanup', 'inside'].includes(route)) return notFound();
 	let body: Record<string, unknown>;
 	try {
 		body = ((await request.json()) ?? {}) as Record<string, unknown>;
@@ -148,6 +174,10 @@ export async function handleLoadTest(request: Request, env: Env, ctx: Ctx): Prom
 		await ensureDevSchema(env);
 		if (route === 'users') return await mintUsers(env, body);
 		if (route === 'workspace') return await makeWorkspace(env, ctx, body);
+		if (route === 'inside') {
+			if (!(await isLoadTestWorkspace(env, String(body.workspaceId ?? '')))) return bad('not a load-test workspace');
+			return (await import('./load-test-inside')).runInside(env, body as never);
+		}
 		return await cleanup(env, body);
 	} catch (error) {
 		console.error('[load-test] failed:', error instanceof Error ? (error.stack ?? error.message) : error);

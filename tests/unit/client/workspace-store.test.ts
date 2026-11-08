@@ -212,6 +212,22 @@ describe('with the mock socket', () => {
 		store.dispose();
 	});
 
+	it('sends the same mutation again when the workspace answers busy (503), and only then keeps the edit', async () => {
+		const { store, server, notices } = setup();
+		await ready(store);
+		store.openPage('roadmap');
+		await vi.waitFor(() => expect(store.pageStatus('roadmap')).toBe('ready'));
+		server.failNext = { code: 'SERVICE_UNAVAILABLE', message: 'This workspace is busy. Try again in a moment.' };
+		const done = store.mutate([{ op: 'setProp', page: 'roadmap', prop: 'status', value: 'done' }]);
+		// Busy once: the edit stays on screen, nothing is raised, and the second try goes through.
+		const { seq } = await done;
+		expect(seq).toBeGreaterThan(0);
+		expect(notices).toEqual([]);
+		await vi.waitFor(() => expect(store.layerCount).toBe(0));
+		expect(store.page('roadmap')?.values.status).toBe('done');
+		store.dispose();
+	});
+
 	it('refuses a value the registry rejects, before sending anything', async () => {
 		const { store, server, notices } = setup();
 		await ready(store);

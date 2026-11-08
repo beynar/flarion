@@ -270,6 +270,32 @@ object) was 636 MB at 20,000 pages; it says nothing about the object's isolate a
   page (and to tabs that connect later, with their `hello`); the store shows one toast per page per five points ("This page is nearly
   full"). The room's `doc_size` metric is unchanged.
 
+## What the staging load test found (P4 gate)
+
+The first run of `docs/ops/load-test.md` against staging (1,000 tabs, 20 writes a second) failed on every target: edit-to-diff p50 16.8 s, 938 of 1,201 writes answered
+500 ("Durable Object is overloaded. Requests queued for too long."), cold first window 995 ms. The local profile above had measured 40 to 56 ms of fan-out for the same shape,
+so the gap was in what the profile did not exercise. Causes, with the evidence for each (`wrangler tail`, a CPU profile of `wrangler dev`, and counters in the live loop):
+
+1. **O(sockets) per commit and per await, in the object** (the 500s). The fan-out looked up each socket's actor with `deserializeAttachment` (a structured clone) through a map
+   that was rebuilt every microtask turn, so every `await` of a derivation re-read all 1,000 attachments; a commit also read them all again to settle the actors, read
+   `socket_stream` and joined `sub_link` (8,000 rows) in SQL, and built a signature string per tab. The object spent 40 ms of CPU per commit at 200 tabs (tail `cpuTime`,
+   p50 40 ms; wall 377 ms with the queue), 20 commits a second saturated it, workerd shed the calls. **Fix:** `socket-directory.ts` (sockets and actors in memory, read once per wake),
+   the stream set and the audiences in memory, and `LiveHub.#fanOut` iterates audiences, not (socket, subscription) pairs: 40 ms to 4.4 ms of fan-out at 1,000 sockets on the same
+   profile (`derive` 33 ms to 0.85 ms), 14 ms of CPU per commit on staging at 200 tabs.
+2. **A derivation per commit even when nothing moved.** A cell edit re-cut every touched view's window for every person (two windows, a set of ids, intersections). The window of an
+   unchanged unit is now derived once per (unit state, visibility revision, window size) and looked up by the edited pages (`#windowIndex`); snapshots are cached per
+   `seq` (a reconnect storm of 1,000 tabs cost 1,000 x 10 snapshots at 1 to 3 ms each).
+3. **A write waited for its own fan-out and the object answered "overloaded" with a 500.** Now a 503 `SERVICE_UNAVAILABLE` that the store retries with the same `mid`.
+4. **The Worker's per-write overhead.** `mutate` and the socket upgrade each made a Durable Object call (`getMemberRole`) before the real one, queued behind the commits they then
+   waited for; the load test's cookies had no `session_data` cache and read D1 on every call (tail: session 50 to 60 ms, membership 20 to 45 ms of every dial). The role is now resolved
+   inside the call to the object (D1 only on a miss) and the minted cookie carries the cache, as a signed-in tab's does.
+5. **Dial latency is the size of the script** (docs/ops/load-test.md "Start-up"): 75 ms per MB, on every WebSocket upgrade.
+6. **The client was part of the result.** One Node thread could not take 20,000 frames a second, and past a few hundred connections the laptop's own connection stalls (a plain GET took
+   857 ms at p50 with 1,000 idle connections open). The tool now spreads the sockets over threads (`ws`), prints its own round trip, and `inside.ts` runs the tabs from Workers.
+
+A hypothesis that did not survive: a ceiling of about 8,500 frames a second per object, measured with a bench that only sent. It was the client path; from inside Cloudflare one object
+delivers 15,000 frames a second to 1,000 tabs with no queue, so the egress budget that was built on it was removed.
+
 ## Deviations
 
 - The plan expected bitmaps "keyed per (prop, option) ... persisted or rebuilt on wake" for the engine and the live loop: the option index

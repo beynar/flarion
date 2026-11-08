@@ -10,6 +10,8 @@
  * write to the arrival of the frame (`diff` or `head`) that carries its `seq`. Then it times first windows from cold
  * objects, prints the results and exits non-zero when a plan target is missed.
  */
+import { Worker } from 'node:worker_threads';
+import type { WorkerInit } from './tabs-worker.ts';
 import {
 	Api,
 	ErrorLog,
@@ -62,44 +64,76 @@ async function main(): Promise<number> {
 	//    idle while the main run proceeds (see `prepareColdProbes` below).
 	const probeSetup = Promise.resolve(await prepareColdProbes());
 
-	// 3. Ramp up the tabs in batches.
-	const tabs: Tab[] = [];
-	const rampStart = now();
-	const openMs: number[] = [];
-	const snapshotMs: number[] = [];
-	let failed = 0;
-	for (let i = 0; i < opts.tabs; i += opts.rampBatch) {
-		const batch: Promise<void>[] = [];
-		for (let j = i; j < Math.min(opts.tabs, i + opts.rampBatch); j++) {
-			const tab = new Tab(j, api, users[j % users.length], workspaceId, subs, recorder);
-			tabs.push(tab);
-			batch.push(
-				tab.dial().then(
-					(r) => {
-						openMs.push(r.openMs);
-						snapshotMs.push(r.snapshotsMs);
-					},
-					(error: Error) => {
-						failed++;
-						errors.add('tab_failed_to_connect', error.message);
-					}
-				)
-			);
-		}
-		await Promise.all(batch);
-		if (opts.tabs > 100) log(`${Math.min(opts.tabs, i + opts.rampBatch)}/${opts.tabs} tabs (${failed} failed)`);
-		await sleep(opts.rampDelayMs);
+	// 3. The client's own distance to the edge: a warm keepalive round trip to a path that touches no object. Every sample
+	//    of edit-to-diff carries it once (the writer's request goes there, the collaborator's frame comes back from there).
+	const rtt = await measureRtt();
+	log(`client round trip to the edge (warm keepalive /healthz): p50 ${ms(rtt.p50)}, p95 ${ms(rtt.p95)}`);
+
+	// 4. Ramp up the tabs, spread over worker threads.
+	const procs = opts.procs > 0 ? opts.procs : Math.max(1, Math.min(8, Math.ceil(opts.tabs / 125)));
+	const per = Math.ceil(opts.tabs / procs);
+	const workers: Worker[] = [];
+	const ask = <T,>(worker: Worker, message: Record<string, unknown>, reply: string, progress?: (m: Record<string, unknown>) => void): Promise<T> =>
+		new Promise((resolve, reject) => {
+			const onMessage = (m: Record<string, unknown>) => {
+				if (m.type === reply) {
+					worker.off('message', onMessage);
+					resolve(m as T);
+				} else if (m.type === 'progress') progress?.(m);
+			};
+			worker.on('message', onMessage);
+			worker.once('error', reject);
+			worker.postMessage(message);
+		});
+	for (let k = 0; k < procs; k++) {
+		const from = k * per;
+		const to = Math.min(opts.tabs, from + per);
+		if (from >= to) break;
+		const init: WorkerInit = {
+			base: opts.base,
+			key: opts.key,
+			appVersion: api.appVersion,
+			workspaceId,
+			views: opts.views,
+			users,
+			from,
+			to,
+			rampBatch: Math.max(1, Math.ceil(opts.rampBatch / procs)),
+			rampDelayMs: opts.rampDelayMs
+		};
+		workers.push(new Worker(new URL('./tabs-worker.ts', import.meta.url), { workerData: init }));
 	}
+	const rampStart = now();
+	const progress = new Map<number, number>();
+	let lastLogged = 0;
+	const dialed = await Promise.all(
+		workers.map((w, k) =>
+			ask<{ openMs: number[]; snapshotMs: number[]; failed: number; errors: { kind: string; count: number; sample: string | null }[] }>(w, { type: 'dial' }, 'dialed', (m) => {
+				progress.set(k, m.tabs as number);
+				const total = [...progress.values()].reduce((x, y) => x + y, 0);
+				if (opts.tabs > 100 && total - lastLogged >= 100) {
+					lastLogged = total;
+					log(`${total}/${opts.tabs} tabs`);
+				}
+			})
+		)
+	);
+	const openMs = dialed.flatMap((d) => d.openMs);
+	const snapshotMs = dialed.flatMap((d) => d.snapshotMs);
+	const failed = dialed.reduce((n, d) => n + d.failed, 0);
+	const absorb = (list: { kind: string; count: number; sample: string | null }[]) => {
+		for (const e of list) for (let i = 0; i < e.count; i++) errors.add(e.kind, e.sample ?? undefined);
+	};
 	const rampSeconds = (now() - rampStart) / 1000;
-	log(`ramp done in ${rampSeconds.toFixed(1)} s: ${tabs.length - failed} connected, ${failed} failed`);
+	log(`ramp done in ${rampSeconds.toFixed(1)} s on ${workers.length} threads: ${opts.tabs - failed} connected, ${failed} failed`);
 	await sleep(1800); // let the last tabs' replay window pass
 
-	// 4. Writes.
+	// 5. Writes.
 	const t0ByWrite: { t0: number; seq: number; rtt: number }[] = [];
 	let writeErrors = 0;
 	const ranks = evenRanks(2);
 	const counter = { n: 0 };
-	recorder.measuring = true;
+	await Promise.all(workers.map((w) => ask(w, { type: 'measure', on: true }, 'measuring')));
 	const intervalMs = 1000 / Math.max(0.1, opts.writesPerSec);
 	const runUntil = now() + opts.duration * 1000;
 	const inflight: Promise<void>[] = [];
@@ -122,23 +156,28 @@ async function main(): Promise<number> {
 		else next = now(); // behind schedule: do not burst to catch up
 	}
 	await Promise.all(inflight);
-	await sleep(2000); // the last diffs
-	recorder.measuring = false;
+	await sleep(2000); // the last diffs, and the last batch of heads
+	await Promise.all(workers.map((w) => ask(w, { type: 'measure', on: false }, 'measuring')));
 
-	// 5. Edit-to-diff latencies: every (write, tab) pair.
+	// Edit-to-diff latencies: every (write, tab) pair.
 	const diffLat: number[] = [];
 	const headLat: number[] = [];
-	const lost: number[] = [];
-	const connected = tabs.length - failed;
-	for (const w of t0ByWrite) {
-		const d = recorder.diffs.get(w.seq) ?? [];
-		const h = recorder.heads.get(w.seq) ?? [];
-		for (const t of d) if (t - w.t0 < 30_000) diffLat.push(t - w.t0);
-		for (const t of h) if (t - w.t0 < 30_000) headLat.push(t - w.t0);
-		lost.push(Math.max(0, connected - d.length - h.length));
+	let missing = 0;
+	const counters = { opens: 0, reconnects: 0, unexpectedCloses: 0, resyncs: 0, connectFailures: 0, connectRetries: 0, frames: 0, errorFrames: 0 };
+	const writes = t0ByWrite.map((w) => ({ t0: w.t0, seq: w.seq }));
+	const collected = await Promise.all(
+		workers.map((w) => ask<{ diff: Float64Array; delivered: Float64Array; missing: number; counters: typeof counters; errors: { kind: string; count: number; sample: string | null }[] }>(w, { type: 'collect', writes }, 'collected'))
+	);
+	for (const c of collected) {
+		for (const x of c.diff) if (x < 30_000) diffLat.push(x);
+		for (const x of c.delivered) if (x < 30_000) headLat.push(x);
+		missing += c.missing;
+		for (const key of Object.keys(counters) as (keyof typeof counters)[]) counters[key] += c.counters[key];
 	}
+	// Each thread's error log is cumulative: dial failures, unexpected closes, error frames.
+	for (const c of collected) absorb(c.errors);
 	const anyLat = [...diffLat, ...headLat];
-	const missing = lost.reduce((a, b) => a + b, 0);
+	const connected = opts.tabs - failed;
 
 	// 6. Cold first windows.
 	let cold: ColdResult[] = [];
@@ -148,7 +187,8 @@ async function main(): Promise<number> {
 		errors.add('cold_probe_failed', (error as Error).message);
 	}
 
-	for (const tab of tabs) tab.close();
+	await Promise.all(workers.map((w) => ask(w, { type: 'close' }, 'closed')));
+	for (const w of workers) void w.terminate();
 	let cleaned: { workspaces: number; users: number } | null = null;
 	if (opts.cleanup) {
 		try {
@@ -166,14 +206,22 @@ async function main(): Promise<number> {
 		appVersion: version,
 		startedAt: new Date(started).toISOString(),
 		options: { tabs: opts.tabs, users: opts.users, rows: opts.rows, views: opts.views, writesPerSec: opts.writesPerSec, duration: opts.duration },
-		tabs: { requested: opts.tabs, connected, failed, connectRetries: recorder.counters.connectRetries, rampSeconds, open: summarize(openMs), snapshots: summarize(snapshotMs) },
+		client: { rttP50: rtt.p50, rttP95: rtt.p95, threads: workers.length },
+		tabs: { requested: opts.tabs, connected, failed, connectRetries: counters.connectRetries, rampSeconds, open: summarize(openMs), snapshots: summarize(snapshotMs) },
 		writes: { sent: t0ByWrite.length + writeErrors, ok: t0ByWrite.length, errors: writeErrors, rtt: summarize(t0ByWrite.map((w) => w.rtt)) },
-		editToDiff: { diff: summarize(diffLat), head: summarize(headLat), any: summarize(anyLat), missingDeliveries: missing },
+		editToDiff: {
+			diff: summarize(diffLat),
+			/** The same samples minus the client's own warm round trip to the edge (one per sample: the write goes there, the frame comes back). */
+			diffMinusRtt: summarize(diffLat.map((x) => Math.max(0, x - rtt.p50))),
+			head: summarize(headLat),
+			any: summarize(anyLat),
+			missingDeliveries: missing
+		},
 		reconnects: {
-			count: recorder.counters.reconnects,
-			unexpectedCloses: recorder.counters.unexpectedCloses,
-			resyncs: recorder.counters.resyncs,
-			percentPerHour: connected ? (recorder.counters.unexpectedCloses / connected / hours) * 100 : 0
+			count: counters.reconnects,
+			unexpectedCloses: counters.unexpectedCloses,
+			resyncs: counters.resyncs,
+			percentPerHour: connected ? (counters.unexpectedCloses / connected / hours) * 100 : 0
 		},
 		errors: Object.fromEntries([...errors.counts].map(([k, n]) => [k, { count: n, sample: errors.samples.get(k) ?? null }])),
 		cold: { probes: cold.length, firstWindow: summarize(cold.map((c) => c.firstViewMs)), open: summarize(cold.map((c) => c.openMs)), hello: summarize(cold.map((c) => c.snapshotsMs)) },
@@ -192,7 +240,10 @@ async function main(): Promise<number> {
 	const failures: string[] = [];
 	if (failed > 0) failures.push(`${failed} tab(s) failed to connect`);
 	if (diffLat.length === 0) failures.push('no diff was ever delivered');
-	else if (report.editToDiff.diff.p95 > opts.p95Ms) failures.push(`edit-to-diff p95 ${ms(report.editToDiff.diff.p95)} > ${opts.p95Ms} ms`);
+	else {
+		const judged = opts.raw ? report.editToDiff.diff : report.editToDiff.diffMinusRtt;
+		if (judged.p95 > opts.p95Ms) failures.push(`edit-to-diff p95 ${ms(judged.p95)}${opts.raw ? '' : ' (minus the client round trip)'} > ${opts.p95Ms} ms`);
+	}
 	if (cold.length > 0 && report.cold.firstWindow.max > opts.coldMs) failures.push(`cold first window max ${ms(report.cold.firstWindow.max)} > ${opts.coldMs} ms`);
 	if (opts.coldProbes > 0 && cold.length === 0) failures.push('no cold probe completed');
 	if (writeErrors > 0) failures.push(`${writeErrors} write(s) failed`);
@@ -240,6 +291,19 @@ async function main(): Promise<number> {
 	}
 }
 
+/** The client's warm round trip to the edge: sequential GETs of `/healthz` on a kept-alive connection (the first is dropped). */
+async function measureRtt(): Promise<Summary> {
+	const samples: number[] = [];
+	for (let i = 0; i < 31; i++) {
+		const t = now();
+		const res = await fetch(`${opts.base}/healthz`);
+		await res.arrayBuffer();
+		if (i > 0) samples.push(now() - t);
+		await sleep(40);
+	}
+	return summarize(samples);
+}
+
 function row(label: string, s: Summary): string {
 	return `${label.padEnd(30)} n=${String(s.n).padStart(8)}  p50 ${ms(s.p50).padStart(10)}  p95 ${ms(s.p95).padStart(10)}  p99 ${ms(s.p99).padStart(10)}  max ${ms(s.max).padStart(10)}`;
 }
@@ -248,7 +312,8 @@ function printReport(r: ReturnType<typeof Object>): void {
 	const x = r as unknown as {
 		tabs: { requested: number; connected: number; failed: number; connectRetries: number; rampSeconds: number; open: Summary; snapshots: Summary };
 		writes: { sent: number; ok: number; errors: number; rtt: Summary };
-		editToDiff: { diff: Summary; head: Summary; any: Summary; missingDeliveries: number };
+		client: { rttP50: number; rttP95: number; threads: number };
+		editToDiff: { diff: Summary; diffMinusRtt: Summary; head: Summary; any: Summary; missingDeliveries: number };
 		reconnects: { count: number; unexpectedCloses: number; resyncs: number; percentPerHour: number };
 		errors: Record<string, { count: number; sample: string | null }>;
 		cold: { probes: number; firstWindow: Summary; open: Summary; hello: Summary };
@@ -260,10 +325,12 @@ function printReport(r: ReturnType<typeof Object>): void {
 	console.log(row('hello to last snapshot', x.tabs.snapshots));
 	console.log(`writes      sent ${x.writes.sent}, ok ${x.writes.ok}, failed ${x.writes.errors}`);
 	console.log(row('write round trip (HTTP)', x.writes.rtt));
-	console.log(row('edit-to-diff (diff frames)', x.editToDiff.diff));
+	console.log(`client      ${x.client.threads} threads, warm round trip to the edge p50 ${ms(x.client.rttP50)} p95 ${ms(x.client.rttP95)}`);
+	console.log(row('edit-to-diff (raw)', x.editToDiff.diff));
+	console.log(row('edit-to-diff minus client RTT', x.editToDiff.diffMinusRtt));
 	console.log(row('edit-to-head (no change here)', x.editToDiff.head));
 	console.log(row('edit-to-any-frame', x.editToDiff.any));
-	console.log(`            target p95 <= ${x.targets.p95Ms} ms on diff frames; deliveries missing: ${x.editToDiff.missingDeliveries}`);
+	console.log(`            target p95 <= ${x.targets.p95Ms} ms on diff frames (the line minus the client RTT, unless --raw); deliveries missing: ${x.editToDiff.missingDeliveries}`);
 	console.log(`reconnects  ${x.reconnects.count} reconnects, ${x.reconnects.unexpectedCloses} unexpected closes (${x.reconnects.resyncs} resyncs) = ${x.reconnects.percentPerHour.toFixed(3)} % of sockets per hour`);
 	console.log(row('cold dial to first window', x.cold.firstWindow));
 	console.log(row('  of which dial to open', x.cold.open));
