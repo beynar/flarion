@@ -10,27 +10,39 @@
  * - Everything viborm cannot express (the subscription registry, the FTS5 `search` table, `page_text`)
  *   is raw SQL in `raw-steps.ts`, versioned in its own table and applied before viborm touches the object.
  */
-import type { ApplyResult } from 'viborm/migrations';
-import { migrateOnWake } from '../../../db/driver/migrate';
-import { BundledEstate } from '../../../db/driver/bundled-estate';
-import { WORKSPACE_TABLES } from '../../../db/workspace.schema';
 import type { WorkspaceClient } from '../../../db/workspace.client';
-import { workspaceEstate } from './estate.generated';
 import { getFlag } from '../../../flags';
+import { workspaceEstateHead } from './estate-head.generated';
 import { applyRawSteps, pendingFlags, RAW_STEPS, type RawStep } from './raw-steps';
 
 export { applyRawSteps, pendingFlags, RAW_STEPS, rawSchemaVersion, type GatedRawStep, type RawStep } from './raw-steps';
 
-/** A fresh reader over the bundled estate. */
-export const workspaceEstateStorage = () => new BundledEstate(workspaceEstate);
+/**
+ * Whether this object already holds the bundle's estate: `estate_head` (one row, beside `raw_schema`, ignored by viborm because it is not in
+ * `WORKSPACE_TABLES`) records the head of the estate the last successful apply left. `destroy()` and a restore take the row with the data.
+ */
+function estateIsCurrent(sql: SqlStorage): boolean {
+	sql.exec('CREATE TABLE IF NOT EXISTS estate_head (id INTEGER PRIMARY KEY CHECK (id = 1), head TEXT NOT NULL)');
+	return sql.exec<{ head: string }>('SELECT head FROM estate_head WHERE id = 1').toArray()[0]?.head === workspaceEstateHead;
+}
 
 /**
  * Runs from the object's constructor: raw steps first (synchronous), then the viborm estate. `enabled` holds the
  * migration flags that are on (`migration.<name>`, see `GatedRawStep`); the constructor looks them up beforehand.
+ *
+ * The estate (`./estate-apply`, with `viborm/migrations` and the generated SQL) is imported only when it is not known to be applied:
+ * a wake of an object that is current evaluates none of it. Apply and bookkeeping are not one transaction on purpose: a wake that
+ * dies between them applies again next time, and viborm answers `noop`. A first wake after this was deployed has no row and takes the
+ * long path once.
  */
-export function migrateWorkspace(ctx: DurableObjectState, client: WorkspaceClient, enabled: ReadonlySet<string> = new Set()): Promise<ApplyResult> {
+export async function migrateWorkspace(ctx: DurableObjectState, client: WorkspaceClient, enabled: ReadonlySet<string> = new Set()): Promise<void> {
 	applyRawSteps(ctx.storage, enabled);
-	return migrateOnWake(ctx, { client, storage: workspaceEstateStorage(), tables: WORKSPACE_TABLES });
+	if (estateIsCurrent(ctx.storage.sql)) return;
+	const { applyWorkspaceEstate } = await import('./estate-apply');
+	const result = await applyWorkspaceEstate(ctx, client);
+	if (result.outcome === 'applied' || result.outcome === 'noop') {
+		ctx.storage.sql.exec('INSERT OR REPLACE INTO estate_head (id, head) VALUES (1, ?)', workspaceEstateHead);
+	}
 }
 
 /**

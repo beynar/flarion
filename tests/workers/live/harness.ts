@@ -209,6 +209,8 @@ export interface FuzzStats {
 	evictions: number;
 	failedBatches: number;
 	windowOps: number;
+	/** Units maintained from the page value cache, units that fell back to SQL, and cache loads and patches (per isolate since its start). */
+	memory: { units: number; fallbacks: number; loads: number; patches: number; clears: number } | null;
 }
 
 export class FuzzFailure extends Error {}
@@ -230,7 +232,7 @@ export async function runFuzz(seed: number, options: FuzzOptions = {}): Promise<
 	const stub = ws.stub;
 	if (options.shards) await stub.configureShards({ count: options.shards, localMax: 0 });
 	const trace: string[] = [];
-	const stats: FuzzStats = { steps: 0, checks: 0, ops: {}, reconnects: 0, replays: 0, evictions: 0, failedBatches: 0, windowOps: 0 };
+	const stats: FuzzStats = { steps: 0, checks: 0, ops: {}, reconnects: 0, replays: 0, evictions: 0, failedBatches: 0, windowOps: 0, memory: null };
 	const note = (line: string) => {
 		trace.push(line);
 		if (trace.length > 60) trace.shift();
@@ -343,7 +345,7 @@ export async function runFuzz(seed: number, options: FuzzOptions = {}): Promise<
 					if (live.stale.length) {
 						const dump = await inside(stub, (sql) => ({
 							unit: sql.exec<{ ids: string }>('SELECT ids FROM sub_unit WHERE unit_key = ?', live.stale[0]).toArray()[0]?.ids.slice(0, 600),
-							pages: sql.exec('SELECT id, rank, created_at, updated_at, json_extract(props_json, \'$.prio\') AS prio, json_extract(props_json, \'$.amount\') AS amount FROM page WHERE id IN (\'n14\', \'n20\', \'n6\', \'n5\')').toArray()
+							pages: sql.exec('SELECT id, rank, created_at, updated_at, deleted_at FROM page WHERE id IN (\'n14\', \'n10\', \'n15\')').toArray()
 						}));
 						note(`unit ${JSON.stringify(dump)}`);
 					}
@@ -473,7 +475,24 @@ export async function runFuzz(seed: number, options: FuzzOptions = {}): Promise<
 	for (step = 0; step < steps; step++) {
 		stats.steps++;
 		const roll = r.next();
-		if (roll < 0.62) {
+		if (roll < 0.62 && r.bool(0.2)) {
+			// A burst of value writes queued behind each other (the object is busy for a moment): they run as one group, in one transaction, with a merged fan-out.
+			count('burst');
+			const rows = (await pagesNow()).filter((p) => !p.deleted && p.id !== dbId).map((p) => p.id);
+			if (rows.length === 0) continue;
+			const writes = Array.from({ length: r.int(3, 8) }, () => {
+				const prop = r.pick(VALUE_PROPS);
+				return [{ op: 'setProp', page: r.pick(rows), prop, value: r.bool(0.12) ? null : randomValue(r, prop) } as Op];
+			});
+			note(`burst of ${writes.length}: ${JSON.stringify(writes).slice(0, 900)}`);
+			void stub.holdQueue(25);
+			await new Promise((res) => setTimeout(res, 5));
+			// A write may be refused (an option an earlier step removed): it commits nothing, the rest of the burst does.
+			const done = await Promise.allSettled(writes.map((ops) => stub.apply(owner, batch(ops))));
+			const seqs = done.flatMap((d) => (d.status === 'fulfilled' ? [d.value.seq] : []));
+			stats.failedBatches += done.length - seqs.length;
+			if (seqs.length > 0) await settle(Math.max(...seqs));
+		} else if (roll < 0.62) {
 			count('write');
 			const w = await randomWrite(await pagesNow());
 			count(w.label.startsWith('bulk') ? 'bulk' : w.label);
@@ -576,6 +595,7 @@ export async function runFuzz(seed: number, options: FuzzOptions = {}): Promise<
 	const live = await stub.liveStats();
 	if (live.stale.length) fail(`stored units differ from a fresh evaluation: ${live.stale.join(', ')}`);
 	for (const c of clients) if (c.connected) c.conn.ws.close();
+	stats.memory = live.memory;
 	return stats;
 }
 

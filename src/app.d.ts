@@ -25,6 +25,8 @@ declare namespace Cloudflare {
 		ADMIN_KEY?: string;
 		/** `"off"` turns the Roaring bitmaps off (the SQL paths answer the same, only slower): the rollback switch of docs/spikes/p4-scale.md. */
 		BITMAPS?: string;
+		/** `off` maintains every view unit through SQL instead of from the page value cache (docs/ops/load-test.md "Fourth pass"). */
+		MEMBERSHIP_CACHE?: string;
 	}
 }
 export {};

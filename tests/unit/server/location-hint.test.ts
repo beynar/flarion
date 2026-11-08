@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'vitest';
-import { locationHintFor, workspaceStubWithHint } from '../../../src/server/objects/workspace/location';
+import { LOCATION_HINTS, locationHintFor, parseLocationHint, workspaceStubWithHint } from '../../../src/server/objects/workspace/location';
 
 describe('locationHintFor', () => {
 	test('maps where the creator is to a Durable Object region', () => {
@@ -37,5 +37,27 @@ describe('workspaceStubWithHint', () => {
 		const b = namespace();
 		workspaceStubWithHint(b.ns, 'ws-2');
 		expect(b.calls).toEqual([['ws-2']]);
+	});
+});
+
+describe('parseLocationHint', () => {
+	test('accepts exactly the regions Cloudflare knows, and nothing else', () => {
+		for (const hint of LOCATION_HINTS) expect(parseLocationHint(hint)).toBe(hint);
+		expect(parseLocationHint('europe')).toBeUndefined();
+		expect(parseLocationHint('')).toBeUndefined();
+		expect(parseLocationHint(undefined)).toBeUndefined();
+		expect(parseLocationHint(3)).toBeUndefined();
+	});
+
+	test('every continent of request.cf maps to a hint, deterministically', () => {
+		const answer = (cf: Parameters<typeof locationHintFor>[0]) => [locationHintFor(cf), locationHintFor(cf)];
+		for (const [cf, hint] of [
+			[{ continent: 'EU', country: 'FR', longitude: '5.4' }, 'weur'],
+			[{ continent: 'NA', country: 'US', longitude: '-74' }, 'enam'],
+			[{ continent: 'AS', country: 'SG' }, 'apac'],
+			[{ continent: 'OC', country: 'AU' }, 'oc'],
+			[{ continent: 'SA', country: 'BR' }, 'sam'],
+			[{ continent: 'AF', country: 'ZA' }, 'afr']
+		] as const) expect(answer(cf)).toEqual([hint, hint]);
 	});
 });

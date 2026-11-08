@@ -36,4 +36,19 @@ describe('location hint at workspace creation', () => {
 		await world.settle();
 		expect(calls.filter((c) => c.name === created.id).every((c) => c.options === undefined)).toBe(true);
 	});
+
+	test('an operator-forced hint (the load runner\'s --hint) wins over request.cf and reaches init', async () => {
+		const world = createWorld();
+		const eve = await signUpPerson(world, 'Eve', 'eve-hint@example.com');
+		await verifyEmail(world, eve);
+		const calls: { name: string; options: unknown }[] = [];
+		const namespace = { getByName: (name: string, options?: unknown) => (calls.push({ name, options }), world.workspaces.getByName(name)) };
+		const env = { ...world.env, WORKSPACE: namespace } as unknown as Env;
+		const session = { userId: eve.userId, sessionId: 's-hint3', name: eve.name, email: eve.email, emailVerified: true };
+		const request = new Request('https://flarion.test/rpc', { cf: { continent: 'EU', country: 'FR', longitude: '5.4' } as never });
+		const created = await createWorkspace({ env, ctx: world.ctx, request }, session, { name: 'Forced' }, 'enam');
+		await world.settle();
+		expect(calls.find((c) => c.name === created.id)?.options).toEqual({ locationHint: 'enam' });
+		expect(world.workspaces.inits.find((i) => i.workspaceId === created.id)).toHaveProperty('locationHint', 'enam');
+	});
 });

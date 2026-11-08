@@ -7,6 +7,7 @@ import type { WorkspaceClient, WorkspaceDb, WorkspaceTx } from '../../db/workspa
 import { appendChanges, type LogRow } from './changelog';
 import { invalidateRegistry, loadEavRegistry, primeRegistry, type ChangeRecord } from './eav';
 import type { PageOpEnv } from './page-ops';
+import { rawAll, rawRunQuiet } from './util';
 
 export interface CommitEnv extends PageOpEnv {
 	commitId: string;
@@ -40,16 +41,12 @@ export interface CommitInput {
 const NEXT_PAGE_NUM = 'nextPageNum';
 
 export async function runCommit(db: WorkspaceClient, input: CommitInput): Promise<CommitResult> {
+	const key = input.mid ? `${input.actorId}:${input.mid}` : null;
 	try {
 		// Read once per client (cached), handed to the transaction: its ops would each read it again otherwise.
 		const registry = await loadEavRegistry(db as unknown as WorkspaceDb);
 		return await db.$transaction(async (tx) => {
 			primeRegistry(tx as unknown as WorkspaceDb, registry);
-			const key = input.mid ? `${input.actorId}:${input.mid}` : null;
-			if (key) {
-				const done = await tx.mutation.findUnique({ where: { key } });
-				if (done) return { seq: done.seq, rows: [], hasChildrenFlips: new Map(), replayed: true };
-			}
 
 			let next: number | null = null;
 			const before = new Map<string, boolean>();
@@ -107,10 +104,22 @@ export async function runCommit(db: WorkspaceClient, input: CommitInput): Promis
 				now: input.now,
 				records
 			});
-			if (key) await tx.mutation.create({ data: { key, seq, ts: input.now } });
+			// The mutation id is recorded last, and its primary key is the idempotency check: a batch that was applied before makes this
+			// insert fail, which rolls the whole commit back and is answered below with the first `seq` (no lookup statement per write).
+			if (key) await rawRunQuiet(tx, 'INSERT INTO mutation (key, seq, ts) VALUES (?, ?, ?)', key, seq, input.now);
 			return { seq, rows, hasChildrenFlips: flips, replayed: false };
 		});
 	} catch (error) {
+		// A retried batch (same `mid`) fails somewhere on its way here: a constraint on the mutation row, or an op that cannot apply twice
+		// (a create of a page that exists). Whatever failed, if the mid is recorded the first answer stands.
+		if (key) {
+			try {
+				const [done] = await rawAll<{ seq: number }>(db as unknown as WorkspaceDb, 'SELECT seq FROM mutation WHERE key = ?', key);
+				if (done) return { seq: done.seq, rows: [], hasChildrenFlips: new Map(), replayed: true };
+			} catch {
+				// the lookup is best effort: the original error is the one to report
+			}
+		}
 		invalidateRegistry();
 		throw error;
 	}

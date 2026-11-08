@@ -14,7 +14,7 @@ import {
 	type ServerMessage,
 	type Subscription
 } from '../../../lib/shared/protocol';
-import { KINDS_VERSION } from '../../../lib/shared/blocks/kinds';
+import { KINDS_VERSION } from '../../../lib/shared/blocks/kinds-version';
 import type { LiveHub } from './live';
 import type { Presence } from './presence';
 import { presenceColor } from './presence';

@@ -173,8 +173,20 @@ export class AccessService {
 
 	/** The role of a user from the `member` mirror (null: unknown or removed). */
 	memberRole(userId: string): WorkspaceRole | null {
+		const known = this.#roles.get(userId);
+		if (known !== undefined) return known;
 		const row = this.#sql.exec<{ role: string; removed_at: string | null }>('SELECT role, removed_at FROM member WHERE user_id = ?', userId).toArray()[0];
-		return row && !row.removed_at ? (row.role as WorkspaceRole) : null;
+		const role = row && !row.removed_at ? (row.role as WorkspaceRole) : null;
+		if (this.#roles.size >= 5000) this.#roles.clear();
+		this.#roles.set(userId, role);
+		return role;
+	}
+
+	/** Roles read from the `member` table, kept until it changes (`forgetMembers`: every write of that table says so, and a `member.sync` commit does). */
+	readonly #roles = new Map<string, WorkspaceRole | null>();
+
+	forgetMembers(): void {
+		this.#roles.clear();
 	}
 
 	/** Fills in the role of an actor that only names a user; null when that user holds no membership. */
@@ -558,6 +570,7 @@ export class AccessService {
 					for (const e of this.#entries.values()) this.#rebuild(e);
 					break;
 				case 'member.sync':
+					this.#roles.clear();
 					affecting = true;
 					everything = true;
 					if (row.prop) this.noteMember(row.prop);
@@ -604,6 +617,7 @@ export class AccessService {
 	reset(): void {
 		this.#entries.clear();
 		this.#facts.clear();
+		this.#roles.clear();
 	}
 }
 

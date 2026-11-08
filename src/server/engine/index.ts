@@ -22,7 +22,7 @@ import {
 	type SortSpec
 } from '../../lib/shared/filter-ast';
 import type { WorkspaceDb } from '../db/workspace.client';
-import { loadEavRegistry } from '../objects/workspace/eav/registry';
+import { loadEavRegistry, type EavRegistry } from '../objects/workspace/eav/registry';
 import { CompileEnv, compileFilter, type PlanNode } from './compile';
 import { Ctx, IN_CHUNK, toSet } from './context';
 import { chunks, qmarks } from '../objects/workspace/eav/sql';
@@ -341,8 +341,58 @@ export async function matchesFilterMany(db: WorkspaceDb, spec: FilterNode | Quer
 		for (const n of [...cands]) if (!(known ? (known.get(n) ?? member.has(n)) : member.has(n))) cands.delete(n);
 		if (cands.size === 0) return cands;
 	}
-	const plan = await compileFilter(env, filterOf(spec));
+	const plan = await cachedPlan(env, ctx.registry, filterOf(spec));
 	return evalNode(plan, cands, ctx);
+}
+
+// ───────────────────────────── plan cache ─────────────────────────────
+
+/**
+ * Compiled plans of candidate checks, per registry (a definition change loads a new registry, which drops them) and per filter and user:
+ * the live loop checks the same few filters against a handful of pages on every commit, and `compileFilter` rebuilds the same plan
+ * (SQL fragments, parameters, access paths) each time. Only plans that depend on nothing but the filter are kept: no clock (dates),
+ * no relation (compiling asks SQLite for the target page), no bitmap (the plan would hold the bitmap as it was when compiled; the
+ * option index replaces them on every refresh). Estimates are off for candidate checks, so the plan never depends on the counts either.
+ */
+const planCache = new WeakMap<EavRegistry, Map<string, PlanNode>>();
+const PLAN_CACHE_MAX = 256;
+export const planCacheStats = { hits: 0, misses: 0, uncacheable: 0 };
+const CACHEABLE_TYPES: ReadonlySet<string> = new Set(['title', 'text', 'url', 'email', 'phone', 'number', 'checkbox', 'select', 'status', 'multi_select', 'person']);
+
+const planUsesBitmap = (node: PlanNode): boolean => (node.kind === 'group' ? node.children.some(planUsesBitmap) : node.kind === 'leaf' && node.path.startsWith('bitmap'));
+
+async function cachedPlan(env: CompileEnv, registry: EavRegistry, filter: FilterNode | undefined): Promise<PlanNode> {
+	if (env.estimate || !filter) return compileFilter(env, filter);
+	const props = new Set<string>();
+	const walk = (n: FilterNode): void => {
+		if (isGroup(n)) for (const child of 'and' in n ? n.and : n.or) walk(child);
+		else props.add(n.prop);
+	};
+	walk(filter);
+	for (const id of props) {
+		if (id === '$parent' || id === '$teamspace') continue;
+		const type = registry.get(id)?.type;
+		if (!type || !CACHEABLE_TYPES.has(type)) {
+			planCacheStats.uncacheable++;
+			return compileFilter(env, filter);
+		}
+	}
+	let byFilter = planCache.get(registry);
+	if (!byFilter) planCache.set(registry, (byFilter = new Map()));
+	const key = `${env.me ?? ''}\u0000${JSON.stringify(filter)}`;
+	const hit = byFilter.get(key);
+	if (hit) {
+		planCacheStats.hits++;
+		return hit;
+	}
+	const plan = await compileFilter(env, filter);
+	planCacheStats.misses++;
+	if (planUsesBitmap(plan)) planCacheStats.uncacheable++;
+	else {
+		if (byFilter.size >= PLAN_CACHE_MAX) byFilter.clear();
+		byFilter.set(key, plan);
+	}
+	return plan;
 }
 
 /**

@@ -19,6 +19,8 @@ describe('live views equal a fresh query after every step, through socket shards
 			const stats = await runFuzz(seed, { shards: 3 });
 			expect(stats.steps).toBeGreaterThan(0);
 			expect(stats.checks).toBeGreaterThan(500);
+			// The page value cache is on in the tests: units it can serve are maintained from it, the rest fall back to SQL.
+			expect(stats.memory).not.toBeNull();
 		});
 	}
 });

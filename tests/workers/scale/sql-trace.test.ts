@@ -74,11 +74,13 @@ test('statements and time of one value-only commit with 10 sockets x 8 views', {
 			const key = q.replace(/\s+/g, ' ').replace(/\(\?(?:,\s?\?)*\)/g, '(?..)').slice(0, 110);
 			shapes.set(key, (shapes.get(key) ?? 0) + 1);
 		}
+		console.log(`[trace] memory ${kind}: ${JSON.stringify((await fx.stub.liveStats({ stale: false })).memory)}`);
 		console.log(`[trace] ${kind}: ${out.ms.toFixed(2)} ms per commit, ${(out.seen.length / out.N).toFixed(1)} statements per commit (${shapes.size} shapes)`);
 		if (env.VITE_TRACE_PRINT)
 			for (const [q, n] of [...shapes].sort((a, b) => b[1] - a[1]).slice(0, 40)) console.log(`[trace]   ${(n / out.N).toFixed(2).padStart(6)}  ${q}`);
-		// Guard: before the per-commit memos a commit that touched views made 107 statements, 23 to 28 without views.
-		expect(out.seen.length / out.N, `${kind} statements per commit`).toBeLessThan(kind === 'notes' ? 35 : 60);
+		// Guard: before the per-commit memos a commit that touched views made 107 statements, 23 to 28 without views; the third pass made 38
+		// (37 for a select, 21 for text); the fourth (raw change log and mutation rows, cached unit table, page value cache) 25 and 18.
+		expect(out.seen.length / out.N, `${kind} statements per commit`).toBeLessThan(kind === 'notes' ? 22 : 30);
 	}
 	expect(conns.length).toBe(10);
 });

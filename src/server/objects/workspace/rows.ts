@@ -69,9 +69,13 @@ export class RowReader {
 
 	#forward: { id: string; num: number; reverse: string | null }[] | null = null;
 
-	/** Forget the cached property list (a definition changed). */
+	/** Whether each collection is hand-picked only (`null`: no such collection), kept until a definition changes. */
+	#manual = new Map<string, boolean | null>();
+
+	/** Forget the cached property list and collection kinds (a definition changed). */
 	invalidate(): void {
 		this.#forward = null;
+		this.#manual.clear();
 	}
 
 	/**
@@ -229,8 +233,13 @@ export class RowReader {
 	 * breaks ties with instead of the pages' sibling ranks. Null for any other collection.
 	 */
 	memberRanks(collectionId: string, ids: readonly string[]): Map<string, string> | null {
-		const found = this.#all<{ source_ast: string | null }>('SELECT source_ast FROM collection WHERE id = ? AND deleted_at IS NULL', collectionId)[0];
-		if (!found || parseSource(found.source_ast) !== null) return null;
+		let manual = this.#manual.get(collectionId);
+		if (manual === undefined) {
+			const found = this.#all<{ source_ast: string | null }>('SELECT source_ast FROM collection WHERE id = ? AND deleted_at IS NULL', collectionId)[0];
+			manual = found ? parseSource(found.source_ast) === null : null;
+			this.#manual.set(collectionId, manual);
+		}
+		if (manual !== true) return null;
 		const out = new Map<string, string>();
 		for (const part of chunks(ids, MAX_PARAMS - 1)) {
 			for (const r of this.#all<{ page_id: string; rank: string }>(

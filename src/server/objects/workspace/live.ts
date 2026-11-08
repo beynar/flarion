@@ -43,7 +43,8 @@ import type { LogRow } from './changelog';
 import { RowReader, type AccessOf } from './rows';
 import { chunks, MAX_PARAMS, qmarks } from './util';
 import { filterKey } from '../../../lib/shared/filter-ast';
-import { MatchMemo, type SortTuple } from '../../engine';
+import { MatchMemo, planCacheStats, type SortTuple } from '../../engine';
+import { PageCache, type PageCacheStats } from './page-cache';
 import { loadEavRegistry, type EavRegistry } from './eav/registry';
 import {
 	EDITED,
@@ -54,6 +55,7 @@ import {
 	ViewState,
 	evaluateView,
 	groupKeysFor,
+	fanOutPerfMemory,
 	maintainView,
 	resolveView,
 	unitReads,
@@ -114,6 +116,8 @@ export interface LiveHost {
 	 */
 	paused?(socketId: string): boolean;
 	skipped?(socketId: string): void;
+	/** False turns the page value cache off (`MEMBERSHIP_CACHE=off`): every unit is maintained through SQL. */
+	memory?: boolean;
 }
 
 /** What two subscriptions must share for one derived diff to serve both (without the actor): built once per cached row. */
@@ -387,6 +391,15 @@ interface WindowSet {
 
 const sameKeys = (a: readonly string[], b: readonly string[]): boolean => a.length === b.length && a.every((k, i) => k === b[i]);
 
+/** A row of the unit table with its spec parsed once. */
+interface UnitRow {
+	unit_key: string;
+	kind: UnitKind;
+	spec: string;
+	flags: number;
+	parsed: Record<string, unknown>;
+}
+
 export class LiveHub {
 	readonly #host: LiveHost;
 	readonly #reader: RowReader;
@@ -421,6 +434,15 @@ export class LiveHub {
 		this.#host = host;
 		this.#sql = host.sql;
 		this.#reader = new RowReader(host.sql, host.db);
+		this.#pages = host.memory === false ? null : new PageCache(host.sql);
+	}
+
+	/** The page value cache units are maintained from when they can be (null: off). */
+	readonly #pages: PageCache | null;
+
+	/** Counters of the page value cache, for tests and operators. */
+	memoryStats(): (PageCacheStats & { units: number; fallbacks: number; plans: typeof planCacheStats }) | null {
+		return this.#pages ? { ...this.#pages.stats(), units: fanOutPerfMemory.units, fallbacks: fanOutPerfMemory.fallbacks, plans: { ...planCacheStats } } : null;
 	}
 
 	get reader(): RowReader {
@@ -654,11 +676,29 @@ export class LiveHub {
 		this.#gcUnits();
 	}
 
+	/**
+	 * The unit table (key, kind, spec, flags) and the property-to-unit index, read once and kept: a commit used to read both from SQLite
+	 * every time (`SELECT ... FROM sub_unit`, `SELECT DISTINCT unit_key FROM sub_prop WHERE prop IN (...)`). Every statement of this class
+	 * that adds, removes or re-flags a unit, or rewrites a unit's properties, drops them (`#unitsChanged`).
+	 */
+	#unitTable: UnitRow[] | null = null;
+	#propUnits: Map<string, Set<string>> | null = null;
+
+	#unitsChanged(): void {
+		this.#unitTable = null;
+		this.#propUnits = null;
+	}
+
+	#unitRows(): UnitRow[] {
+		return (this.#unitTable ??= this.#all<{ unit_key: string; kind: UnitKind; spec: string; flags: number }>('SELECT unit_key, kind, spec, flags FROM sub_unit').map((u) => ({ ...u, parsed: JSON.parse(u.spec) as Record<string, unknown> })));
+	}
+
 	#gcUnits(): void {
 		const dead = this.#all<{ unit_key: string }>('SELECT unit_key FROM sub_unit WHERE unit_key NOT IN (SELECT DISTINCT unit_key FROM sub_link)');
 		if (dead.length === 0) return;
 		this.#run('DELETE FROM sub_unit WHERE unit_key NOT IN (SELECT DISTINCT unit_key FROM sub_link)');
 		this.#run('DELETE FROM sub_prop WHERE unit_key NOT IN (SELECT DISTINCT unit_key FROM sub_link)');
+		this.#unitsChanged();
 		for (const { unit_key } of dead) {
 			this.#states.get(unit_key)?.dispose();
 			this.#states.delete(unit_key);
@@ -669,6 +709,7 @@ export class LiveHub {
 	/** Forgets every socket's registry (after a failed fan-out: the clients reconnect and resume). */
 	clearRegistry(): void {
 		for (const table of ['socket_stream', 'socket_sub', 'sub_link', 'sub_unit', 'sub_prop']) this.#run(`DELETE FROM ${table}`);
+		this.#unitsChanged();
 		this.#streams.clear();
 		this.#streamIds = new Set();
 		this.#audienceOf.clear();
@@ -678,6 +719,7 @@ export class LiveHub {
 		for (const state of this.#states.values()) state.dispose();
 		this.#states.clear();
 		this.#resolved.clear();
+		this.#pages?.clear();
 	}
 
 	subCount(socketId: string): number {
@@ -772,6 +814,7 @@ export class LiveHub {
 
 	/** The property-to-subscription index of a view unit, and its flags (1: reads the clock, 2: hand-picked only). */
 	#indexUnit(key: string, resolved: ResolvedView | null): void {
+		this.#unitsChanged();
 		this.#run('DELETE FROM sub_prop WHERE unit_key = ?', key);
 		if (!resolved) {
 			this.#run('UPDATE sub_unit SET flags = 0 WHERE unit_key = ?', key);
@@ -791,6 +834,7 @@ export class LiveHub {
 			const resolved = await resolveView(this.#host.db, spec);
 			const state = resolved ? await evaluateView(this.#host.db, resolved, spec, { now: this.#host.now(), bitmaps: this.#host.bitmaps }) : EMPTY_STATE;
 			this.#run('INSERT OR REPLACE INTO sub_unit (unit_key, kind, spec, ids) VALUES (?, ?, ?, ?)', unit.key, unit.kind, JSON.stringify(unit.spec), state.serialize());
+			this.#unitsChanged();
 			this.#states.set(unit.key, state);
 			this.#resolved.set(unit.key, resolved);
 			this.#indexUnit(unit.key, resolved);
@@ -798,6 +842,7 @@ export class LiveHub {
 		}
 		const ids = this.#evaluate(unit.kind, unit.spec);
 		this.#run('INSERT INTO sub_unit (unit_key, kind, spec, ids) VALUES (?, ?, ?, ?)', unit.key, unit.kind, JSON.stringify(unit.spec), JSON.stringify(ids));
+		this.#unitsChanged();
 	}
 
 	// ───────────────────────── subscriptions ─────────────────────────
@@ -1149,11 +1194,14 @@ export class LiveHub {
 	}
 
 	async #fanOut(commit: CommitInfo): Promise<void> {
+		// The page value cache learns what these commits wrote before anything reads it.
+		this.#pages?.apply(commit.rows);
 		const touch = analyze(commit.rows);
 		for (const id of commit.backlinkTargets ?? []) touch.backlinkTargets.add(id);
 		for (const id of commit.hasChildrenFlips?.keys() ?? []) addTo(touch.fields, id, '$hasChildren');
 		if (touch.definition) {
 			this.#resolved.clear();
+			this.#pages?.clear();
 			this.#reader.invalidate();
 			// Group order and shown groups read the registry: no cached window outlives a definition change.
 			this.#windowCache = new WeakMap();
@@ -1188,7 +1236,7 @@ export class LiveHub {
 			}
 		}
 
-		const units = this.#all<{ unit_key: string; kind: UnitKind; spec: string; flags: number }>('SELECT unit_key, kind, spec, flags FROM sub_unit');
+		const units = this.#unitRows();
 		const streams = this.streamSockets();
 		// Hidden tabs of an overloaded object are not served (the runbook): no derivation, no frame.
 		let paused: Set<string> | null = null;
@@ -1217,7 +1265,7 @@ export class LiveHub {
 			const changed = new Map<string, { old: UnitValue; next: UnitValue }>();
 			for (const u of units) {
 				if (u.kind === 'view') continue;
-				const spec = JSON.parse(u.spec) as Record<string, unknown>;
+				const spec = u.parsed;
 				if (!this.#touches(u.kind, spec, touch)) continue;
 				const old = this.#unitIds(u.unit_key);
 				const next = this.#evaluate(u.kind, spec);
@@ -1441,7 +1489,7 @@ export class LiveHub {
 	 * incrementally for the commit's candidate pages, or evaluated in full (see `view-unit.ts`).
 	 */
 	async #maintainViews(
-		units: readonly { unit_key: string; kind: UnitKind; spec: string; flags: number }[],
+		units: readonly UnitRow[],
 		touch: Touch,
 		changed: Map<string, { old: UnitValue; next: UnitValue }>,
 		rescope: Set<string>
@@ -1463,12 +1511,13 @@ export class LiveHub {
 		this.#forgetTuples(touch, editedPages, full || touch.clock || pageLevel);
 		const tuples = new TupleCache(db, now, this.#tupleStore);
 		const memo = new MatchMemo();
+		const mem = this.#pages ? { cache: this.#pages, registry: await loadEavRegistry(db) } : undefined;
 		await this.#reader.withLiveMemo(async () => {
 		for (const u of viewUnits) {
 			const key = u.unit_key;
 			const timed = touch.clock && (u.flags & 1) !== 0;
 			if (!full && !timed && !pageLevel && !indexed.has(key)) continue;
-			const spec = JSON.parse(u.spec) as unknown as ViewUnitSpec;
+			const spec = u.parsed as unknown as ViewUnitSpec;
 			const resolved = await this.#resolve(key, spec, full);
 			// A saved view now reads "is me" (or no longer does): its unit is shared by the wrong people.
 			if (resolved && resolved.usesMe !== (spec.me !== undefined)) {
@@ -1485,9 +1534,11 @@ export class LiveHub {
 				const candidates = this.#viewCandidates(resolved, touch, old, editedPages);
 				if (candidates.size === 0) continue;
 				const list = [...candidates];
-				const liveCount = this.#reader.liveIds(list).size;
+				let liveCount = 0;
+				if (mem) for (const snap of mem.cache.load(list).values()) liveCount += snap?.live ? 1 : 0;
+				else liveCount = this.#reader.liveIds(list).size;
 				const incremental =
-					liveCount > MAX_INCREMENTAL ? null : await maintainView({ db, resolved, spec, state: old, candidates: list, reader: this.#reader, tuples, now, bitmaps: this.#host.bitmaps, numOf: (id) => this.#numOf(id), memo });
+					liveCount > MAX_INCREMENTAL ? null : await maintainView({ db, resolved, spec, state: old, candidates: list, reader: this.#reader, tuples, now, bitmaps: this.#host.bitmaps, numOf: (id) => this.#numOf(id), memo, mem });
 				next = incremental ?? (await evaluateView(db, resolved, spec, { now, bitmaps: this.#host.bitmaps }));
 			}
 			this.evaluations++;
@@ -1533,10 +1584,17 @@ export class LiveHub {
 
 	/** Units of the index that read one of `props`. */
 	#unitsReading(props: readonly string[]): Set<string> {
-		const out = new Set<string>();
-		for (const part of chunks(props, MAX_PARAMS)) {
-			for (const r of this.#all<{ unit_key: string }>(`SELECT DISTINCT unit_key FROM sub_prop WHERE prop IN (${qmarks(part.length)})`, ...part)) out.add(r.unit_key);
+		if (!this.#propUnits) {
+			const index = new Map<string, Set<string>>();
+			for (const r of this.#all<{ prop: string; unit_key: string }>('SELECT prop, unit_key FROM sub_prop')) {
+				let keys = index.get(r.prop);
+				if (!keys) index.set(r.prop, (keys = new Set()));
+				keys.add(r.unit_key);
+			}
+			this.#propUnits = index;
 		}
+		const out = new Set<string>();
+		for (const prop of props) for (const key of this.#propUnits.get(prop) ?? []) out.add(key);
 		return out;
 	}
 

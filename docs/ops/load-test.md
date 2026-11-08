@@ -139,6 +139,7 @@ Compare runs of one day and read the data center line before the numbers.
 | `--p95-ms` / `--cold-ms` | 150 / 300 | The targets the exit status is judged against |
 | `--procs` | 1 per 125 tabs, at most 8 | Worker threads holding the sockets (`run.ts`), or follower calls (`inside.ts`) |
 | `--raw` | off | Judge `edit-to-diff` on the raw line instead of minus the client round trip |
+| `--hint` | from this client's `request.cf` | Location hint of the workspaces the run creates: `wnam`, `enam`, `sam`, `weur`, `eeur`, `apac`, `oc`, `afr`, `me` (see "Placement" in the fourth pass) |
 | `--json file` | none | Writes every number below as JSON |
 | `--run-id` | random | Names the synthetic users (`load-<id>-<n>`); pass one to clean it up later |
 | `--no-assert`, `--no-cleanup`, `--smoke` | | Always exit 0; keep the data; the small preset |
@@ -274,6 +275,8 @@ Staging, `https://flarion-staging.beynar.workers.dev`, from France (Cloudflare c
 | 2026-11-08 (second pass) | cold probes from the laptop, `run.ts --cold-probes 5 --cold-idle 20` | 10 | 2 | 50 / 5 | laptop | | | | | first window p50 593 to 674 ms, max 745 to 997 ms (open 530 to 600, hello to snapshot 65) |
 | 2026-11-08 (third pass) | split script, thin object classes, per-commit memos, six official-style runs of 60 s (two builds, three runs each), see "Third pass" | 1,000 | 20 | 500 / 8 | in-DC | object MXP: **67 / 182 / 300 ms** and 77 / 333 / 811 ms; object CDG: 435 / 1,617 ms (degraded, commit call p50 225 ms); saturated (3 of 6, one with the object in MRS, two not recorded): 4.5 s / 11.3 s, 7.0 s / 10.1 s (684 of 1,200 writes refused), 26 s / 35 s | commit call 54 / 117 ms and 59 / 189 ms when not saturated | 0 of 1,200 except the one run that refused 684 | 0 except two saturated runs (225,548 and 250,009 not delivered by the end of the run) | |
 | 2026-11-08 (third pass) | cold probes from the laptop, `run.ts --cold-probes 5 --cold-idle 25`, split script and thin classes | 10 | 2 | 50 / 5 | laptop | | | | | first window p50 545 ms, max 937 ms (open 483, hello to snapshot 62) against 593 to 674 before |
+| 2026-11-08 (fourth pass) | page value cache, grouped commits with the yield, session fast path, lazy wake; 16 official-shape runs of 60 s, see "Fourth pass: The runs" | 1,000 | 20 | 500 / 8 | in-DC | CDG best **42 / 182 / 377 ms**; per data center 84 / 622 to 476 / 1,702 ms elsewhere (LHR, LIS, MAD, AMS, MRS); 4 saturated runs before the yield, none in 7 after | commit call 42 / 138 ms (best) | 0 in the 7 runs since the yield | 0 | |
+| 2026-11-08 (fourth pass) | cold probes from the laptop, `run.ts --smoke --cold-probes 6 --cold-idle 30` | 10 | 2 | 50 / 5 | laptop | | | | | first window p50 412 ms, max 501 ms (open 344, hello to snapshot 68) against 545 / 937 |
 
 The server side of the 1,000-tab runs, whatever the client saw: the Worker's `/rpc/mutate` took 54 ms at p50 and 190 ms at the maximum (`wrangler tail`, a 1,000-tab run at 5 writes a second), a
 commit with its fan-out to 1,000 tabs (15,000 frames a second from inside) leaves no queue behind it, and the object's CPU per commit at 200 tabs went from 40 ms
@@ -290,7 +293,7 @@ on a server socket, so the object cannot see one): see "What is left".
 
 ## What is left
 
-The third pass (below) moved the commit CPU, the script and the cold dial; its own "What is left" is the current list, the bullets here are the second pass's.
+The fourth pass (the last section) has the current list; the third pass moved the commit CPU, the script and the cold dial; the bullets here are the second pass's.
 
 - **The 150 ms line at 1,000 tabs and 20 writes a second is not met.** Second pass (docs/spikes/p4-scale.md "Second pass"): the best runs reach a p95 of 157 to 183 ms (p50 66 to 75), a typical run 250 to 360
   ms, and a quarter to a third of the runs saturate the object's thread completely (a slow host: one `setProp` commit costs 19 to 25 ms of CPU against 9 to 11 ms on a fast one, then 20 commits a second with the
@@ -399,3 +402,121 @@ and three saturated (one in MRS, two whose data center the report did not print:
 cold window is not met (545 ms), and half of these six runs saturated (the second pass: a quarter to a third; the three runs of each build cannot tell the difference, and no run of this pass was captured by `tail` while saturated). What remains, with the evidence: on a slow host one commit is still 15 ms of object CPU (`tail`) plus the 1,000-tab fan-out, with the 20 ms
 output gate and a 13 ms hop to the shards on top of every frame, and the probes' own isolates add a few ms to each sample (above). Next steps in order of expected gain: the base of a commit (21 statements and the ORM's per-call overhead: authorization and the change rows in raw SQL), the two start-up closures above,
 and fewer cross-data-center hops (the shards of one workspace land in different data centers, second pass).
+
+## Fourth pass: placement, grouped commits, a page value cache, a cheaper dial
+
+Targets (1,000 tabs, 20 writes a second, inside Cloudflare, three consecutive official runs of 60 s): edit-to-diff p95 150 ms, cold first window 300 ms, no failed write, nothing missing, no saturation.
+**Not met.** What this pass did, with the numbers, and what the runs say is below. Staging only; production, DNS and resources were not touched.
+
+### What was done, item by item
+
+| # | Item | State |
+| --- | --- | --- |
+| 1 | In-memory candidate membership | Done: the page value cache (`objects/workspace/page-cache.ts`), on by default, `MEMBERSHIP_CACHE=off` (Worker var) turns it off. |
+| 2 | Compiled-SQL and plan cache per filter shape | Done where it is safe (`engine/index.ts` `cachedPlan`, per registry); it is never hit in the load test because the cache above answers first (`plans` in `liveStats().memory`). |
+| 3 | Group queued commits | Done (`WorkspaceDO.#drainCommits`), plus the yield that makes groups form at all (below). |
+| 4 | Commit base cost | Done: 37.6 to 22.6 statements for a numeric `setProp` (see the table). |
+| 5 | `/ws`: session fast path, cold wake | Done: `auth/session-cache.ts`, lazy object modules. Cold window 545 to 412 ms (p50): not 300. |
+| 6 | Placement | Done: hint from `request.cf`, `--hint`, reported per data center. Placement still decides the numbers. |
+
+**1. The page value cache.** A per-object `PageCache` holds, for the pages unit maintenance asks about, the page's stored properties (`props_json` with the title), parent, teamspace, rank and liveness, and the hand-picked
+members of the collections units read. A commit's change rows patch it (`apply`: a `setProp` row carries the new value exactly as `props_json` stores it; a `create` row changes no held page; any other kind of row empties the cache),
+and a miss is one SQL read of the page rows, so a cold or emptied cache is slower, never wrong. `maintainView` then re-checks a value-only write's membership, group keys and sort tuples **in memory with the shared oracle**
+(`evaluate`, `groupKeysOfValue`, `sortKeyOf`: the evaluators `tests/workers/engine` compares the compiled SQL with on random workspaces), with no SQL at all: 780 unit maintenances in the trace test, 0 fallbacks.
+It only serves units that read what it holds: title, text, url, email, phone, number, checkbox, select, status, multi-select and person properties, `$parent`/`$teamspace` in the collection's source, group-bys on select, status, multi-select,
+person and checkbox. Anything else (dates and the clock, relations, formulas, rollups, edit stamps, hand-picked-only collections) keeps the SQL path (`fallbacks` counts them; the fuzz has both). Memory is bounded at 20,000 pages (about 6 MB, cleared
+when exceeded) plus the member ids of the collections read, well inside the plan's half of 128 MB. The cache is emptied on every definition change, when the live registry is cleared (a failed fan-out, a restore) and by any row that is not a value write.
+Other state kept in memory since this pass, each emptied by what changes it: the unit table and the property-to-unit index of the live loop (read from SQLite on every commit before), whether a collection is hand-picked only (`RowReader`), and the
+members' roles (`AccessService.memberRole`, forgotten the moment the `member` table is written and by any `member.sync` row; it was two SQL statements per write).
+The live fuzz runs with the cache on: the stored units are compared with a fresh SQL evaluation after every step. 50 seeds (1 to 50) and 60 seeds (100 to 159), each with socket shards on and off, plus 20 more at the end, all green; the fuzz now includes
+bursts of queued value writes (the grouped path) and records how many units were served from the cache (`stats.memory`). `tests/workers/scale/page-cache.test.ts` checks that a warm cache stays warm through value writes (0 clears, patches > 0) and is emptied by a trash.
+
+**2. The plan cache.** `matchesFilterMany` keeps compiled plans per registry, filter and user. Only plans that depend on nothing but the filter are kept: no clock, no relation (compiling asks SQLite for the target), no bitmap (the plan would hold the
+bitmap as it was; the option index replaces them on every refresh). With the page value cache in front it is a fallback's fallback; the third pass had found the JavaScript of compiling was not in the profile, and it still is not.
+
+**3. Grouped commits.** `#commit` queues the commit; one serialized task (`#drainCommits`) takes the commit at the head and the **value-only** (`setProp` only) commits right behind it, up to 32, and runs them in one `storage.transaction`, each
+through `runCommit` (its own `transaction`, a savepoint: a commit that fails is rolled back and answered alone, the others stand), so every mutation keeps its own `seq`, `mid` row and exact change log; the client's optimistic layer drops on its own `seq`
+as before (any frame at or past it stands for it, which the fan-out merge already relied on). After the transaction each commit gets the usual follow-up (option index, visibility) and the fan-outs of the group are merged into one (`mergeCommits`).
+A commit that changed nothing, or wrote anything but value rows, ends its group: the commits queued after it run in the next task, because a unit's order is maintained against stored sort tuples and a fan-out must see the data exactly as it stands after
+the last commit it covers (the fuzz found this: seeds 3, 14, 17, 21 and 29 failed until a no-op write ended its group). The answers go out after the task, i.e. after the held-back fan-out, as before. `tests/workers/scale/group-commit.test.ts`
+(queued writes, a failing one in the middle, a retried `mid`).
+**Groups never formed until the drain yielded.** A commit is one synchronous turn of the object, so a write never finds another waiting inside it: the requests that arrive while the thread is busy are still at its door and are delivered only when the turn ends.
+In the first runs `liveStats().groups` said 0 groups and 0 merged fan-outs over 1,229 commits, and the runs that went slow saturated instead (983 and 854 writes refused with "Too many requests queued"). The drain therefore yields once (`setTimeout(0)`) before it takes
+its group when writes are a stream (the last two arrived less than 100 ms apart; a lone edit does not wait), so the requests at the door join it. After that, groups of 2 to 7 commits formed on every slow host (14 to 162 groups per run, 28 to 303 merged commits)
+and **no run saturated or refused a write: 0 failed writes and 0 missing deliveries in 7 of 7 official runs, against 4 saturated runs in 9 before the yield**. A slow host now shows as a latency tail, not as a refused write.
+A check on the cost of a transaction: in the object, `storage.transaction` returns in 0 ms and `transactionSync` plus `storage.sync()` (durable) takes 11 ms (CDG); it is the output gate, not the transaction, that waits for durability (`diagTxn`, `role: 'diag-txn'` of the probe route).
+
+**4. Commit statements** (`tests/workers/scale/sql-trace.test.ts`, 10 sockets x 8 views x 500 rows; the guard is now 30 and 22):
+
+| `setProp` | statements before (third pass) | statements after | what went |
+| --- | ---: | ---: | --- |
+| number (3 units touched) | 37.6 | **22.6** | membership, tuples and groups of every touched unit (14), the unit table and property index reads (2), the mutation lookup (1), the change log's read-back and coalescing select (the ORM insert is now one `INSERT ... RETURNING`), the `value_count` delete (now only when a count reaches zero) |
+| select (hot option property) | 37.0 | **21.2** | same |
+| text (no unit reads it) | 21.3 | **18.3** | the same writes, 3 fewer |
+
+Raw SQL replaced the ORM for the change log and the mutation row (each ORM call costs CPU on top of SQLite's); the idempotency check is the primary key of the mutation row (a retried batch fails at the end, rolls back and is answered with its first `seq`, so no lookup
+statement is spent on the 99.9% that are not retries). What is left of a write is the write itself (page row, EAV row, count row, change row), the authorization (2 policy reads), the window rows of the touched views (`SELECT p.id, p.num...`, 4 per commit: not served from the cache) and the unit
+state writes (`UPDATE sub_unit SET ids`, about 1 per touched unit). The local wall time of the trace test is not comparable across passes any more (the commits of that test are a stream, so they pay the drain's yield); the third pass's was 1.35 ms per commit and the same build measured
+0.92 ms before the page value cache, so the statements are the figure to read. On staging `wrangler tail` showed `apply` at p50 13 to 15 ms of CPU on slow hosts, as in the third pass (the tail samples a few dozen events per run): the statements were not what a slow host's CPU is made of, the fan-out is.
+
+**5. The `/ws` path.** `resolveSession` first verifies better-auth's signed `session_data` cookie cache itself (`auth/session-cache.ts`: HMAC-SHA-256 with `BETTER_AUTH_SECRET` over the cookie exactly as better-auth signs it, constant-time `crypto.subtle.verify`, the cached session and user checked as
+`getSession` does: token, version, both expiries, `restricted`) and imports nothing heavy. It never answers "signed out": a miss, an expired or older-than-5-minutes cache, a bad signature, a previous-secret cookie or anything unexpected falls back to full better-auth (`sessionPathStats` counts both).
+A dial with a valid cache no longer evaluates the 1.81 MB `auth` chunk (about 135 ms at 75 ms a MB). The Workspace object's wake evaluated 1.89 MB and now 1.11 MB: the migration estate and `viborm/migrations` load only when a migration is due (a fingerprint in `estate_head`), the block-kinds
+version no longer pulls in edytor, and mentions, ingest, export, files, backup, search and embeddings load on first use. Tests: `tests/unit/auth/session-cache.test.ts`, `tests/workers/auth/session-fast-path.test.ts`, `tests/workers/objects/estate-lazy.test.ts`.
+**Cold first window** from the laptop (`run.ts --smoke --cold-probes 6 --cold-idle 30`): **p50 412 ms, max 501** (dial to open 344, hello to snapshot 68), 5 probes of the previous run 453 / 572; the third pass was 545 / 937. **Not 300.** The floor is the dial of the script itself: a `/healthz`
+with `Upgrade: websocket` that touches neither session nor object takes 275 to 320 ms to the first byte (TLS 33 ms, plain request 85 to 130 ms) because the 4.2 MB upload (157 chunks) is loaded by every fresh isolate (about 45 ms a MB uploaded and never evaluated, plus 66 ms): 250 ms of a 300 ms budget is spent
+before any of our code runs. Under 300 ms means a small front Worker for `/ws` (a design decision, as in the second pass), not more laziness.
+
+**6. Placement.** `createWorkspace` derives the hint from `request.cf` (`locationHintFor`: NA by longitude west or east of 100 W, SA, EU split `weur`/`eeur` at 20 E, Middle East by country, AS `apac`, AF, OC; `undefined` without geography) and the hint travels in the `init` outbox row, so a retried
+delivery places the object where the first would have, and the object keeps it to place its socket shards next to itself. Before this pass the load runner's `workspace` route built its `Services` without the request, so the runner's workspaces were created with **no hint at all**; it now passes the request, so a workspace is placed
+for the continent this client is in, which is the continent of the isolates that hold the tabs (`POST /api/load-test/inside` is answered from the same client's nearest data center). **A run controls it with `--hint <region>`** (`wnam enam sam weur eeur apac oc afr me`), sent as `locationHint` to
+`/api/load-test/workspace` and validated there (400 otherwise); the run prints `location hint weur (request.cf (EU/FR))` and `placement: hint weur, object runs in CDG`, `object runs in CDG; shards in LHR (234) ...`, and `--json` keeps them. A hint is a region, not a data center: "weur" has put the object in CDG, AMS, LHR, MAD, LIS and MRS
+(the data center the load generators run in) in these runs, and the shards in others again. Nothing here picks the best of several objects; every run is reported with the data center it got.
+
+### The runs
+
+Official shape (`inside.ts --tabs 1000 --users 25 --rows 500 --views 8 --writes-per-sec 20 --duration 60 --procs 8`, staging with `SOCKET_SHARDS=4`, `SOCKET_LOCAL_MAX=64`, client in France, hint `weur`), edit-to-diff of the follower tabs (the verdict line; "merged" counts a merged frame at the time of
+that frame, which the verdict takes when it is stricter):
+
+| Run | Build | Object runs in (shards) | p50 / p95 / p99 | merged p95 | Commit call p50 / p95 | Failed writes | Missing | Groups / merged commits |
+| --- | --- | --- | --- | --- | --- | ---: | ---: | --- |
+| r1 | page cache, groups, no yield | CDG (CDG, LHR) | 55 / 226 / 426 ms | 234 | 45 / 142 | 0 | 0 | 0 / 0 |
+| r2 | same | MAD (MAD, LIS) | 128 / 537 / 1,024 ms | 548 | 84 / 300 | 0 | 0 | 0 / 0 |
+| r3 | same | LHR (LHR, AMS) | 84 / 622 / 878 ms | 609 | 57 / 371 | 0 | 0 | 0 / 0 |
+| r4 | same | not recorded | 2.3 s / 4.7 s (saturated) | | 2.0 s / 4.0 s | 832 | 0 | |
+| s1 | + role cache | LIS (MAD, LIS) | 148 / 564 / 829 ms | 556 | 100 / 350 | 0 | 0 | 0 / 0 |
+| s2 | same | CDG (CDG, LHR) | saturated: 2.4 s / 3.4 s | | 1.7 s / 2.6 s | 983 | 0 | |
+| s3 | same | LHR (LHR x 4) | 86 / 386 / 561 ms | 383 | 58 / 234 | 0 | 0 | 0 / 0 |
+| s4 | same | CDG (CDG, LHR) | saturated: 5.6 s / 7.6 s | | 3.7 s / 7.1 s | 854 | 0 | |
+| d1 | `--shards 0` (the object holds every socket) | CDG | saturated: 3.7 s / 5.6 s | | 3.2 s / 5.3 s | 488 | 0 | |
+| t1 | + yield before the group | CDG (LHR, CDG) | 111 / 389 / 537 ms | 435 | 78 / 325 | 0 | 0 | 80 / 123 |
+| t2 | same | CDG (LHR, CDG) | **42 / 182 / 377 ms** | 210 | 42 / 138 | 0 | 0 | 14 / 28 |
+| t3 | same | AMS (AMS, LHR) | 212 / 957 / 1,767 ms | 1,155 | 166 / 963 | 0 | 0 | 130 / 216 |
+| t4 | same | CDG (LHR, CDG) | 140 / 817 / 1,626 ms | 1,000 | 98 / 800 | 0 | 0 | 97 / 153 |
+| u1 | final (yield only for a stream) | MRS | 424 / 2,037 / 2,559 ms | 2,101 | 368 / 1,946 | 0 | 0 | 148 / 261 |
+| u2 | same | LIS | 140 / 396 / 614 ms | 419 | 112 / 304 | 0 | 0 | 48 / 66 |
+| u3 | same | AMS | 476 / 1,702 / 2,183 ms | 1,840 | 428 / 1,609 | 0 | 0 | 162 / 303 |
+
+Read per data center, not per run:
+
+- **CDG** (nine runs): 42 / 182 ms (t2, the best p95 of any run so far, equal to the third pass's 182), 55 / 226, 111 / 389, 140 / 817, and four saturated ones before the yield. The same data center gives a 182 and an 817 on the same build: the hosts differ.
+- **LHR**: 84 / 622 and 86 / 386. **LIS**: 148 / 564 and 140 / 396. **MAD**: 128 / 537. **AMS**: 212 / 957 and 476 / 1,702. **MRS** (where the load generators run): 424 / 2,037.
+- No run met 150 ms at p95; the best (CDG, 182 ms, p50 42 ms) is 32 ms above it. **The last three official runs, u1, u2 and u3** (MRS, LIS, AMS): 0 failed writes, 0 missing deliveries, no saturation, p95 2,037 / 396 / 1,702 ms. **The p95 target is not met.**
+  Seven runs in a row since the yield (t1 to t4, u1 to u3) refused no write and lost no delivery.
+
+What the numbers say about what remains, with the evidence:
+- The p50 and the tail follow the host and the distance between the object, its shards and the isolates that hold the tabs (idle call to the object: CDG 14 ms, MAD 18, LHR 20, LIS 29; through to every shard 30 to 53 ms). An object that lands next to the shards and on a quick host (t2) keeps p50 at 42 ms.
+- `--shards 0` saturates in CDG (d1): 20 commits a second with 1,000 sends each (20,000 sends a second) is more than the object's thread does; shards stay.
+- The object's CPU per commit on a slow host is what the groups and merged fan-outs now absorb; on a slow host the commits wait for the thread (governor average 40 to 45 ms, `overloaded` in the runs of u1 and u3), they are no longer refused.
+- Fewer statements did not move a slow host's CPU much (tail `cpuTime` of `apply` p50 13 to 15 ms before and after); the fan-out (derivation per audience and view, encoding, 64 local sends, the 4 shard batches) is the rest of it, and the output gate adds the 11 to 22 ms of durability.
+
+### What is left, in order of expected gain
+
+1. A front Worker for `/ws` (and `/rpc`) so that a dial does not load the 4.2 MB of the app: about 250 ms of the cold window, 300 ms target.
+2. The fan-out's CPU on a slow host: window rows of the touched views from the page value cache (4 of the 22 statements left, and the derivation per audience), persisting `sub_unit.ids` after the sends instead of before (needs a recovery rule: see the third pass), and
+   fewer, larger shard batches when a group is merged.
+3. Placement: shards in the data center of the object (today they land elsewhere with the same hint), and, for the load test, followers in a data center that is not the object's (an object in MRS competes with the generators: u1).
+4. An acknowledged `seq` in `ping` so a slow consumer can be skipped (second pass), unchanged.
+
+Tests added or changed: `tests/workers/scale/group-commit.test.ts`, `tests/workers/scale/page-cache.test.ts`, the burst step and `stats.memory` of the live fuzz (`tests/workers/live/harness.ts`), `tests/workers/scale/sql-trace.test.ts` (tighter guard, page cache counters),
+`tests/workers/scale/location.test.ts` and `tests/unit/server/location-hint.test.ts` (a forced hint, the parser), plus the session and estate tests above. A 30 s timeout on `tests/workers/socket/route.test.ts`'s 401 test (a request without a usable cookie cache loads better-auth in a cold test isolate).

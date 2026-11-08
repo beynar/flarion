@@ -61,7 +61,7 @@ import {
 import { aiDone, aiFailed, flushAi, markAiPages, prepareAi, readAiMarkers, type AiMarker, type AiPrepare } from './eav/ai';
 import { validateFilter, type FilterGroup } from '../../../lib/shared/filter-ast';
 import { invalid, notFound, WorkspaceError } from './errors';
-import { ingestInTransaction, type IngestResult } from './ingest';
+import type { IngestResult } from './ingest';
 import { LiveHub, fanOutPerf, resetFanOutPerf, unitEvaluations, type CommitInfo } from './live';
 import { OptionIndex, type Drift } from '../../bitmaps/option-index';
 import { ensureRoaring, setRoaringEnabled } from '../../bitmaps/roaring';
@@ -70,7 +70,6 @@ import { COALESCABLE_KINDS, LoadGovernor, mergeCommits } from './governor';
 import { QUOTA_WARN_RATIO, storageLevel } from '../../limits';
 import { applyRawSteps, migrateWorkspace, migrationFlags } from './migrations';
 import { applyPageOp, isPageOp } from './page-ops';
-import { processMentions } from './mentions';
 import { Presence } from './presence';
 import {
 	ACTOR_HEADER,
@@ -114,59 +113,30 @@ import {
 	type GovernedTx
 } from './access';
 import { createAuthorizer } from './authorize';
-import { exportDatabase, exportTree, type ExportReadDeps } from './export-read';
+import type { ExportReadDeps } from './export-read';
 import { queryViewRows, type QueryViewInput, type QueryViewResult } from '../../engine/view';
 import { revokeGrantRecords, setGrantRecords, toGrant, type GrantInput } from './grants';
 import { syncRooms, type RoomStub } from './room-sync';
 import { chunks } from './util';
 import { planPurge, purgePageRows, purgeTeamspaceRows, purgeableTeamspaces, TRASH_RETENTION_MS, type PurgedPage } from './purge';
 import type { Grant } from '../../../lib/shared/schemas';
-import {
-	abortUpload,
-	beginUpload,
-	completeUpload,
-	ensureFilesTable,
-	filesUsage,
-	getFile,
-	normalizeLevel,
-	pendingUpload,
-	purgeFilesOfPages,
-	readableFile,
-	recordUploadId,
-	setStorageQuota,
-	sweepUncommitted,
-	type BeginInput,
-	type FilesContext,
-	type PageLevel
-} from './files';
+import { ensureFilesTable, normalizeLevel, type PageLevel } from './files-base';
+import type { BeginInput, FilesContext } from './files';
 import { APP_VERSION_HEADER, APP_VERSION_PARAM, registryScopesOf, type Notification } from '../../../lib/shared/protocol';
 import { reindexAll as reindexSearch } from '../../search/index-writes';
-import { applyChunks, chunkIdsOf, diffChunks, forgetChunks, type EmbedPlan, type PageChunks } from '../../search/embed-store';
-import { embedPages, type EmbedResult } from '../../search/embed';
-import { quickFind, recordVisit, searchPages, type QuickFindInput, type QuickFindResult, type SearchInput, type SearchResult } from '../../search/query';
+import type { EmbedPlan, PageChunks } from '../../search/embed-store';
+import type { EmbedResult } from '../../search/embed';
+import type { QuickFindInput, QuickFindResult, SearchInput, SearchResult } from '../../search/query';
 import { ensureSearchTables } from '../../search/tables';
-import { vectorSearchOf } from '../../search/vectors';
-import { chunkSearchOf, retrievePassages, type Passage } from '../../ai/ask';
+import type { Passage } from '../../ai/ask';
 import { abandonIdempotent, beginIdempotent, ensureIdempotencyTable, finishIdempotent, type IdempotencyBegin } from './idempotency';
 import { metric, since } from '../../metrics';
-import {
-	applySelfReferences,
-	armPointInTimeRestore,
-	countRows,
-	exportBatch,
-	exportHeader,
-	importLines,
-	isPopulated,
-	prepareFixups,
-	readHeadSeq,
-	restoreSequences,
-	wipeRows,
-	EXPORT_TABLES,
-	type BackupHeader,
-	type ExportBatch,
-	type ExportCursor,
-	type PitrStorage
-} from './backup';
+import type { BackupHeader, ExportBatch, ExportCursor, PitrStorage } from './backup';
+
+// Rarely used parts are imported by the first call that needs them, not by every wake (docs/ops/load-test.md "Start-up": a cold wake
+// pays about 75 ms per MB it evaluates): files, backup and import, export, ingestion and mentions, search, embeddings and Ask AI.
+const filesLib = () => import('./files');
+const backupLib = () => import('./backup');
 
 type TrashListInput = v.InferOutput<typeof trashListInputSchema>;
 
@@ -200,6 +170,22 @@ const ROOM_BATCH = 16;
 /** Sockets the Workspace DO holds itself before it hands new ones to shards (`SOCKET_SHARDS`): small workspaces never leave it. */
 const DEFAULT_LOCAL_SOCKETS = 48;
 const MAX_SHARDS = 16;
+/** Value-only commits queued behind each other that one transaction and one fan-out take (see `WorkspaceDO.#drainCommits`). */
+const MAX_COMMIT_GROUP = 32;
+/** Commits closer together than this (ms) are a stream: the drain then yields once so that commits waiting at the object's door join its group. */
+const STREAM_GAP_MS = 100;
+
+interface QueuedCommit {
+	db: WorkspaceClient;
+	actorId: string;
+	body: Parameters<typeof runCommit>[1]['body'];
+	options: { mid?: string; backlinkTargets?: () => readonly string[]; definition?: boolean; groupable?: boolean };
+	startedAt: number;
+	resolve(commit: CommitResult): void;
+	reject(error: unknown): void;
+	roomWork: { scope: CommitAccess; changes: ReturnType<AccessService['changedActors']> } | null;
+	closeTrashedRooms: boolean;
+}
 const SHARD_SETTING = 'socket_shards';
 
 /** Protocol frames start with a string `t`; oRPC's have a numeric one. */
@@ -285,6 +271,7 @@ export class WorkspaceDO extends DurableObject<Env> {
 			actorOf: (socketId) => this.#socket(socketId)?.actor ?? null,
 			view: (actor) => this.#access.view(actor),
 			bitmaps: this.#options,
+			memory: env.MEMBERSHIP_CACHE !== 'off',
 			// A hidden tab of an overloaded object is not served; it is resynchronized when it shows again.
 			paused: (socketId) => this.#governor.overloaded && this.#hidden.has(socketId),
 			skipped: (socketId) => void this.#stale.add(socketId)
@@ -388,11 +375,45 @@ export class WorkspaceDO extends DurableObject<Env> {
 		return n;
 	}
 
+	/** Calls of `diagTxn` running right now, and the most there were at once. */
+	#diagInflight = 0;
+	#diagPeak = 0;
+
+	/**
+	 * Diagnostics for the load tool (docs/ops/load-test.md "Fourth pass"): `n` writes to a scratch `meta` row, each in the given kind of
+	 * transaction, and how long each took from this object's side (`async`: `storage.transaction`, what every commit does; `sync`:
+	 * `transactionSync`; `sync+wait`: `transactionSync` then `storage.sync()`, i.e. until the write is durable), plus the most calls of
+	 * this method that were inside the object at once. It shows whether a commit holds the object's input while its write is confirmed.
+	 */
+	async diagTxn(mode: 'async' | 'sync' | 'sync+wait', n: number): Promise<{ ms: number[]; peak: number }> {
+		this.#diagInflight++;
+		this.#diagPeak = Math.max(this.#diagPeak, this.#diagInflight);
+		const sql = this.ctx.storage.sql;
+		const write = (i: number) => sql.exec("INSERT INTO meta (key, value) VALUES ('diag', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value", JSON.stringify(i));
+		const ms: number[] = [];
+		try {
+			for (let i = 0; i < n; i++) {
+				const t = Date.now();
+				if (mode === 'async') await this.ctx.storage.transaction(async () => void write(i));
+				else {
+					this.ctx.storage.transactionSync(() => void write(i));
+					if (mode === 'sync+wait') await this.ctx.storage.sync();
+				}
+				ms.push(Date.now() - t);
+			}
+			return { ms, peak: this.#diagPeak };
+		} finally {
+			this.#diagInflight--;
+			if (this.#diagInflight === 0) this.#diagPeak = 0;
+		}
+	}
+
 	/** Diagnostics: where the object and its shards run, and how many sockets and batches each holds. */
-	async shardStats(): Promise<{ colo: string; shards: { sockets: number; pushes: number; colo: string }[] }> {
+	async shardStats(): Promise<{ colo: string; hint: string | null; shards: { sockets: number; pushes: number; colo: string }[] }> {
 		const count = Math.max(this.#shardCounts.length, this.#shardPlacement().count);
 		const shards = await Promise.all(Array.from({ length: count }, (_, i) => this.#shardStub(i).stats()));
-		return { colo: await coloOf(), shards };
+		this.#hint ??= this.#readHint();
+		return { colo: await coloOf(), hint: this.#hint ?? null, shards };
 	}
 
 	/** Operators and tests: how many shards take new sockets and how many the object keeps (`null`: back to the environment's values). Applies to sockets opened after. */
@@ -695,103 +716,194 @@ export class WorkspaceDO extends DurableObject<Env> {
 		}
 	}
 
+	/** Commits waiting for the serial queue, in arrival order (see `#drainCommits`). */
+	readonly #commitQueue: QueuedCommit[] = [];
+	#drainScheduled = false;
+	#lastCommitAt = 0;
+	#streaming = false;
+	/** Group sizes since the wake (diagnostics): commits run, groups run, the largest group. */
+	#groupStats = { commits: 0, groups: 0, largest: 0 };
+
 	/**
-	 * A commit and its fan-out, as one unit in the serial queue. Between the two, the actors' visibility sets
-	 * are brought up to date (`noteCommit` marks what the commit invalidates, `settle` recomputes it for the
-	 * connected sockets' actors), so the fan-out ANDs every window with the sets as they are after the commit
-	 * and knows the pages that entered or left each of them. Access changes then reach the open rooms.
+	 * A commit and its fan-out, as one unit in the serial queue (several, when value-only commits are queued behind each other:
+	 * `#drainCommits` runs them in one transaction, each with its own `seq`, `mid` and change rows, and one merged fan-out). Between
+	 * the commit and the fan-out, the actors' visibility sets are brought up to date (`noteCommit` marks what the commit invalidates,
+	 * `settle` recomputes it for the connected sockets' actors), so the fan-out ANDs every window with the sets as they are after the
+	 * commit and knows the pages that entered or left each of them. Access changes then reach the open rooms.
 	 */
 	async #commit(
 		db: WorkspaceClient,
 		actorId: string,
 		body: Parameters<typeof runCommit>[1]['body'],
-		options: { mid?: string; backlinkTargets?: () => readonly string[]; definition?: boolean } = {}
+		options: { mid?: string; backlinkTargets?: () => readonly string[]; definition?: boolean; groupable?: boolean } = {}
 	): Promise<CommitResult> {
-		const roomWork: { value: { scope: CommitAccess; changes: ReturnType<AccessService['changedActors']> } | null } = { value: null };
-		let closeTrashedRooms = false;
-		const startedAt = Date.now();
-		const result = await this.#serialize(async () => {
-			let commit: CommitResult;
-			try {
-				commit = await runCommit(db, { actorId, now: Date.now(), mid: options.mid, body });
-			} catch (error) {
-				throw mapPolicyError(error);
-			}
-			if (!commit.replayed) {
-				if (options.definition) invalidateRegistry();
-				try {
-					await syncOptionIndex(this.#options, this.#db, commit.rows, this.#hub.reader);
-				} catch (error) {
-					// The index is an accelerator: whatever went wrong, it is rebuilt from `p_ref` when a filter next reads it.
-					console.warn('[workspace] option index refresh failed, rebuilding on demand:', error instanceof Error ? error.message : error);
-					this.#options.invalidateAll();
-				}
-				const access = this.#access.noteCommit(commit.rows);
-				try {
-					const directory = this.#sockets();
-					const { cold } = await this.#access.settle(directory.actors());
-					if (access.affecting && cold.size > 0) {
-						// A socket whose visibility set was lost (the object slept) cannot be diffed: it reconnects.
-						for (const socket of directory.all()) {
-							if (!cold.has(actorKey(socket.actor))) continue;
-							this.#hub.dropSocket(socket.socketId);
-							socket.ws.close(CLOSE.TRY_AGAIN, 'resync');
-						}
-					}
-				} catch (error) {
-					this.#resync(error);
-				}
-				const info: CommitInfo = {
-					seq: commit.seq,
-					rows: commit.rows,
-					hasChildrenFlips: commit.hasChildrenFlips,
-					backlinkTargets: options.backlinkTargets?.(),
-					actorIds: [actorId]
-				};
-				// More work waiting behind this commit and it only wrote property values: its fan-out is merged with the next
-				// one (a socket gets one diff for several commits, tagged with the last `seq`), whether the object is overloaded
-				// or just busy: writes that cluster cost one derivation and one frame per socket instead of several, which is what
-				// keeps the queue short at 1,000 tabs. The writes are all committed and answered; only the pushes are shared. The
-				// last task of the queue sends what was held back.
-				const mergeable = this.#queued > 1 && !options.definition && commit.rows.length > 0 && commit.rows.every((r) => COALESCABLE_KINDS.has(r.kind));
-				if (mergeable) {
-					this.#pendingFanOut.push(info);
-					this.#merged++;
-				} else {
-					const pending = this.#pendingFanOut;
-					this.#pendingFanOut = [];
-					try {
-						await this.#hub.fanOut(pending.length ? mergeCommits([...pending, info]) : info);
-					} catch (error) {
-						// The commit stands; the live state may not. Drop the registry and ask every socket to
-						// reconnect: `hello` with its last seq replays or resnapshots.
-						this.#resync(error);
-					}
-				}
-				// Definitions held outside any subscription (property registry, teamspace and member directory).
-				this.#api.broadcastRegistry(registryScopesOf(commit.rows.map((row) => row.kind)), commit.seq);
-				if (commit.rows.some((row) => row.kind === 'trash' || row.kind === 'archiveTeamspace')) closeTrashedRooms = true;
-				if (access.affecting) roomWork.value = { scope: access, changes: this.#access.changedActors() };
-				this.#access.clearDeltas();
-				// Edit to diff: from the start of the commit to the last diff sent (docs/PLAN.md "Operating targets").
-				const elapsed = since(startedAt);
-				metric(this.env, 'mutation', { labels: ['ok'], value: elapsed, extra: [commit.rows.length] });
-				metric(this.env, 'fanout', { value: this.#hub.streamCount(), extra: [elapsed, commit.rows.length] });
-				if (this.#governor.record(elapsed, this.#queued - 1) && this.#governor.shouldAlert()) {
-					const workspaceId = this.ctx.id.name ?? '';
-					console.error(`[workspace] ${workspaceId} is overloaded: commit and fan-out average ${Math.round(this.#governor.average)} ms, ${this.#queued - 1} tasks waiting. Hidden tabs are skipped and value-only commits share fan-outs until it clears.`);
-					metric(this.env, 'error', { labels: ['overload', workspaceId], value: 1, extra: [this.#governor.average] });
-				}
-			}
-			return commit;
+		const entry = { db, actorId, body, options, startedAt: Date.now(), roomWork: null, closeTrashedRooms: false } as unknown as QueuedCommit;
+		const done = new Promise<CommitResult>((resolve, reject) => {
+			entry.resolve = resolve;
+			entry.reject = reject;
 		});
+		// Writes arriving less than 100 ms apart are a stream (a load, a script, several people): see the yield in `#drainCommits`.
+		this.#streaming = entry.startedAt - this.#lastCommitAt < STREAM_GAP_MS;
+		this.#lastCommitAt = entry.startedAt;
+		this.#commitQueue.push(entry);
+		this.#scheduleDrain();
+		const result = await done;
 		// Trashing a page closes its room: open tabs show "This page was moved to Trash" (docs/PLAN.md).
-		if (closeTrashedRooms) await this.#closeTrashedRooms();
-		if (roomWork.value) await this.#syncRooms(roomWork.value.scope, roomWork.value.changes);
+		if (entry.closeTrashedRooms) await this.#closeTrashedRooms();
+		if (entry.roomWork) await this.#syncRooms(entry.roomWork.scope, entry.roomWork.changes);
 		void this.#armAlarm();
 		// AI properties the commit made due go to the queue (a no-op without any AI property).
 		await this.#flushAi();
 		return result;
+	}
+
+	#scheduleDrain(): void {
+		if (this.#drainScheduled || this.#commitQueue.length === 0) return;
+		this.#drainScheduled = true;
+		// The answers go out once the task is over: when it was the last of the queue, `#serialize` has then sent the fan-outs held back.
+		void this.#serialize(() => this.#drainCommits()).then((answers) => answers.forEach((answer) => answer()), () => undefined);
+	}
+
+	/**
+	 * Runs the commit at the head of the queue, and the value-only commits queued right behind it, in one transaction: a savepoint
+	 * per commit (one that fails is rolled back alone and answered with its error), so every mutation keeps its own `seq`, its
+	 * `mid` row and an exact change log. What the group shares is the transaction's begin and end, the registry read, the option
+	 * index, visibility and fan-out work: the commits' fan-outs are merged into one frame per socket (`mergeCommits`), tagged with
+	 * the last `seq`, and the client drops its optimistic layer on its own `seq` (any frame at or past it stands for it).
+	 */
+	async #drainCommits(): Promise<(() => void)[]> {
+		// A commit is one synchronous turn of this object, so a write never finds another waiting inside the object: the ones that arrived
+		// while the thread was busy are still at its door, and they are delivered (and queue their commits here) only when this turn ends.
+		// Yielding once, before the group is taken, lets them in: on a slow host that is what turns a backlog of single commits into a
+		// group with one fan-out (docs/ops/load-test.md "Fourth pass"). A lone write (nothing within the last 100 ms) does not wait.
+		if (this.#streaming) await new Promise<void>((resolve) => setTimeout(resolve, 0));
+		this.#drainScheduled = false;
+		const first = this.#commitQueue.shift();
+		if (!first) return [];
+		const answers: (() => void)[] = [];
+		const group = [first];
+		if (first.options.groupable) while (group.length < MAX_COMMIT_GROUP && this.#commitQueue[0]?.options.groupable) group.push(this.#commitQueue.shift()!);
+		// Whatever is left runs in the next task.
+		this.#scheduleDrain();
+		const committed: { entry: QueuedCommit; commit: CommitResult }[] = [];
+		const attempt = async (entry: QueuedCommit): Promise<void> => {
+			try {
+				committed.push({ entry, commit: await runCommit(entry.db, { actorId: entry.actorId, now: Date.now(), mid: entry.options.mid, body: entry.body }) });
+			} catch (error) {
+				entry.reject(mapPolicyError(error));
+			}
+		};
+		try {
+			if (group.length === 1) await attempt(first);
+			else
+				await this.ctx.storage.transaction(async () => {
+					for (const [index, entry] of group.entries()) {
+						await attempt(entry);
+						// A commit that wrote more than property values, or nothing at all (a write that changed no value), is the last of its group: the
+						// fan-outs of the commits before it are merged into its own, which must see the data as it stands right after it and
+						// no later commit (a unit's order is maintained against the stored tuples of the pages it did not re-place).
+						const last = committed[committed.length - 1];
+						if (last?.entry === entry && !last.commit.replayed && !(last.commit.rows.length > 0 && last.commit.rows.every((r) => COALESCABLE_KINDS.has(r.kind)))) {
+							const rest = group.splice(index + 1);
+							this.#commitQueue.unshift(...rest);
+							break;
+						}
+					}
+				});
+			this.#scheduleDrain();
+		} catch (error) {
+			// The shared transaction itself failed (not one commit): nothing of the group stands.
+			for (const { entry } of committed) entry.reject(error);
+			for (const entry of group) entry.reject(error);
+			committed.length = 0;
+		}
+		if (group.length > 1) {
+			this.#groupStats.groups++;
+			this.#groupStats.largest = Math.max(this.#groupStats.largest, group.length);
+		}
+		this.#groupStats.commits += group.length;
+		for (const [index, { entry, commit }] of committed.entries()) {
+			if (commit.replayed) {
+				answers.push(() => entry.resolve(commit));
+				continue;
+			}
+			try {
+				await this.#afterCommit(entry, commit, index < committed.length - 1);
+				answers.push(() => entry.resolve(commit));
+			} catch (error) {
+				answers.push(() => entry.reject(error));
+			}
+		}
+		return answers;
+	}
+
+	/** What follows a commit that stands: the option index, visibility, the fan-out (or its merge with the next), registry and room pushes. */
+	async #afterCommit(entry: QueuedCommit, commit: CommitResult, moreInGroup: boolean): Promise<void> {
+		const { options, actorId } = entry;
+		if (options.definition) invalidateRegistry();
+		try {
+			await syncOptionIndex(this.#options, this.#db, commit.rows, this.#hub.reader);
+		} catch (error) {
+			// The index is an accelerator: whatever went wrong, it is rebuilt from `p_ref` when a filter next reads it.
+			console.warn('[workspace] option index refresh failed, rebuilding on demand:', error instanceof Error ? error.message : error);
+			this.#options.invalidateAll();
+		}
+		const access = this.#access.noteCommit(commit.rows);
+		try {
+			const directory = this.#sockets();
+			const { cold } = await this.#access.settle(directory.actors());
+			if (access.affecting && cold.size > 0) {
+				// A socket whose visibility set was lost (the object slept) cannot be diffed: it reconnects.
+				for (const socket of directory.all()) {
+					if (!cold.has(actorKey(socket.actor))) continue;
+					this.#hub.dropSocket(socket.socketId);
+					socket.ws.close(CLOSE.TRY_AGAIN, 'resync');
+				}
+			}
+		} catch (error) {
+			this.#resync(error);
+		}
+		const info: CommitInfo = {
+			seq: commit.seq,
+			rows: commit.rows,
+			hasChildrenFlips: commit.hasChildrenFlips,
+			backlinkTargets: options.backlinkTargets?.(),
+			actorIds: [actorId]
+		};
+		// More work waiting behind this commit and it only wrote property values: its fan-out is merged with the next
+		// one (a socket gets one diff for several commits, tagged with the last `seq`), whether the object is overloaded
+		// or just busy: writes that cluster cost one derivation and one frame per socket instead of several, which is what
+		// keeps the queue short at 1,000 tabs. The writes are all committed and answered; only the pushes are shared. The
+		// last task of the queue sends what was held back.
+		const mergeable = (moreInGroup || this.#queued > 1) && !options.definition && commit.rows.length > 0 && commit.rows.every((r) => COALESCABLE_KINDS.has(r.kind));
+		if (mergeable) {
+			this.#pendingFanOut.push(info);
+			this.#merged++;
+		} else {
+			const pending = this.#pendingFanOut;
+			this.#pendingFanOut = [];
+			try {
+				await this.#hub.fanOut(pending.length ? mergeCommits([...pending, info]) : info);
+			} catch (error) {
+				// The commit stands; the live state may not. Drop the registry and ask every socket to
+				// reconnect: `hello` with its last seq replays or resnapshots.
+				this.#resync(error);
+			}
+		}
+		// Definitions held outside any subscription (property registry, teamspace and member directory).
+		this.#api.broadcastRegistry(registryScopesOf(commit.rows.map((row) => row.kind)), commit.seq);
+		if (commit.rows.some((row) => row.kind === 'trash' || row.kind === 'archiveTeamspace')) entry.closeTrashedRooms = true;
+		if (access.affecting) entry.roomWork = { scope: access, changes: this.#access.changedActors() };
+		this.#access.clearDeltas();
+		// Edit to diff: from the start of the commit to the last diff sent (docs/PLAN.md "Operating targets").
+		const elapsed = since(entry.startedAt);
+		metric(this.env, 'mutation', { labels: ['ok'], value: elapsed, extra: [commit.rows.length] });
+		metric(this.env, 'fanout', { value: this.#hub.streamCount(), extra: [elapsed, commit.rows.length] });
+		if (this.#governor.record(elapsed, this.#queued - 1) && this.#governor.shouldAlert()) {
+			const workspaceId = this.ctx.id.name ?? '';
+			console.error(`[workspace] ${workspaceId} is overloaded: commit and fan-out average ${Math.round(this.#governor.average)} ms, ${this.#queued - 1} tasks waiting. Hidden tabs are skipped and value-only commits share fan-outs until it clears.`);
+			metric(this.env, 'error', { labels: ['overload', workspaceId], value: 1, extra: [this.#governor.average] });
+		}
 	}
 
 	/** Closes every open room whose page is in the trash, with the reason the tabs show. Best effort. */
@@ -954,6 +1066,7 @@ export class WorkspaceDO extends DurableObject<Env> {
 				create: { userId: args.ownerId, role: 'owner', name: args.ownerName },
 				update: { role: 'owner', name: args.ownerName, removedAt: null }
 			});
+			this.#access.forgetMembers();
 			const general = await insertTeamspace(tx, args.ownerId, {
 				name: 'General',
 				icon: null,
@@ -1003,12 +1116,16 @@ export class WorkspaceDO extends DurableObject<Env> {
 		const wasActive = !!existing && !existing.removedAt;
 		const changed = removed ? wasActive : !wasActive || existing?.role !== role;
 		const removedAt = removed ? new Date() : null;
-		const upsert = (db: WorkspaceDb) =>
-			db.member.upsert({
+		const upsert = async (db: WorkspaceDb) => {
+			const written = await db.member.upsert({
 				where: { userId: args.userId },
 				create: { userId: args.userId, role, name, removedAt },
 				update: { role, name, removedAt }
 			});
+			// The role mirror is read by every write before it is queued: forget it the moment the table changes.
+			this.#access.forgetMembers();
+			return written;
+		};
 		if (removed) {
 			// The user lost access: close their sockets with FORBIDDEN so they do not reconnect.
 			for (const socket of this.#sockets().all()) {
@@ -1127,7 +1244,7 @@ export class WorkspaceDO extends DurableObject<Env> {
 				await indexChanges(tx, records);
 				return records;
 			},
-			{ mid: batch.mid, definition: ops.some(isDefinitionOp) }
+			{ mid: batch.mid, definition: ops.some(isDefinitionOp), groupable: ops.every((op) => op.op === 'setProp') }
 		);
 		return { seq: result.seq };
 	}
@@ -1316,13 +1433,13 @@ export class WorkspaceDO extends DurableObject<Env> {
 	}
 
 	/** A collection's view as a table of display rows (an inline database, exported or published); `null` when unreadable. */
-	exportDatabase(actor: AccessActor, input: { collectionId: string; viewId?: string | null; localFilter?: FilterGroup | null; limit?: number }) {
-		return exportDatabase(this.#exportDeps(), actor, input);
+	async exportDatabase(actor: AccessActor, input: { collectionId: string; viewId?: string | null; localFilter?: FilterGroup | null; limit?: number }) {
+		return (await import('./export-read')).exportDatabase(this.#exportDeps(), actor, input);
 	}
 
 	/** The readable pages under `rootId` (every page when null), in tree order: the plan of a recursive or workspace export. */
-	exportTree(actor: AccessActor, rootId: string | null, limit?: number) {
-		return exportTree(this.#exportDeps(), actor, rootId, limit);
+	async exportTree(actor: AccessActor, rootId: string | null, limit?: number) {
+		return (await import('./export-read')).exportTree(this.#exportDeps(), actor, rootId, limit);
 	}
 
 	/** Tells the connected tabs of `userId` something (an export that finished): a `notification` message, not stored. */
@@ -1580,6 +1697,7 @@ export class WorkspaceDO extends DurableObject<Env> {
 	async ingestPages(items: PageIndexItem[]): Promise<{ indexed: number; skipped: number }> {
 		if (items.length === 0) return { indexed: 0, skipped: 0 };
 		let result: IngestResult | undefined;
+		const { ingestInTransaction } = await import('./ingest');
 		await this.#commit(
 			this.#db,
 			SYSTEM_ACTOR,
@@ -1593,9 +1711,9 @@ export class WorkspaceDO extends DurableObject<Env> {
 			{ backlinkTargets: () => result?.backlinkTargets ?? [] }
 		);
 		// Mention emails: new @mentions become `email` jobs (never fails the index batch).
-		await processMentions({ db: this.#db, env: this.env, host: this, workspaceId: this.ctx.id.name ?? '' }, items).catch((error) =>
-			console.warn('[mentions] failed:', String(error))
-		);
+		await import('./mentions')
+			.then(({ processMentions }) => processMentions({ db: this.#db, env: this.env, host: this, workspaceId: this.ctx.id.name ?? '' }, items))
+			.catch((error) => console.warn('[mentions] failed:', String(error)));
 		return { indexed: result?.indexed ?? 0, skipped: result?.skipped ?? 0 };
 	}
 
@@ -1748,54 +1866,56 @@ export class WorkspaceDO extends DurableObject<Env> {
 	}
 
 	/** `files.begin`: `update` on the page and room in the quota, then the upload's id and where to send it. */
-	filesBegin(actor: Actor, input: BeginInput) {
-		return beginUpload(this.#filesContext(actor), actor, input);
+	async filesBegin(actor: Actor, input: BeginInput) {
+		return (await filesLib()).beginUpload(this.#filesContext(actor), actor, input);
 	}
 
 	/** The caller's pending upload (`PUT /files/:fileId`, the parts endpoints), checked again for access. */
-	filesPending(actor: Actor, fileId: string) {
-		return pendingUpload(this.#filesContext(actor), actor, fileId);
+	async filesPending(actor: Actor, fileId: string) {
+		return (await filesLib()).pendingUpload(this.#filesContext(actor), actor, fileId);
 	}
 
 	async filesRecordUploadId(actor: Actor, fileId: string, uploadId: string): Promise<void> {
+		const files = await filesLib();
 		const ctx = this.#filesContext(actor);
-		await pendingUpload(ctx, actor, fileId);
-		recordUploadId(ctx, fileId, uploadId);
+		await files.pendingUpload(ctx, actor, fileId);
+		files.recordUploadId(ctx, fileId, uploadId);
 	}
 
 	/** `files.complete`: assembles a multipart upload, checks the bytes, commits the row. */
-	filesComplete(actor: Actor, fileId: string, parts?: { partNumber: number; etag: string }[]) {
-		return completeUpload(this.#filesContext(actor), actor, fileId, parts);
+	async filesComplete(actor: Actor, fileId: string, parts?: { partNumber: number; etag: string }[]) {
+		return (await filesLib()).completeUpload(this.#filesContext(actor), actor, fileId, parts);
 	}
 
-	filesAbort(actor: Actor, fileId: string) {
-		return abortUpload(this.#filesContext(actor), actor, fileId);
+	async filesAbort(actor: Actor, fileId: string) {
+		return (await filesLib()).abortUpload(this.#filesContext(actor), actor, fileId);
 	}
 
 	/** A committed file's metadata when `actor` may read its page (`files.get`, and the download route). */
-	filesGet(actor: Actor, fileId: string) {
-		return getFile(this.#filesContext(actor), fileId);
+	async filesGet(actor: Actor, fileId: string) {
+		return (await filesLib()).getFile(this.#filesContext(actor), fileId);
 	}
 
 	/** Like `filesGet` with the R2 key, or `null` (the download route turns that into a 404). */
-	filesResolve(actor: Actor, fileId: string) {
-		return readableFile(this.#filesContext(actor), fileId);
+	async filesResolve(actor: Actor, fileId: string) {
+		return (await filesLib()).readableFile(this.#filesContext(actor), fileId);
 	}
 
 	/** The weekly sweep for this workspace: uploads never committed are removed. */
-	filesSweep(options: { now?: number; maxAgeMs?: number } = {}) {
-		return sweepUncommitted(this.ctx.storage.sql, this.env, this.ctx.id.name ?? '', options);
+	async filesSweep(options: { now?: number; maxAgeMs?: number } = {}) {
+		return (await filesLib()).sweepUncommitted(this.ctx.storage.sql, this.env, this.ctx.id.name ?? '', options);
 	}
 
 	/** Purge: the files of these pages lose their rows and bytes. */
-	filesPurgePages(pageIds: string[]) {
-		return purgeFilesOfPages(this.ctx.storage.sql, this.env, this.ctx.id.name ?? '', pageIds);
+	async filesPurgePages(pageIds: string[]) {
+		return (await filesLib()).purgeFilesOfPages(this.ctx.storage.sql, this.env, this.ctx.id.name ?? '', pageIds);
 	}
 
 	/** Storage used and the quota; `setQuota` (bytes, or `null` for the default) changes it. */
-	filesStorage(setQuota?: number | null) {
-		if (setQuota !== undefined) setStorageQuota(this.ctx.storage.sql, setQuota);
-		return filesUsage(this.ctx.storage.sql);
+	async filesStorage(setQuota?: number | null) {
+		const files = await filesLib();
+		if (setQuota !== undefined) files.setStorageQuota(this.ctx.storage.sql, setQuota);
+		return files.filesUsage(this.ctx.storage.sql);
 	}
 
 	// ───────────────────────── search (Accounts, AI, API: src/server/search) ─────────────────────────
@@ -1804,24 +1924,27 @@ export class WorkspaceDO extends DurableObject<Env> {
 	async #searchContext(actor: Actor, semantic: boolean) {
 		this.#writeDb(actor);
 		const visible = await this.visibleNums({ userId: actor.userId, role: actor.role });
-		return { db: this.#db, visible, vector: semantic ? vectorSearchOf(this.env, actor.workspaceId) : null };
+		const vector = semantic ? (await import('../../search/vectors')).vectorSearchOf(this.env, actor.workspaceId) : null;
+		return { db: this.#db, visible, vector };
 	}
 
 	/** The search page: full text (plus Vectorize for questions), filters, snippets. Only pages the actor can read. */
 	async searchQuery(actor: Actor, input: SearchInput): Promise<SearchResult> {
-		return searchPages(await this.#searchContext(actor, true), input);
+		const context = await this.#searchContext(actor, true);
+		return (await import('../../search/query')).searchPages(context, input);
 	}
 
 	/** Quick find (`⌘K`): title prefixes, recently visited pages, then full-text hits. */
 	async searchQuick(actor: Actor, input: QuickFindInput): Promise<QuickFindResult> {
-		return quickFind(await this.#searchContext(actor, false), actor.userId, input);
+		const context = await this.#searchContext(actor, false);
+		return (await import('../../search/query')).quickFind(context, actor.userId, input);
 	}
 
 	/** Records that `actor` opened a page they can read (feeds quick find's "recent"). Anything else is ignored. */
 	async searchVisit(actor: Actor, pageId: string): Promise<void> {
 		const context = await this.#searchContext(actor, false);
 		const row = await this.#db.page.findUnique({ where: { id: pageId }, select: { num: true, deletedAt: true } });
-		if (row && !row.deletedAt && context.visible.has(row.num)) await recordVisit(this.#db, actor.userId, row.num);
+		if (row && !row.deletedAt && context.visible.has(row.num)) await (await import('../../search/query')).recordVisit(this.#db, actor.userId, row.num);
 	}
 
 	/** Backfill for workspaces that existed before search: rebuilds the whole FTS5 index. Idempotent. */
@@ -1832,6 +1955,8 @@ export class WorkspaceDO extends DurableObject<Env> {
 	/** Backfill for Vectorize: embeds the chunks of every live page whose hash is new. Idempotent; a no-op without AI/Vectorize. */
 	async embedAll(): Promise<EmbedResult[]> {
 		const results: EmbedResult[] = [];
+		const { applyChunks, chunkIdsOf, diffChunks, forgetChunks } = await import('../../search/embed-store');
+		const { embedPages } = await import('../../search/embed');
 		const store = {
 			diff: async (model: string, pages: PageChunks[]) => diffChunks(this.#db, model, pages),
 			apply: (model: string, pages: PageChunks[]) => applyChunks(this.#db, model, pages),
@@ -1866,19 +1991,19 @@ export class WorkspaceDO extends DurableObject<Env> {
 
 	/** Embedding bookkeeping, called over RPC by `embedPages` and `deletePageVectors` (src/server/search). */
 	async embedDiff(model: string, pages: PageChunks[]): Promise<EmbedPlan[]> {
-		return diffChunks(this.#db, model, pages);
+		return (await import('../../search/embed-store')).diffChunks(this.#db, model, pages);
 	}
 
 	async embedApply(model: string, pages: PageChunks[]): Promise<void> {
-		await applyChunks(this.#db, model, pages);
+		await (await import('../../search/embed-store')).applyChunks(this.#db, model, pages);
 	}
 
 	async embedChunkIds(pageIds: string[]): Promise<string[]> {
-		return chunkIdsOf(this.#db, pageIds);
+		return (await import('../../search/embed-store')).chunkIdsOf(this.#db, pageIds);
 	}
 
 	async embedForget(pageIds: string[]): Promise<void> {
-		await forgetChunks(this.#db, pageIds);
+		await (await import('../../search/embed-store')).forgetChunks(this.#db, pageIds);
 	}
 
 	// ───────────────────────── public API and Ask AI (Accounts, AI, API) ─────────────────────────
@@ -1940,6 +2065,7 @@ export class WorkspaceDO extends DurableObject<Env> {
 	async askRetrieve(actor: Actor, input: { question: string; under?: string }): Promise<Passage[]> {
 		this.#writeDb(actor);
 		const visible = await this.visibleNums({ userId: actor.userId, role: actor.role });
+		const { chunkSearchOf, retrievePassages } = await import('../../ai/ask');
 		return retrievePassages(
 			{ db: this.#db, visible, vector: chunkSearchOf(this.env, actor.workspaceId) },
 			input.question,
@@ -2078,6 +2204,10 @@ export class WorkspaceDO extends DurableObject<Env> {
 		perf: typeof fanOutPerf;
 		/** The overload governor: state, average commit-and-fan-out milliseconds, declared overloads, merged commits, hidden and stale tabs. */
 		governor: { overloaded: boolean; average: number; triggers: number; merged: number; hidden: number; stale: number };
+		/** Commits run, groups of several commits sharing a transaction, and the largest group, since the wake. */
+		groups: { commits: number; groups: number; largest: number };
+		/** The page value cache (null: off): pages read from SQL, entries patched, times emptied, pages held, units maintained from it and units that fell back to SQL. */
+		memory: { loads: number; patches: number; clears: number; size: number; units: number; fallbacks: number; plans: { hits: number; misses: number; uncacheable: number } } | null;
 		/** The option index: loaded properties, builds since the wake, bytes in the WASM heap (null when bitmaps are off). */
 		bitmaps: { loaded: number[]; builds: number; bytes: number; drift: Drift[] } | null;
 		/** Sockets held by shards, per shard, and the batches and frames the shards were sent since the wake. */
@@ -2093,6 +2223,8 @@ export class WorkspaceDO extends DurableObject<Env> {
 			perf,
 			shards: { sockets: [...this.#shardCounts].map((n) => n ?? 0), local: this.#sockets().size - this.#remotes.size, batches: this.#router.batches, sends: this.#router.sends },
 			governor: { overloaded: this.#governor.overloaded, average: this.#governor.average, triggers: this.#governor.triggers, merged: this.#merged, hidden: this.#hidden.size, stale: this.#stale.size },
+			groups: { ...this.#groupStats },
+			memory: this.#hub.memoryStats(),
 			bitmaps,
 			units: this.#hub.unitCount(),
 			evaluations: this.#hub.evaluations,
@@ -2113,6 +2245,7 @@ export class WorkspaceDO extends DurableObject<Env> {
 	 * 60 s by default) so every batch reads the same state, and returns the export's header.
 	 */
 	async backupBegin(holdMs = 60_000): Promise<BackupHeader> {
+		const { exportHeader } = await backupLib();
 		this.#backupRelease?.();
 		let release!: () => void;
 		const held = new Promise<void>((resolve) => (release = resolve));
@@ -2134,6 +2267,7 @@ export class WorkspaceDO extends DurableObject<Env> {
 
 	/** The next batch of rows (about 1 MiB). Read only. */
 	async backupBatch(header: BackupHeader, cursor: ExportCursor | null): Promise<ExportBatch> {
+		const { exportBatch } = await backupLib();
 		// Under the hold the queue is closed, so read directly; otherwise take a turn like any other work.
 		if (this.#backupRelease) return exportBatch(this.ctx.storage.sql, header, cursor);
 		return this.#serialize(async () => exportBatch(this.ctx.storage.sql, header, cursor));
@@ -2141,6 +2275,8 @@ export class WorkspaceDO extends DurableObject<Env> {
 
 	/** Ends a backup: lifts the hold and says where the change log is now (a different `seq` than the header's means writes happened). */
 	async backupEnd(): Promise<{ headSeq: number }> {
+		// Imported before the hold lifts: a commit that was waiting must not run before the head is read.
+		const { readHeadSeq } = await backupLib();
 		this.#backupRelease?.();
 		return { headSeq: readHeadSeq(this.ctx.storage.sql) };
 	}
@@ -2162,6 +2298,7 @@ export class WorkspaceDO extends DurableObject<Env> {
 	async importBegin(header: BackupHeader, options: { force?: boolean } = {}): Promise<void> {
 		if (header.kind !== 'flarion-workspace-backup' || header.v !== 1) throw new WorkspaceError('BAD_REQUEST', 'Not a Flarion workspace backup');
 		if (header.workspaceId !== (this.ctx.id.name ?? header.workspaceId)) throw new WorkspaceError('BAD_REQUEST', 'The backup belongs to another workspace');
+		const { isPopulated, prepareFixups, wipeRows } = await backupLib();
 		await this.#serialize(async () => {
 			const hasPage = this.ctx.storage.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'table' AND name = 'page'").one().n > 0;
 			if (!hasPage) await this.#bootstrapSchema();
@@ -2175,6 +2312,7 @@ export class WorkspaceDO extends DurableObject<Env> {
 
 	/** Loads a batch of export lines, in one transaction. Idempotent. */
 	async importBatch(header: BackupHeader, lines: string[]): Promise<number> {
+		const { importLines } = await backupLib();
 		return this.#serialize(async () => this.ctx.storage.transactionSync(() => importLines(this.ctx.storage.sql, header, lines)));
 	}
 
@@ -2184,6 +2322,7 @@ export class WorkspaceDO extends DurableObject<Env> {
 	 * object holds in memory and replays indexing.
 	 */
 	async importFinish(header: BackupHeader, trailer: { counts: Record<string, number>; rows: number }): Promise<{ counts: Record<string, number>; replayed: number }> {
+		const { applySelfReferences, countRows, restoreSequences, EXPORT_TABLES } = await backupLib();
 		const counts = await this.#serialize(async () => {
 			const loaded = countRows(this.ctx.storage.sql, EXPORT_TABLES);
 			for (const [table, n] of Object.entries(trailer.counts)) {
@@ -2244,6 +2383,7 @@ export class WorkspaceDO extends DurableObject<Env> {
 	 */
 	async restoreToTimestamp(timestamp: number, pitr: PitrStorage = this.ctx.storage as unknown as PitrStorage): Promise<never> {
 		const workspaceId = this.ctx.id.name ?? '';
+		const { armPointInTimeRestore } = await backupLib();
 		await armPointInTimeRestore(
 			pitr,
 			timestamp,

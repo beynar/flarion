@@ -38,6 +38,7 @@ import { orderGroups } from '../../engine/group';
 import type { WorkspaceDb } from '../../db/workspace.client';
 import { readCollection } from './eav';
 import { loadEavRegistry, type EavRegistry } from './eav/registry';
+import { checkInMemory, memoryEligible, type PageCache } from './page-cache';
 import type { RowReader } from './rows';
 
 /** The ungrouped list's key. */
@@ -81,6 +82,8 @@ export interface ResolvedView {
 	spec: QuerySpec;
 	/** The collection has no source AST: hand-picked members only (manual ranks break ties). */
 	manual: boolean;
+	/** The collection's source AST (null for a hand-picked-only collection). */
+	source: FilterGroup | null;
 	usesMe: boolean;
 	/** A filter reads relative dates: the answer changes with the clock. */
 	timed: boolean;
@@ -129,6 +132,7 @@ export async function resolveView(db: WorkspaceDb, spec: ViewUnitSpec): Promise<
 		collectionId: spec.collectionId,
 		spec: query,
 		manual: source === null,
+		source: source ?? null,
 		usesMe: conditions.some((c) => c.op === 'is_me' || c.op === 'is_not_me'),
 		timed: conditions.some((c) => isRelative(c.value)),
 		props: [...props]
@@ -296,6 +300,14 @@ export class TupleCache {
 		this.#byKey = store ?? new Map();
 	}
 
+	/** Tuples computed elsewhere (from the page value cache) for these sorts: later loads of the same pages find them. */
+	seed(sorts: readonly SortSpec[], tuples: ReadonlyMap<number, SortTuple>): void {
+		const key = JSON.stringify(sorts);
+		let have = this.#byKey.get(key);
+		if (!have) this.#byKey.set(key, (have = new Map()));
+		for (const [n, t] of tuples) have.set(n, t);
+	}
+
 	async load(sorts: readonly SortSpec[], nums: readonly number[]): Promise<Map<number, SortTuple>> {
 		const key = JSON.stringify(sorts);
 		let have = this.#byKey.get(key);
@@ -324,6 +336,8 @@ export interface MaintainInput {
 	numOf?: (id: string) => number | undefined;
 	/** Candidate-check answers shared by the units of one commit's maintenance. */
 	memo?: MatchMemo;
+	/** The page value cache and the registry: a unit that only reads what the cache evaluates is maintained from memory (see `page-cache.ts`). */
+	mem?: { cache: PageCache; registry: EavRegistry };
 }
 
 /**
@@ -331,20 +345,41 @@ export interface MaintainInput {
  * incremental path cannot answer (a page's tuple could not be loaded): the caller evaluates in full.
  */
 export async function maintainView(input: MaintainInput): Promise<ViewState | null> {
-	const { db, resolved, spec, state, candidates, reader, tuples, now, bitmaps, numOf: cachedNumOf, memo } = input;
+	const { db, resolved, spec, state, candidates, reader, tuples, now, bitmaps, numOf: cachedNumOf, memo, mem } = input;
 	const groupBy = resolved.spec.groupBy ?? null;
 	if ((state.groupBy === null) !== (groupBy === null) || JSON.stringify(state.groupBy) !== JSON.stringify(groupBy)) return null;
 	const sorts = resolved.spec.sorts ?? [];
 	const cset = new Set(candidates);
 
-	const numOf = reader.nums(candidates);
-	const live = reader.liveIds(candidates);
-	const liveNums = candidates.filter((id) => live.has(id) && numOf.has(id)).map((id) => numOf.get(id) as number);
-	const matched = await matchesFilterMany(db, resolved.spec.filter, liveNums, { me: spec.me, now, collectionId: resolved.collectionId, bitmaps, memo });
-	const matchedNums = [...matched];
+	let numOf: Map<string, number>;
+	let matchedNums: number[];
 	const keysOf = new Map<number, string[]>();
-	if (groupBy) for (const [n, keys] of await groupKeysOf(db, groupBy, matchedNums, { now })) keysOf.set(n, keys);
-	else for (const n of matchedNums) keysOf.set(n, [FLAT]);
+	let mine: Map<number, SortTuple> | null = null;
+	const inMemory = mem && resolved.source && memoryEligible(resolved, mem.registry, resolved.spec, resolved.source, resolved.manual);
+	if (inMemory) {
+		// No SQL: the cache holds the candidates' values, the shared oracle evaluates the unit's conditions on them.
+		const checked = checkInMemory(
+			{ cache: mem.cache, registry: mem.registry, me: spec.me, now, collectionId: resolved.collectionId, source: resolved.source!, filter: resolved.spec.filter, groupBy, sorts },
+			candidates,
+			FLAT
+		);
+		numOf = new Map();
+		for (const [id, snap] of checked.snaps) if (snap) numOf.set(id, snap.num);
+		matchedNums = [...checked.matched.keys()];
+		for (const [n, keys] of checked.matched) keysOf.set(n, keys);
+		mine = checked.tuples;
+		tuples.seed(sorts, checked.tuples);
+		fanOutPerfMemory.units++;
+	} else {
+		numOf = reader.nums(candidates);
+		const live = reader.liveIds(candidates);
+		const liveNums = candidates.filter((id) => live.has(id) && numOf.has(id)).map((id) => numOf.get(id) as number);
+		const matched = await matchesFilterMany(db, resolved.spec.filter, liveNums, { me: spec.me, now, collectionId: resolved.collectionId, bitmaps, memo });
+		matchedNums = [...matched];
+		if (groupBy) for (const [n, keys] of await groupKeysOf(db, groupBy, matchedNums, { now })) keysOf.set(n, keys);
+		else for (const n of matchedNums) keysOf.set(n, [FLAT]);
+		if (mem) fanOutPerfMemory.fallbacks++;
+	}
 	const idOf = new Map<number, string>();
 	for (const id of candidates) {
 		const n = numOf.get(id);
@@ -356,7 +391,7 @@ export async function maintainView(input: MaintainInput): Promise<ViewState | nu
 	for (const [key, list] of state.lists) lists.set(key, list.some((id) => cset.has(id)) ? list.filter((id) => !cset.has(id)) : (list as string[]).slice());
 
 	if (matchedNums.length > 0) {
-		const mine = await tuples.load(sorts, matchedNums);
+		mine ??= await tuples.load(sorts, matchedNums);
 		const cmp = compareSortTuples(sorts);
 		const probe = new Map<string, SortTuple>();
 		const tupleOfId = async (id: string): Promise<SortTuple | undefined> => {
@@ -409,3 +444,6 @@ export function unitReads(props: readonly string[], changed: ReadonlySet<string>
 	for (const p of props) if (changed.has(p)) return true;
 	return false;
 }
+
+/** Units maintained from the page value cache, and units that could not (they read something the cache does not hold) since the wake. */
+export const fanOutPerfMemory = { units: 0, fallbacks: 0 };

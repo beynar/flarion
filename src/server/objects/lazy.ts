@@ -42,7 +42,7 @@ export function lazyObject<T extends DurableObject<Env>>(
 }
 
 export const WORKSPACE_METHODS = [
-	'diagEcho', 'shardStats', 'configureShards', 'shardFrame', 'shardClosed', 'fetch', 'webSocketMessage', 'webSocketClose', 'webSocketError', 'ping', 'alarm', 'hourly', 'pruneLog', 'init',
+	'diagEcho', 'diagTxn', 'shardStats', 'configureShards', 'shardFrame', 'shardClosed', 'fetch', 'webSocketMessage', 'webSocketClose', 'webSocketError', 'ping', 'alarm', 'hourly', 'pruneLog', 'init',
 	'syncMember', 'rename', 'getMemberRole', 'apply', 'createPage', 'nextRank', 'getPage', 'listTrash', 'readProperties', 'readCollection', 'readViews', 'exportDatabase', 'exportTree',
 	'pushNotification', 'queryView', 'teamspaces', 'createTeamspace', 'updateTeamspace', 'archiveTeamspace', 'archivedTeamspaces', 'restoreTeamspace', 'teamspaceMembers',
 	'addTeamspaceMember', 'setTeamspaceMemberRole', 'removeTeamspaceMember', 'pageAccess', 'pageLockChanged', 'pageQuota', 'can', 'listGrants', 'setGrant', 'revokeGrant', 'grantByToken',

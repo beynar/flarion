@@ -23,7 +23,7 @@ import { dateValueSchema, type DateValue } from '../dates.js';
 import { filterGroupSchema, type FilterGroup } from '../filter-ast.js';
 import { idSchema } from '../property-types.js';
 
-export const KINDS_VERSION = 2;
+export { KINDS_VERSION, checkKindsVersion } from './kinds-version.js';
 
 export const BLOCK_KIND = {
 	databaseView: 'database_view',
@@ -96,20 +96,3 @@ export const customSemantics = semanticsOf(customKindRows);
 
 /** What a Page DO room (or a headless document) is created with: edytor's defaults plus the custom kinds. */
 export const roomSemantics = mergeSemantics(defaultSemantics, customSemantics);
-
-// ───────────────────────────── version checks ─────────────────────────────
-
-/**
- * `ok` when the versions match; `reload` when the client is behind (it may send blocks the room
- * would misread: close it with the protocol's reload code); `ahead` when the client is newer than
- * the room (a deploy is rolling out: the room may keep serving it, unknown kinds degrade to
- * plain blocks).
- */
-export function checkKindsVersion(
-	client: number | null | undefined,
-	room: number = KINDS_VERSION
-): 'ok' | 'reload' | 'ahead' {
-	if (typeof client !== 'number' || !Number.isInteger(client)) return 'reload';
-	if (client === room) return 'ok';
-	return client < room ? 'reload' : 'ahead';
-}

@@ -24,6 +24,7 @@ import { ensureDevSchema } from '../db/dev-migrate';
 import { LOAD_TEST_KEY_HEADER, loadTestAuthEnabled, LOAD_TEST_PREFIX, safeEqual, type LoadTestEnv } from './load-test-guard';
 import { outboxInsert } from './outbox';
 import { createWorkspace, deliver, type Services } from './workspaces';
+import { locationHintFor, parseLocationHint } from '../objects/workspace/location';
 import type { Ctx } from '../http/types';
 
 export { LOAD_TEST_PREFIX, loadTestAuthEnabled };
@@ -93,7 +94,7 @@ async function mintUsers(env: Env, body: { runId?: unknown; count?: unknown; off
 	return json({ users });
 }
 
-async function makeWorkspace(env: Env, ctx: Ctx, body: { ownerId?: unknown; memberIds?: unknown; name?: unknown }): Promise<Response> {
+async function makeWorkspace(env: Env, ctx: Ctx, request: Request, body: { ownerId?: unknown; memberIds?: unknown; name?: unknown; locationHint?: unknown }): Promise<Response> {
 	const ownerId = String(body.ownerId ?? '');
 	const memberIds = Array.isArray(body.memberIds) ? body.memberIds.map(String) : [];
 	const name = typeof body.name === 'string' && body.name.trim() ? body.name.trim().slice(0, 80) : 'Load test';
@@ -102,9 +103,17 @@ async function makeWorkspace(env: Env, ctx: Ctx, body: { ownerId?: unknown; memb
 	const db = createDirectoryClient(env.DB, ownerId);
 	const owner = await db.user.findFirst({ where: { id: ownerId } });
 	if (!owner || !owner.email.endsWith('@load.invalid')) return bad('ownerId is not a synthetic user');
-	const services: Services = { env, ctx };
+	// Placement (docs/ops/load-test.md "Placement"): the object is created near where the tabs come from. The tabs of an inside run are
+	// opened by Workers that answer a request from this same client, so the continent of this request is theirs; `locationHint` in the body
+	// (`--hint`) overrides it, to run the same scenario against another region. The hint travels the way a real creator's does: the `init`
+	// outbox job, which `createWorkspace` fills from `services.request.cf`.
+	const cf = (request as { cf?: { continent?: string; country?: string; longitude?: string } }).cf;
+	const forced = parseLocationHint(body.locationHint);
+	if (body.locationHint !== undefined && !forced) return bad('locationHint must be one of wnam, enam, sam, weur, eeur, apac, oc, afr, me');
+	const hint = forced ?? locationHintFor(cf);
+	const services: Services = { env, ctx, request };
 	// The real create path: D1 rows, the `init` outbox job and the Workspace DO's first commit.
-	const workspace = await createWorkspace(services, { userId: owner.id, sessionId: 'load-test', name: owner.name, email: owner.email, emailVerified: true }, { name });
+	const workspace = await createWorkspace(services, { userId: owner.id, sessionId: 'load-test', name: owner.name, email: owner.email, emailVerified: true }, { name }, forced);
 	const joined = await inBatches(memberIds, 10, async (userId) => {
 		const user = await db.user.findFirst({ where: { id: userId } });
 		if (!user || !user.email.endsWith('@load.invalid') || userId === ownerId) return false;
@@ -116,7 +125,7 @@ async function makeWorkspace(env: Env, ctx: Ctx, body: { ownerId?: unknown; memb
 		await deliver(services, [outbox.id]);
 		return true;
 	});
-	return json({ workspaceId: workspace.id, slug: workspace.slug, members: joined.filter(Boolean).length });
+	return json({ workspaceId: workspace.id, slug: workspace.slug, members: joined.filter(Boolean).length, locationHint: hint ?? null, hintFrom: forced ? 'flag' : hint ? `request.cf (${cf?.continent ?? '?'}/${cf?.country ?? '?'})` : 'none' });
 }
 
 /** Whether a synthetic user belongs to the workspace: the routes that speak to an object on the caller's word only touch those. */
@@ -173,7 +182,7 @@ export async function handleLoadTest(request: Request, env: Env, ctx: Ctx): Prom
 	try {
 		await ensureDevSchema(env);
 		if (route === 'users') return await mintUsers(env, body);
-		if (route === 'workspace') return await makeWorkspace(env, ctx, body);
+		if (route === 'workspace') return await makeWorkspace(env, ctx, request, body);
 		if (route === 'inside') {
 			if (!(await isLoadTestWorkspace(env, String(body.workspaceId ?? '')))) return bad('not a load-test workspace');
 			return (await import('./load-test-inside')).runInside(env, body as never);

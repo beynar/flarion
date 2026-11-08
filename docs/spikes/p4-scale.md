@@ -367,3 +367,7 @@ server rendering and the Durable Object implementations loaded as separate modul
 ## Third pass
 
 Commit statements (107 to 38 for a value write that touches views), the output gate, the split script and the cold dial: `docs/ops/load-test.md` "Third pass". Targets still not met (best p95 182 ms, cold window 545 ms, saturated runs on slow hosts).
+
+## Fourth pass
+
+A page value cache (value-only commits re-check membership, groups and sort position in memory, no SQL), grouped commits with a yield so that queued writes share a transaction and a fan-out, 37.6 to 22.6 statements for a numeric `setProp`, a session fast path and a lazier object wake, and a deterministic location hint with a per-data-center report: `docs/ops/load-test.md` "Fourth pass". Best run 42 / 182 ms (p50 / p95, CDG); the p95 150 ms and the cold 300 ms targets are still not met; no run saturated or refused a write since commits are grouped.

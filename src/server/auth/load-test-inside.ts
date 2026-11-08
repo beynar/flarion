@@ -58,7 +58,8 @@ const summarize = (values: number[]) => {
 };
 
 /** Streams progress lines, then one JSON line with the results (the response stays open for the length of the scenario). */
-export function runInside(env: Env, input: InsideInput): Response {
+export function runInside(env: Env, input: InsideInput): Response | Promise<Response> {
+	if ((input as { role?: string }).role === 'diag-txn') return diagTransactions(env, input.workspaceId);
 	const encoder = new TextEncoder();
 	const { readable, writable } = new TransformStream<Uint8Array, Uint8Array>();
 	const out = writable.getWriter();
@@ -145,15 +146,17 @@ export function runInside(env: Env, input: InsideInput): Response {
 			const probe = stub as unknown as { ping(): Promise<string>; shardStats(): Promise<unknown> };
 			const plain: number[] = [];
 			const viaShards: number[] = [];
+			let placement: unknown = null;
 			for (let i = 0; i < 8; i++) {
 				let t = Date.now();
 				await probe.ping();
 				plain.push(Date.now() - t);
 				t = Date.now();
-				await probe.shardStats().catch(() => null);
+				const stats = await probe.shardStats().catch(() => null);
+				placement ??= stats;
 				viaShards.push(Date.now() - t);
 			}
-			line({ progress: 'rpc', plain, viaShards });
+			line({ progress: 'rpc', plain, viaShards, placement });
 
 			measuring = true;
 			const writer = { userId: input.writer.userId, sessionId: 'inside', workspaceId: input.workspaceId, role: 'owner', name: input.writer.name };
@@ -224,7 +227,9 @@ export function runInside(env: Env, input: InsideInput): Response {
 				}
 			}
 			const shards = await (stub as unknown as { shardStats(): Promise<unknown> }).shardStats().catch(() => null);
-			line({ result: { rpc: { plain, viaShards }, shards, tabs: tabs.filter(Boolean).length, open: summarize(open), snapshots: summarize(snapshot), writes: { ok: sent.length, failed, firstError, rtt: summarize(rtts), sent }, editToDiff: summarize(diff), delivered: summarize(delivered), missing } });
+			// What the object did with the writes: commits grouped, fan-outs merged, units served from the page value cache.
+			const live = await (stub as unknown as { liveStats(o: { stale: boolean }): Promise<{ groups: unknown; governor: unknown; memory: unknown; shards: unknown }> }).liveStats({ stale: false }).catch(() => null);
+			line({ result: { rpc: { plain, viaShards }, placement, shards: shards ?? placement, live: live ? { groups: live.groups, governor: live.governor, memory: live.memory } : null, tabs: tabs.filter(Boolean).length, open: summarize(open), snapshots: summarize(snapshot), writes: { ok: sent.length, failed, firstError, rtt: summarize(rtts), sent }, editToDiff: summarize(diff), delivered: summarize(delivered), missing } });
 		} catch (error) {
 			line({ error: error instanceof Error ? (error.stack ?? error.message) : String(error) });
 		} finally {
@@ -232,4 +237,31 @@ export function runInside(env: Env, input: InsideInput): Response {
 		}
 	})();
 	return new Response(readable, { headers: { 'content-type': 'application/x-ndjson', 'cache-control': 'no-store' } });
+}
+
+
+/**
+ * `role: 'diag-txn'`: does a commit's kind of transaction hold the object's input? Sequential writes in each kind of transaction, then 20
+ * concurrent calls (as the leader's open-loop writes are): how long each took and how many were inside the object at once.
+ */
+async function diagTransactions(env: Env, workspaceId: string): Promise<Response> {
+	const stub = env.WORKSPACE.getByName(workspaceId) as unknown as { diagTxn(mode: string, n: number): Promise<{ ms: number[]; peak: number }>; shardStats(): Promise<unknown> };
+	const text = await (async () => {
+		const out: Record<string, unknown> = { placement: await stub.shardStats().catch(() => null) };
+		const median = (v: number[]) => [...v].sort((a, b) => a - b)[Math.floor(v.length / 2)];
+		for (const mode of ['async', 'sync', 'sync+wait']) {
+			const r = await stub.diagTxn(mode, 30);
+			out[`sequential ${mode}`] = { p50: median(r.ms), max: Math.max(...r.ms) };
+		}
+		for (const mode of ['async', 'sync+wait']) {
+			const t0 = Date.now();
+			const done = await Promise.all(Array.from({ length: 20 }, async () => {
+				const r = await stub.diagTxn(mode as 'async', 1);
+				return { at: Date.now() - t0, peak: r.peak, own: r.ms[0] };
+			}));
+			out[`concurrent ${mode}`] = { completions: done.map((d) => d.at).sort((a, b) => a - b), peak: Math.max(...done.map((d) => d.peak)), own: done.map((d) => d.own) };
+		}
+		return JSON.stringify(out, null, 1);
+	})().catch((error) => JSON.stringify({ error: String(error) }));
+	return new Response(text, { headers: { 'content-type': 'application/json' } });
 }

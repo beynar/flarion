@@ -24,18 +24,9 @@ import {
 import type { Actor } from '../../auth/session';
 import { WorkspaceError } from './errors';
 
-/** What a page level may do, lowest first (the Sync core's levels). */
-export const PAGE_LEVELS = ['read', 'comment', 'update', 'full'] as const;
-export type PageLevel = (typeof PAGE_LEVELS)[number];
-const RANK: Record<PageLevel, number> = { read: 0, comment: 1, update: 2, full: 3 };
-export const atLeast = (level: PageLevel | null, wanted: PageLevel): boolean => level !== null && RANK[level] >= RANK[wanted];
+import { atLeast, type PageLevel } from './files-base';
 
-/** Reads whatever shape `pageAccess` answers (a level, `{ level }`, `'none'`, `null`) as a {@link PageLevel} or `null`. */
-export function normalizeLevel(value: unknown): PageLevel | null {
-	const raw = typeof value === 'object' && value !== null ? ((value as { level?: unknown }).level ?? null) : value;
-	if (raw === 'write') return 'update';
-	return typeof raw === 'string' && (PAGE_LEVELS as readonly string[]).includes(raw) ? (raw as PageLevel) : null;
-}
+export { PAGE_LEVELS, atLeast, normalizeLevel, ensureFilesTable, type PageLevel } from './files-base';
 
 export interface FilesContext {
 	sql: SqlStorage;
@@ -87,26 +78,6 @@ const toRecord = (row: FileRow): FileRecord => ({
 	deletedAt: row.deleted_at,
 	uploadId: row.upload_id
 });
-
-/** Creates the `file` table. Idempotent; a synchronous no-op once it exists. */
-export function ensureFilesTable(sql: SqlStorage): void {
-	sql.exec(`CREATE TABLE IF NOT EXISTS file (
-		id TEXT PRIMARY KEY,
-		page_id TEXT NOT NULL,
-		name TEXT NOT NULL,
-		size INTEGER NOT NULL,
-		type TEXT NOT NULL,
-		r2_key TEXT NOT NULL,
-		created_by TEXT NOT NULL,
-		created_at INTEGER NOT NULL,
-		committed INTEGER NOT NULL DEFAULT 0,
-		deleted_at INTEGER,
-		upload_id TEXT
-	)`);
-	sql.exec('CREATE INDEX IF NOT EXISTS file_page ON file (page_id)');
-	sql.exec('CREATE INDEX IF NOT EXISTS file_pending ON file (committed, created_at)');
-	sql.exec('CREATE TABLE IF NOT EXISTS file_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)');
-}
 
 const QUOTA_KEY = 'quota';
 

@@ -35,9 +35,9 @@ async function main(): Promise<number> {
 	log(`target ${opts.base} (app ${version}), run ${opts.runId}: ${opts.tabs} tabs, ${opts.users} users, ${opts.rows} rows, ${opts.views} views, ${opts.writesPerSec} writes/s for ${opts.duration} s`);
 	const users = await api.mintUsers(opts.runId, Math.max(2, opts.users));
 	const owner = users[0];
-	const workspace = await api.makeWorkspace(owner.userId, users.slice(1).map((u) => u.userId), `Load ${opts.runId}`);
+	const workspace = await api.makeWorkspace(owner.userId, users.slice(1).map((u) => u.userId), `Load ${opts.runId}`, opts.hint);
 	await seedDatabase(api, owner, workspace.workspaceId, opts.rows, rng);
-	log(`workspace ${workspace.workspaceId} seeded`);
+	log(`workspace ${workspace.workspaceId} seeded; location hint ${workspace.locationHint ?? 'none'} (${workspace.hintFrom})`);
 
 	const counter = { n: 0 };
 	const rank = evenRanks(2)[0];
@@ -213,9 +213,16 @@ async function main(): Promise<number> {
 	row('  per write: median tab', summarizeLocal(medians));
 	row('  per write: last minus first', summarizeLocal(spreads));
 	if (result.rpc) console.log(`idle round trips: call to the object ${JSON.stringify(result.rpc.plain)} ms; through to every shard ${JSON.stringify(result.rpc.viaShards)} ms`);
+	if (result.shards) console.log(`  placement: hint ${result.shards.hint ?? 'none'} (${workspace.hintFrom}), object runs in ${result.shards.colo}`);
 	if (result.shards) console.log(`  object runs in ${result.shards.colo}; shards in ${(result.shards.shards as { colo: string; sockets: number }[]).map((s) => `${s.colo} (${s.sockets})`).join(' ')}`);
+	if (result.live) console.log(`  object: commits grouped ${JSON.stringify(result.live.groups)}, governor ${JSON.stringify(result.live.governor)}, page cache ${JSON.stringify(result.live.memory)}`);
 	// The verdict takes the stricter of the two lines: a write whose diff was merged into a later frame counts at the time of that frame.
 	const judged = Math.max(result.editToDiff.p95 ?? Number.POSITIVE_INFINITY, mergedSummary.p95 ?? 0);
+	if (opts.json) {
+		const { writeFileSync } = await import('node:fs');
+		const strip = ({ sent: _sent, ...rest }: Record<string, unknown>) => rest;
+		writeFileSync(opts.json, JSON.stringify({ at: new Date().toISOString(), base: opts.base, hint: result.shards?.hint ?? null, colo: result.shards?.colo ?? null, shardColos: (result.shards?.shards ?? []).map((s: { colo: string }) => s.colo), tabs: result.tabs, missing: result.missing, writes: strip(result.writes), editToDiff: result.editToDiff, editToDiffMerged: mergedSummary, delivered: result.delivered, open: result.open, snapshots: result.snapshots, live: result.live }, null, 2));
+	}
 	const ok = result.editToDiff.p95 !== null && judged <= opts.p95Ms && result.writes.failed === 0 && result.missing === 0 && result.tabs === opts.tabs;
 	log(ok ? `PASS: edit-to-diff p95 ${ms(judged)} (merged frames included) <= ${opts.p95Ms} ms, no failed write, nothing missing` : 'MISS: see the numbers above');
 	return ok ? 0 : 1;

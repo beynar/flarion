@@ -4,9 +4,12 @@
  *
  * - `resolveSession`: better-auth with the cookie cache, so most requests never read D1. Recovery
  *   sessions (restricted to registering a passkey) never resolve: they are not usable for the app.
+ *   A valid cookie cache is verified directly (`session-cache.ts`, no better-auth import); everything else
+ *   (miss, expiry, rotation, restricted, doubt) takes the full better-auth path below.
  * - `resolveMembership`: the Workspace DO's cached mirror first (`getMemberRole`), then D1.
  */
 import { resignSessionCookie } from './secret-rotation';
+import { sessionFromCookieCache, sessionPathStats } from './session-cache';
 import { workspaceIdentity } from './workspace-rpc';
 import { ensureDevSchema } from '../db/dev-migrate';
 
@@ -37,6 +40,12 @@ export interface Actor {
 }
 
 export async function resolveSession(request: Request, env: Env): Promise<SessionInfo | null> {
+	const cached = await sessionFromCookieCache(request, env);
+	if (cached) {
+		sessionPathStats.fast++;
+		return cached;
+	}
+	sessionPathStats.full++;
 	let result;
 	try {
 		await ensureDevSchema(env);

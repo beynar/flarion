@@ -47,21 +47,25 @@ export class CountDelta {
 
 	async flush(db: WorkspaceDb): Promise<void> {
 		const ups: [number, string, number][] = [];
-		const downs = new Map<number, string[]>();
 		for (const [prop, m] of this.#deltas)
 			for (const [key, d] of m) {
 				if (d === 0) continue;
 				ups.push([prop, key, d]);
-				if (d < 0) (downs.get(prop) ?? downs.set(prop, []).get(prop)!).push(key);
 			}
+		// One upsert per chunk that reports the counts it left: the rows that fell to zero or below are deleted by a second statement, which
+		// most writes (a value moves to a value that already has rows) never need.
+		const gone: [number, string][] = [];
 		for (const part of chunks(ups, Math.floor(MAX_PARAMS / 3))) {
-			await run(
+			const left = await all<{ prop: number; v: string; n: number }>(
 				db,
 				`INSERT INTO value_count (prop, v, n) VALUES ${part.map(() => '(?,?,?)').join(',')} ` +
-					'ON CONFLICT (prop, v) DO UPDATE SET n = n + excluded.n',
+					'ON CONFLICT (prop, v) DO UPDATE SET n = n + excluded.n RETURNING prop, v, n',
 				...part.flat()
 			);
+			for (const row of left) if (row.n <= 0) gone.push([row.prop, row.v]);
 		}
+		const downs = new Map<number, string[]>();
+		for (const [prop, key] of gone) (downs.get(prop) ?? downs.set(prop, []).get(prop)!).push(key);
 		for (const [prop, keys] of downs)
 			for (const part of chunks(keys, MAX_PARAMS - 1))
 				await run(db, `DELETE FROM value_count WHERE prop = ? AND n <= 0 AND v IN (${qmarks(part.length)})`, prop, ...part);

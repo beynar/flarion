@@ -35,6 +35,8 @@ export interface Options {
 	procs: number;
 	/** Judge `edit-to-diff` on the raw numbers instead of minus the client's own round trip to the edge. */
 	raw: boolean;
+	/** Location hint for the workspaces the run creates (wnam, enam, sam, weur, eeur, apac, oc, afr, me); null: where this client's request comes from. */
+	hint: string | null;
 }
 
 const PRESETS: Record<string, Partial<Options>> = {
@@ -61,7 +63,8 @@ const DEFAULTS: Options = {
 	coldMs: 300,
 	runId: '',
 	procs: 0,
-	raw: false
+	raw: false,
+	hint: null
 };
 
 const NUMERIC: Record<string, keyof Options> = {
@@ -104,6 +107,7 @@ export function parseArgs(argv: string[]): Options {
 		else if (name === 'key') opts.key = take();
 		else if (name === 'json') opts.json = take();
 		else if (name === 'run-id') opts.runId = take();
+		else if (name === 'hint') opts.hint = take();
 		else if (name === 'no-assert') opts.assert = false;
 		else if (name === 'no-cleanup') opts.cleanup = false;
 		else if (name === 'raw') opts.raw = true;
@@ -209,8 +213,8 @@ export class Api {
 		return out;
 	}
 
-	makeWorkspace(ownerId: string, memberIds: string[], name: string) {
-		return this.loadTest<{ workspaceId: string; slug: string; members: number }>('workspace', { ownerId, memberIds, name });
+	makeWorkspace(ownerId: string, memberIds: string[], name: string, locationHint?: string | null) {
+		return this.loadTest<{ workspaceId: string; slug: string; members: number; locationHint: string | null; hintFrom: string }>('workspace', { ownerId, memberIds, name, ...(locationHint ? { locationHint } : {}) });
 	}
 
 	cleanup(runId: string) {

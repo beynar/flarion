@@ -9,7 +9,7 @@ import { INVITE_TTL_DAYS, hashInviteToken, isInviteUsable, lookupInvite, newInvi
 import { guestInviteMail, inviteMail, sendMail } from '../mail';
 import { drainOutbox, outboxInsert, runOutbox } from './outbox';
 import { assertAccountActive } from './account-deletion';
-import { locationHintFor } from '../objects/workspace/location';
+import { locationHintFor, type LocationHint } from '../objects/workspace/location';
 import type { SessionInfo, WorkspaceRole } from './session';
 import { applyPendingGrants, revokeGuestGrants } from '../share/guests';
 
@@ -90,7 +90,9 @@ export async function getWorkspace(env: Env, workspaceId: string, role: Workspac
 export async function createWorkspace(
 	services: Services,
 	session: SessionInfo,
-	input: { name: string; slug?: string; icon?: string | null }
+	input: { name: string; slug?: string; icon?: string | null },
+	/** Overrides the creator's location (the load runner's `--hint`). */
+	forcedHint?: LocationHint
 ): Promise<WorkspaceDto> {
 	const { env } = services;
 	await assertAccountActive(env, session.userId);
@@ -115,7 +117,7 @@ export async function createWorkspace(
 				ownerId: session.userId,
 				ownerName: session.name,
 				// Where the creator is: the object is placed there (a hint only counts on first contact).
-				locationHint: locationHintFor(services.request?.cf as { continent?: string; country?: string; longitude?: string } | undefined)
+				locationHint: forcedHint ?? locationHintFor(services.request?.cf as { continent?: string; country?: string; longitude?: string } | undefined)
 			}
 		});
 		try {

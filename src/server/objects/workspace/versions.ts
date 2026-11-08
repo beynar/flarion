@@ -1,6 +1,6 @@
 /** Version skew (docs/PLAN.md "Security and reliability"): what the Workspace DO accepts from clients. */
 import { checkClientVersion } from '../../../lib/shared/protocol';
-import { checkKindsVersion } from '../../../lib/shared/blocks/kinds';
+import { checkKindsVersion } from '../../../lib/shared/blocks/kinds-version';
 
 /** The oldest client build the object serves. Raise it when ops or messages change incompatibly. */
 export const MIN_APP_VERSION = '0.0.1';

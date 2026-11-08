@@ -54,7 +54,7 @@ test('no session is refused with 401, and a malformed workspace id with 400', as
 	expect(noActor.status).toBe(401);
 	const badId = await upgradeRequest('bad%20id');
 	expect(badId.status).toBe(400);
-});
+}, 30_000); // a request with no usable cookie cache loads the whole better-auth stack (about 2 MB) in a cold test isolate
 
 test('the dev actor header never authenticates outside test and development', async () => {
 	const production = { ...(env as unknown as Env), ENVIRONMENT: 'production', APP_ORIGIN: ORIGIN } as unknown as Env;

@@ -50,7 +50,7 @@ async function main(): Promise<number> {
 	// 1. Users and the workspace.
 	const users = await api.mintUsers(opts.runId, Math.max(1, opts.users));
 	const owner = users[0];
-	const workspace = await api.makeWorkspace(owner.userId, users.slice(1).map((u) => u.userId), `Load ${opts.runId}`);
+	const workspace = await api.makeWorkspace(owner.userId, users.slice(1).map((u) => u.userId), `Load ${opts.runId}`, opts.hint);
 	const workspaceId = workspace.workspaceId;
 	log(`workspace ${workspaceId} with ${workspace.members + 1} members`);
 	await seedDatabase(api, owner, workspaceId, opts.rows, rng);
@@ -264,7 +264,7 @@ async function main(): Promise<number> {
 		const probeRows = Math.min(opts.rows, 500);
 		const made = await Promise.all(
 			Array.from({ length: opts.coldProbes }, async (_, i) => {
-				const ws = await api.makeWorkspace(owner.userId, [], `Cold ${opts.runId} ${i}`);
+				const ws = await api.makeWorkspace(owner.userId, [], `Cold ${opts.runId} ${i}`, opts.hint);
 				await seedDatabase(api, owner, ws.workspaceId, probeRows, mulberry(i + 1));
 				return ws.workspaceId;
 			})

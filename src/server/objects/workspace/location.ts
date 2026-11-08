@@ -10,6 +10,14 @@
 
 export type LocationHint = Extract<DurableObjectLocationHint, 'wnam' | 'enam' | 'sam' | 'weur' | 'eeur' | 'apac' | 'oc' | 'afr' | 'me'>;
 
+/** Every hint Cloudflare accepts for a Durable Object (`DurableObjectLocationHint`), for validating one named by an operator. */
+export const LOCATION_HINTS: readonly LocationHint[] = ['wnam', 'enam', 'sam', 'weur', 'eeur', 'apac', 'oc', 'afr', 'me'];
+
+/** A hint named by an operator (`--hint` of the load runner), or `undefined` when it is not one Cloudflare knows. */
+export function parseLocationHint(value: unknown): LocationHint | undefined {
+	return typeof value === 'string' && (LOCATION_HINTS as readonly string[]).includes(value) ? (value as LocationHint) : undefined;
+}
+
 /** The countries of Cloudflare's "me" (Middle East) region. */
 const MIDDLE_EAST = new Set(['AE', 'BH', 'CY', 'EG', 'IL', 'IQ', 'IR', 'JO', 'KW', 'LB', 'OM', 'PS', 'QA', 'SA', 'SY', 'TR', 'YE']);
 

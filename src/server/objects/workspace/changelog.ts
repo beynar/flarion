@@ -4,10 +4,9 @@
  * by the object's alarm; `log_floor` (in `meta`) is the highest seq ever deleted, so a reconnecting
  * client knows whether every change after its `seq` is still there.
  */
-import { DbNull } from 'viborm';
 import type { WorkspaceClient, WorkspaceDb, WorkspaceTx } from '../../db/workspace.client';
 import type { ChangeRecord } from './eav';
-import { asJson, chunks, qmarks, rawAll, rawRun } from './util';
+import { asJson, chunks, qmarks, rawAll, rawRun, rawRunQuiet } from './util';
 
 export const LOG_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
 /** Size cap: rows kept at most, oldest pruned first. */
@@ -64,39 +63,40 @@ export async function appendChanges(
 	input: { commitId: string; actor: string; now: number; records: readonly ChangeRecord[] }
 ): Promise<{ seq: number; rows: LogRow[] }> {
 	const rows: LogRow[] = [];
+	// Raw statements: the ORM's insert is an INSERT ... SELECT followed by a read of the row it made, and every call costs the ORM's own
+	// CPU on top of SQLite's (docs/ops/load-test.md "Fourth pass"). The JSON columns hold `JSON.stringify` text, SQL NULL for null,
+	// which is what the ORM wrote and reads back.
+	const json = (value: unknown): string | null => (value === null || value === undefined ? null : JSON.stringify(value));
 	for (const record of input.records) {
 		let old = asJson(record.old);
 		if (COALESCED_KINDS.has(record.kind) && record.page !== null && record.prop !== null) {
-			const prior = await tx.change.findFirst({
-				where: { page: record.page, prop: record.prop },
-				orderBy: { seq: 'desc' }
-			});
-			if (
-				prior &&
-				prior.actor === input.actor &&
-				prior.kind === record.kind &&
-				input.now - prior.ts <= COALESCE_MS
-			) {
+			const [prior] = await rawAll<{ seq: number; ts: number; actor: string; kind: string; old_json: string | null }>(
+				tx,
+				'SELECT seq, ts, actor, kind, old_json FROM change WHERE page = ? AND prop = ? ORDER BY seq DESC LIMIT 1',
+				record.page,
+				record.prop
+			);
+			if (prior && prior.actor === input.actor && prior.kind === record.kind && input.now - prior.ts <= COALESCE_MS) {
 				// Delete the superseded row and append a fresh one: the new row has a later seq, so a client
 				// that already holds the old value replays the new one. The original `old` is kept.
-				await tx.change.delete({ where: { seq: prior.seq } });
-				old = prior.oldJson ?? null;
+				await rawRunQuiet(tx, 'DELETE FROM change WHERE seq = ?', prior.seq);
+				old = prior.old_json === null ? null : JSON.parse(prior.old_json);
 				const at = rows.findIndex((r) => r.seq === prior.seq);
 				if (at >= 0) rows.splice(at, 1);
 			}
 		}
-		const created = await tx.change.create({
-			data: {
-				ts: input.now,
-				actor: input.actor,
-				commitId: input.commitId,
-				kind: record.kind,
-				page: record.page,
-				prop: record.prop,
-				oldJson: (old === null ? DbNull : old) as never,
-				newJson: (asJson(record.new) === null ? DbNull : record.new) as never
-			}
-		});
+		const [created] = await rawAll<{ seq: number }>(
+			tx,
+			'INSERT INTO change (ts, actor, commit_id, kind, page, prop, old_json, new_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?) RETURNING seq',
+			input.now,
+			input.actor,
+			input.commitId,
+			record.kind,
+			record.page,
+			record.prop,
+			json(old),
+			json(asJson(record.new))
+		);
 		rows.push(
 			toLogRow({
 				seq: created.seq,
