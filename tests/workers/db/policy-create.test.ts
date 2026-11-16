@@ -43,7 +43,7 @@ async function world<T>(fn: (ctx: { base: Any; as(input: Parameters<typeof actor
 			base.grant.create({ data: { id, pageId, subjectKind: 'user', subjectId: 'guest', subjectKey: 'user:guest', level: 'update', createdBy: 'owner' } });
 		await grant('g-a', 'A');
 		await grant('g-q', 'Q');
-		const governed = (policy as Any)(base);
+		const governed = base.$extends(policy);
 		return fn({ base, as: (input) => governed.$as(actorFacts(input)) });
 	});
 }

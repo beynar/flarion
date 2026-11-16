@@ -11,7 +11,7 @@ import { isRank } from '../../../lib/shared/sort-keys';
 import type { WorkspaceTx } from '../../db/workspace.client';
 import type { AccessLevel } from '../../db/workspace.schema';
 import { invalid, WorkspaceError } from './errors';
-import { canRead, orExplain } from './governed';
+import { can, canRead, orExplain } from './governed';
 import { defaultsForView, writeInitialValues, type ChangeRecord } from './eav';
 import { isoTime, LIVE_SUBTREE_CTE, rawAll, rawRun, SUBTREE_CTE } from './util';
 
@@ -73,8 +73,7 @@ async function livePage(tx: WorkspaceTx, id: string, path: string): Promise<Page
  * `governed.ts`), so those go through `governedPageWrite`. (A governed `create` throws on its own too.)
  */
 async function assertCan(tx: WorkspaceTx, id: string, level: AccessLevel, what: string): Promise<void> {
-	const can = (await (tx.page as unknown as { can(a: AccessLevel, w: { id: string }): Promise<boolean> }).can(level, { id })) as boolean;
-	if (!can) throw new WorkspaceError('FORBIDDEN', `You do not have access to ${what}`);
+	if (!(await can(tx.page, level, { id }))) throw new WorkspaceError('FORBIDDEN', `You do not have access to ${what}`);
 }
 
 /**

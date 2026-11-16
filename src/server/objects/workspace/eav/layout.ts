@@ -13,7 +13,9 @@ export const EAV_TABLES: readonly EavTable[] = ['p_text', 'p_num', 'p_date', 'p_
  * which halves the B-trees written per EAV row. It is idempotent and self-healing: call it in the
  * Workspace DO's constructor right after `migrateOnWake` (inside `blockConcurrencyWhile`), never while a
  * viborm transaction is open. A later viborm migration that recreates one of these tables loses the
- * option; the next wake restores it. viborm's drift check does not see the difference (tested).
+ * option; the next wake restores it. viborm 1.12.1's drift check did not see the difference; 1.14.0's does, and wrongly
+ * reports every other table's constraints too (a regression, `tests/workers/eav/eav.test.ts` "layout"): until viborm
+ * fixes it, the estate must not change (docs/ops/migrations.md).
  */
 export function ensureEavLayout(storage: DurableObjectStorage): string[] {
 	const converted: string[] = [];

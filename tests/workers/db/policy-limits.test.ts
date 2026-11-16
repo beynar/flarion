@@ -159,6 +159,14 @@ async function workspace<T>(fn: (ctx: { driver: MeasuringDriver; base: Base; sta
 type Governed = any;
 type Policy = typeof policy | typeof sketchPolicy;
 
+/** viborm 1.14.0 removed `can`: what the actor holds on a row is its `$access` (one boolean per asked action). */
+async function canOn(delegate: Governed, actions: string | string[], where: { id: string }): Promise<unknown> {
+	const asked = typeof actions === 'string' ? [actions] : actions;
+	const row = (await delegate.findFirst({ where, select: { $access: asked } })) as { $access: Record<string, boolean> } | null;
+	const held = Object.fromEntries(asked.map((a) => [a, row?.$access[a] === true]));
+	return typeof actions === 'string' ? held[actions] : held;
+}
+
 const LIMITS = { params: 100, bytes: 100_000 };
 
 /** The largest reads and the write checks of the policy, as one workload. */
@@ -166,7 +174,7 @@ async function workload(
 	{ base, state, seeded, measure }: { base: Base; state: DurableObjectState; seeded: ReturnType<typeof seed>; measure: Parameters<Parameters<typeof workspace>[0]>[0]['measure'] },
 	p: Policy
 ) {
-	const db = (p as unknown as (b: never) => Governed)(base as never);
+	const db = (base as Governed).$extends(p);
 	const as = (name: keyof typeof actorInputs) => db.$as(actorFor(state.storage, actorInputs[name]));
 	const result: Record<string, unknown> = {};
 	for (const name of Object.keys(actorInputs) as (keyof typeof actorInputs)[]) {
@@ -175,9 +183,9 @@ async function workload(
 	}
 	const member = as('member');
 	const owner = as('teamspace owner');
-	await measure('page.can(read) on a depth-50 page', () => member.page.can('read', { id: seeded.deep }));
-	await measure('page.can([read, comment, update, full]) on a depth-50 page', () => member.page.can(['read', 'comment', 'update', 'full'], { id: seeded.deep }));
-	await measure('page.can([...]) member with a share token', () => as('member with a share token').page.can(['read', 'comment', 'update', 'full'], { id: seeded.deep }));
+	await measure('page $access(read) on a depth-50 page', () => canOn(member.page, 'read', { id: seeded.deep }));
+	await measure('page $access([read, comment, update, full]) on a depth-50 page', () => canOn(member.page, ['read', 'comment', 'update', 'full'], { id: seeded.deep }));
+	await measure('page $access([...]) member with a share token', () => canOn(as('member with a share token').page, ['read', 'comment', 'update', 'full'], { id: seeded.deep }));
 	// The statements the Workspace DO's access service sends (objects/workspace/access.ts).
 	await measure('visibility entry: page.findMany(num, $access) of every live page', () => member.page.findMany({ where: { deletedAt: null }, select: { num: true, $access: true } }));
 	const sixty = Array.from({ length: 60 }, (_, i) => seeded.ids[i * 7]!);
@@ -233,7 +241,7 @@ test('joinedPolicy (teamspace rows): fits too, with less headroom', () => fitsLi
 // moves a page on workerd. The default form is kept below as the reference that still fails.
 test("the plan's sketch moves a page now that the adapter is shallow (deepExpressions: false)", async () => {
 	await workspace(async (ctx) => {
-		const sketch = sketchPolicy(ctx.base as never) as Governed;
+		const sketch = (ctx.base as Governed).$extends(sketchPolicy);
 		const owner = sketch.$as(actorFor(ctx.state.storage, actorInputs['teamspace owner']));
 		await ctx.measure('sketch move', () => owner.page.update({ where: { id: 'p3' }, data: { parentId: 'p2' } }), () => 1);
 		const move = ctx.results.at(-1)!;
@@ -243,7 +251,7 @@ test("the plan's sketch moves a page now that the adapter is shallow (deepExpres
 		expect(move.maxBytes).toBeLessThanOrEqual(LIMITS.bytes);
 		// ...but it still needs 97 of 100 bound values to ask four actions of one row (no headroom).
 		const member = sketch.$as(actorFor(ctx.state.storage, actorInputs.member));
-		await ctx.measure('sketch can x4', () => member.page.can(['read', 'comment', 'update', 'full'], { id: ctx.seeded.deep }));
+		await ctx.measure('sketch can x4', () => canOn(member.page, ['read', 'comment', 'update', 'full'], { id: ctx.seeded.deep }));
 		expect(ctx.results.at(-1)!.error).toBeUndefined();
 		expect(ctx.results.at(-1)!.maxParams).toBeGreaterThan(90);
 	});
@@ -262,7 +270,7 @@ test("with viborm's default (deep) SQL form the plan's sketch still breaches the
 		const migrations = createMigrationClient(base, { tables: [...WORKSPACE_TABLES] });
 		await migrations.push({ consent: (await migrations.push({ dryRun: true })).consent });
 		seed(state.storage);
-		const owner = (sketchPolicy as unknown as (b: never) => Governed)(base as never).$as(actorFor(state.storage, actorInputs['teamspace owner']));
+		const owner = (base as Governed).$extends(sketchPolicy).$as(actorFor(state.storage, actorInputs['teamspace owner']));
 		const failure = await owner.page.update({ where: { id: 'p3' }, data: { parentId: 'p2' } }).catch((e: Error) => e);
 		expect(failure).toBeInstanceOf(Error);
 		expect(driver.statements.find((s) => s.error)?.error).toMatch(/maximum depth 100/);
@@ -271,7 +279,7 @@ test("with viborm's default (deep) SQL form the plan's sketch still breaches the
 
 test('all three policies grant exactly the same pages to every kind of actor', async () => {
 	await workspace(async ({ base, state }) => {
-		const policies = [sketchPolicy, joinedPolicy, policy].map((p) => (p as unknown as (b: never) => Governed)(base as never));
+		const policies = [sketchPolicy, joinedPolicy, policy].map((p) => (base as Governed).$extends(p));
 		for (const input of Object.values(actorInputs)) {
 			const actor = actorFor(state.storage, input);
 			const sets = await Promise.all(
@@ -282,7 +290,7 @@ test('all three policies grant exactly the same pages to every kind of actor', a
 		}
 		// the roles differ from each other (the comparison above is not vacuous)
 		const count = async (name: keyof typeof actorInputs) =>
-			((await (policy(base as never) as Governed).$as(actorFor(state.storage, actorInputs[name])).page.findMany({ select: { num: true } })) as unknown[]).length;
+			((await (base as Governed).$extends(policy).$as(actorFor(state.storage, actorInputs[name])).page.findMany({ select: { num: true } })) as unknown[]).length;
 		expect(await count('admin')).toBe(PAGE_COUNT);
 		expect(await count('member')).toBeGreaterThan(await count('guest'));
 		expect(await count('guest')).toBeGreaterThan(await count('anonymous'));
@@ -293,7 +301,7 @@ test('all three policies grant exactly the same pages to every kind of actor', a
 
 test('a share on an ancestor reaches the whole subtree, at the shared level and below', async () => {
 	await workspace(async ({ base, state }) => {
-		const as = (policy(base as never) as Governed).$as(actorFor(state.storage, { userId: 'ux', role: 'guest' }));
+		const as = (base as Governed).$extends(policy).$as(actorFor(state.storage, { userId: 'ux', role: 'guest' }));
 		expect(await as.page.findMany({ select: { num: true } })).toEqual([]);
 		const root = state.storage.sql.exec<{ id: string }>('SELECT parent_id AS id FROM page WHERE parent_id IS NOT NULL ORDER BY num DESC LIMIT 1 OFFSET 20').one().id;
 		state.storage.sql.exec(
@@ -312,7 +320,7 @@ test('a share on an ancestor reaches the whole subtree, at the shared level and 
 		expect(visible).toEqual(subtree);
 		expect(subtree.length).toBeGreaterThan(1);
 		const leaf = ((await base.page.findMany({ where: { num: { in: subtree } }, orderBy: { num: 'desc' }, take: 1 })) as { id: string }[])[0]!;
-		expect(await as.page.can(['read', 'comment', 'update', 'full'], { id: leaf.id })).toEqual({ read: true, comment: true, update: false, full: false });
+		expect(await canOn(as.page, ['read', 'comment', 'update', 'full'], { id: leaf.id })).toEqual({ read: true, comment: true, update: false, full: false });
 		// a revoked share stops counting
 		state.storage.sql.exec('UPDATE "grant" SET deleted_at = ? WHERE id = ?', new Date().toISOString(), 'gx');
 		expect(await as.page.findMany({ select: { num: true } })).toEqual([]);
@@ -322,7 +330,7 @@ test('a share on an ancestor reaches the whole subtree, at the shared level and 
 test('teamspace default levels and ownership grant access through the policy', async () => {
 	await workspace(async ({ base, state }) => {
 		const level = async (user: string, id: string) =>
-			(policy(base as never) as Governed).$as(actorFor(state.storage, { userId: user, role: 'member' })).page.can(['read', 'comment', 'update', 'full'], { id });
+			canOn((base as Governed).$extends(policy).$as(actorFor(state.storage, { userId: user, role: 'member' })).page, ['read', 'comment', 'update', 'full'], { id }) as Promise<Record<string, boolean>>;
 		// p0 is a root of ts0 (default level update; u0 owner, u1..u3 members, u4 outside)
 		expect(await level('u1', 'p0')).toMatchObject({ read: true, comment: true, update: true, full: false });
 		expect(await level('u0', 'p0')).toMatchObject({ read: true, comment: true, update: true, full: true });

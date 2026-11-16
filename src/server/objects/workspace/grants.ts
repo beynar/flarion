@@ -15,7 +15,7 @@ import type { AccessLevel } from '../../db/workspace.schema';
 import type { GovernedTx } from './access';
 import type { ChangeRecord } from './eav';
 import { invalid, notFound, WorkspaceError } from './errors';
-import { canRead, orExplain } from './governed';
+import { accessTo, canRead, orExplain } from './governed';
 
 type SubjectKind = (typeof GRANT_SUBJECT_KINDS)[number];
 
@@ -59,7 +59,7 @@ export function mintShareToken(): string {
 }
 
 async function assertFullOnPage(tx: GovernedTx, pageId: string): Promise<void> {
-	const got = (await tx.page.can(['read', 'full'], { id: pageId })) as { read: boolean; full: boolean };
+	const got = await accessTo(tx.page, { id: pageId }, ['read', 'full'] as const);
 	if (!got.read) throw notFound(`Page "${pageId}"`);
 	if (!got.full) throw new WorkspaceError('FORBIDDEN', 'You need full access to share this page');
 }

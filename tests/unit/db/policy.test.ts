@@ -2,6 +2,10 @@ import { describe, expect, test } from 'vitest';
 import { actorFacts, grantSubjectKey, joinedPolicy, policy, sketchPolicy } from '../../../src/server/db/policy';
 import { workspaceSchema } from '../../../src/server/db/workspace.schema';
 
+/** The actions `$access` answers for a compiled model (viborm 1.14.0: `read.select.$access.held`). */
+const heldActions = (model: unknown) =>
+	Object.keys((model as { read: { select?: { $access?: { held: Record<string, unknown> } } } }).read.select?.$access?.held ?? {});
+
 describe('workspace policies (draft)', () => {
 	test.each([
 		['sketch', sketchPolicy],
@@ -10,7 +14,7 @@ describe('workspace policies (draft)', () => {
 	] as const)('%s compiles against the workspace schema', (_name, p) => {
 		const compiled = p.compile(workspaceSchema);
 		expect(Object.keys(compiled.models)).toEqual(expect.arrayContaining(['page', 'teamspace', 'teamspaceMember', 'grant']));
-		expect(Object.keys(compiled.models.page!.predicates)).toContain('read');
+		expect(heldActions(compiled.models.page)).toContain('read');
 	});
 });
 
@@ -19,7 +23,7 @@ describe('the final policy', () => {
 		const compiled = policy.compile(workspaceSchema);
 		for (const model of ['page', 'teamspace', 'teamspaceMember', 'grant'] as const) expect(compiled.models[model]).toBeDefined();
 		// The rules the plan names: four page levels and the placement rule.
-		expect(Object.keys(compiled.models.page!.predicates)).toEqual(expect.arrayContaining(['read', 'comment', 'update', 'full']));
+		expect(heldActions(compiled.models.page)).toEqual(expect.arrayContaining(['read', 'comment', 'update', 'full']));
 		for (const model of ['change', 'mutation', 'meta', 'property', 'pText', 'collection', 'view', 'openRoom'] as const) {
 			expect(compiled.models[model], model).toBeDefined();
 		}

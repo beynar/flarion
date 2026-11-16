@@ -11,7 +11,7 @@ import type { WorkspaceDb, WorkspaceTx } from '../../db/workspace.client';
 import type { Actor } from '../../auth/session';
 import type { ChangeRecord } from './eav';
 import { invalid, notFound, WorkspaceError } from './errors';
-import { canRead, orExplain } from './governed';
+import { can, canRead, orExplain } from './governed';
 import { isoTime, rawRun } from './util';
 
 type Privacy = Teamspace['privacy'];
@@ -77,8 +77,7 @@ async function assertCan(
 	where: Record<string, unknown>,
 	what: string
 ): Promise<void> {
-	const can = await (delegate as { can(a: string, w: unknown): Promise<boolean> }).can(action, where);
-	if (!can) throw new WorkspaceError('FORBIDDEN', `Only a teamspace owner can ${what}`);
+	if (!(await can(delegate, action, where))) throw new WorkspaceError('FORBIDDEN', `Only a teamspace owner can ${what}`);
 }
 
 /**
@@ -195,8 +194,7 @@ export async function listArchivedTeamspaces(db: WorkspaceDb, sql: SqlStorage): 
 	for (const { id } of candidates) {
 		const row = await db.teamspace.findUnique({ where: { id } });
 		if (!row?.deletedAt) continue;
-		const can = await (db.teamspace as unknown as { can(a: string, w: unknown): Promise<boolean> }).can('update', { id });
-		if (!can) continue;
+		if (!(await can(db.teamspace, 'update', { id }))) continue;
 		const count = sql
 			.exec<{ n: number }>('SELECT COUNT(*) AS n FROM page WHERE teamspace_id = ? AND deleted_at = ? AND trash_root IS NULL', id, isoTime(row.deletedAt.getTime()))
 			.one().n;

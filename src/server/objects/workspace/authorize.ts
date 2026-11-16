@@ -13,6 +13,7 @@ import type { Op } from '../../../lib/shared/ops';
 import type { AccessLevel } from '../../db/workspace.schema';
 import type { GovernedTx } from './access';
 import { invalid, WorkspaceError } from './errors';
+import { accessTo } from './governed';
 import { rawAll } from './util';
 
 export interface OpAuthorizer {
@@ -40,7 +41,7 @@ export function createAuthorizer(options: AuthorizerOptions): OpAuthorizer {
 	async function levels(tx: GovernedTx, id: string, path: string): Promise<Levels> {
 		const hit = cache.get(id);
 		if (hit) return hit;
-		const got = (await tx.page.can(['read', 'comment', 'update', 'full'], { id })) as Levels;
+		const got: Levels = await accessTo(tx.page, { id }, ['read', 'comment', 'update', 'full'] as const);
 		if (!got.read) throw invalid(path, 'not_found', `Page "${id}" does not exist`);
 		cache.set(id, got);
 		return got;

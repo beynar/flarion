@@ -1,5 +1,34 @@
 # viborm: limitations found while building Flarion, and the fixes we need
 
+## Upgrade to 1.14.0 (2026-11-16)
+
+Flarion runs viborm 1.14.0 (branch `chore/viborm-1.14`). What changed for us, checked against the code:
+
+- **Extensions** are applied with `client.$extends(...)` (`access.ts` for the policy, `global.client.ts` for soft delete).
+- **`can` is gone.** `objects/workspace/governed.ts` has `accessTo` / `can` / `canRead`, which read `$access` through `findFirst`. The 404 vs 403
+  explanation after a refused write and the op authorizer use them. `purgeTrash` now asks `read` and `full` in one statement instead of two.
+- **Optional actor values.** A rule alternative that reads a missing actor value now closes the whole permission (1.12.1 folded only that
+  alternative). A public-link visitor has no `userId`, so every alternative reading `userId` or `shareToken` carries an explicit `$if` guard
+  (`withUser`, `withShareToken` in `policy.ts`). This keeps the 1.12.1 semantics.
+- **Action graphs.** `teamspace` (`full`) and `teamspaceMember` (`leave`) declare theirs; the plan's sketch replaces the global `levels` with a
+  per-model ladder. Bound values are unchanged: the move still peaks at 66 (`policy`) and 99 (`joinedPolicy`).
+- **Create rule: no relaxation in practice.** The changelog's "Added" entry says a key equal (through `$row`) to a readable parent's is accepted
+  without reading its target. The "Removed" table and the permissions page say the opposite ("the teamspace the subpage names must still be one
+  the caller reads"), and 1.14.0 behaves that way: a guest still cannot create a subpage in a teamspace they cannot read
+  (`tests/workers/db/policy-create.test.ts`, unchanged). The raw `createPage` stays.
+- **`NestedWriteError` under `$as`** is unchanged for a nested write the policy refuses (`governed-writes.test.ts`). The changelog's change
+  covers a concurrent change only.
+- **Regression: `WITHOUT ROWID` breaks the migration drift check.** With one managed table converted to `WITHOUT ROWID`, re-applying an estate
+  reports every foreign key and unique constraint of the other tables as changed (`page_fk_0` vs `page_parent_id_fkey`, `sqlite_autoindex_page_2`
+  vs `page_num_key`) and fails closed. This is reproduced with our driver and with `viborm/durable-object`. Every Workspace DO holds five such
+  tables (`ensureEavLayout`). Production is safe while the estate is unchanged, but **the estate is frozen until a fix ships**
+  (docs/ops/migrations.md). Declaring `.withoutRowid()` does not help existing objects: their live tables already differ from the shipped
+  snapshot, so the next apply refuses the same way.
+- **The driver stays ours for now.** `viborm/durable-object` applies our estate (checked in a probe) and does the `sync()` before
+  `foreign_keys = OFF`. But it reads `SELECT changes()` after every write without `RETURNING`, with no marker to skip it, which drops the
+  `/*quiet*/` saving (one statement per change-log and mutation-id write; about a quarter of a view-less commit's statements, load-test pass 4).
+  Worth switching once it has an equivalent, or once that cost has been measured as negligible.
+
 ## Review outcome (2026-11-08)
 
 The viborm maintainers reviewed this audit twice (two adversarial passes, real workerd, our own driver, schema and policy; evidence in

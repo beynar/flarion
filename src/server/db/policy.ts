@@ -1,6 +1,6 @@
 /**
  * Workspace access policy (viborm/permissions), final for P2. The plan's rules ("Permissions"), in
- * viborm 1.12.1's real vocabulary and shaped to fit Durable Object SQLite's statement limits
+ * viborm 1.14.0's real vocabulary and shaped to fit Durable Object SQLite's statement limits
  * (docs/spikes/p0-policy-limits.md, "P2 final numbers"):
  *
  * - four levels (`read`, `comment`, `update`, `full`), the level is DATA on grants and teamspaces;
@@ -16,13 +16,17 @@
  *   reached only by the Workspace DO's own code, which asserts the page-level right first
  *   (`objects/workspace/authorize.ts`).
  *
- * Vocabulary used (viborm 1.12.1):
+ * Vocabulary used (viborm 1.14.0):
  * - `{ actor: "path" }` in a value position is the actor's field, bound as one parameter;
  * - `{ actor: { path: value } }` in a filter is a condition on the actor alone, folded per call;
  * - a relation whose value is an action name is the target's predicate for that action;
  * - `parent: { recurse: { depth: false }, self: true, some: ... }` walks the ancestors in one
  *   `WITH RECURSIVE` inside the statement, the row itself included;
- * - `$exists: { model: where }` is a row-independent check that does not repeat per row.
+ * - `$exists: { model: where }` is a row-independent check that does not repeat per row;
+ * - `$if: { control: 'actor', path, exists: true }` guards an alternative that reads an optional actor value
+ *   (`userId`, `shareToken`): since 1.14.0 an unguarded read of a missing value closes the WHOLE permission, so
+ *   a public-link visitor (no `userId`) would read nothing at all;
+ * - a model with an action other than create/read/update/delete declares its `actions` graph.
  */
 import { v, type InferOutput } from 'viborm/validation';
 import { permissions, type Rule } from 'viborm/permissions';
@@ -109,8 +113,12 @@ export function actorFacts(input: ActorInput): Actor {
 	};
 }
 
-const isMember = { members: { some: { userId: { actor: 'userId' } } } } as const;
-const isOwner = { members: { some: { userId: { actor: 'userId' }, role: 'owner' } } } as const;
+/** Guards an alternative that reads an optional actor value (see the vocabulary above). */
+const withUser = { $if: { control: 'actor', path: 'userId', exists: true } } as const;
+const withShareToken = { $if: { control: 'actor', path: 'shareToken', exists: true } } as const;
+
+const isMember = { ...withUser, members: { some: { userId: { actor: 'userId' } } } } as const;
+const isOwner = { ...withUser, members: { some: { userId: { actor: 'userId' }, role: 'owner' } } } as const;
 
 /**
  * Who holds a share, at a level matched by `levelMatch` (an equality in the plan's sketch, an `in` list
@@ -123,10 +131,10 @@ const sharedWith = (levelMatch: string | { in: readonly string[] }) =>
 				level: levelMatch,
 				deletedAt: null,
 				OR: [
-					{ subjectKind: 'user', subjectId: { actor: 'userId' } },
+					{ ...withUser, subjectKind: 'user', subjectId: { actor: 'userId' } },
 					{ subjectKind: 'workspace', actor: { guest: false } },
 					{ subjectKind: 'teamspace', teamspace: { is: isMember } },
-					{ subjectKind: 'public', token: { actor: 'shareToken' } }
+					{ ...withShareToken, subjectKind: 'public', token: { actor: 'shareToken' } }
 				]
 			}
 		}
@@ -144,7 +152,7 @@ const sketchAccess = (level: string) => ({
 		{ actor: { admin: true } },
 		viaTeamspace(level),
 		// Private section: no teamspace, created by the caller.
-		{ teamspaceId: null, createdById: { actor: 'userId' } },
+		{ ...withUser, teamspaceId: null, createdById: { actor: 'userId' } },
 		ancestorsOrSelf(sharedWith(level))
 	]
 });
@@ -154,7 +162,7 @@ const sketchCreate = {
 	OR: [
 		{ parent: 'update' },
 		{ parentId: null, teamspace: { is: isMember } },
-		{ parentId: null, teamspaceId: null, createdById: { actor: 'userId' } }
+		{ ...withUser, parentId: null, teamspaceId: null, createdById: { actor: 'userId' } }
 	]
 } as const;
 
@@ -182,18 +190,22 @@ const pageCreate = {
 		{ AND: [{ parent: 'update' }, sameTeamspaceAsParent] },
 		{ parentId: null, actor: { admin: true } },
 		{ parentId: null, teamspaceId: { in: { actor: 'teamspaces.update' } } },
-		{ parentId: null, teamspaceId: null, createdById: { actor: 'userId' }, actor: { guest: false } }
+		{ ...withUser, parentId: null, teamspaceId: null, createdById: { actor: 'userId' }, actor: { guest: false } }
 	]
 } as const;
 
 const supportingModels = {
 	teamspace: {
+		// `full` is an action of its own (1.14.0 wants it in a graph); `update` and `full` both let the owner read.
+		actions: { read: [], update: ['read'], full: ['read'], create: [] },
 		// Open and closed teamspaces are listed to every non-guest; private ones to their members only.
 		read: { OR: [{ AND: [{ privacy: { in: ['open', 'closed'] } }, { actor: { guest: false } }] }, isMember] },
 		'update, full': isOwner,
 		create: { actor: { guest: false } }
 	},
 	teamspaceMember: {
+		// `leave` is the action a delete asks for; it implies nothing (as a custom action did before 1.14.0).
+		actions: { read: [], create: [], update: ['read'], leave: [] },
 		read: { teamspace: 'read' },
 		// Owners (and workspace admins) add anyone; a non-guest joins an open teamspace on their own, as a member.
 		create: {
@@ -202,7 +214,7 @@ const supportingModels = {
 				{
 					AND: [
 						{ actor: { guest: false } },
-						{ userId: { actor: 'userId' } },
+						{ ...withUser, userId: { actor: 'userId' } },
 						{ role: 'member' },
 						{ teamspace: { is: { privacy: 'open' } } }
 					]
@@ -211,7 +223,7 @@ const supportingModels = {
 		},
 		update: { teamspace: 'update' },
 		// Removing a member needs `update` on the teamspace; anyone may remove themselves (leave).
-		leave: { OR: [{ teamspace: 'update' }, { userId: { actor: 'userId' } }] },
+		leave: { OR: [{ teamspace: 'update' }, { ...withUser, userId: { actor: 'userId' } }] },
 		operations: { delete: 'leave' }
 	},
 	grant: {
@@ -254,9 +266,11 @@ const bookkeepingModels = {
  */
 export const sketchPolicy = permissions({
 	actor: actorSchema,
-	levels: ACCESS_LEVELS,
 	models: {
 		page: {
+			// The plan's global `levels`, spelled as the per-model ladder 1.14.0 asks for: a rule on a higher level
+			// also grants every level below it.
+			actions: { read: [], comment: ['read'], update: ['comment'], full: ['update'], create: [] },
 			operations: { delete: 'full' },
 			'read, comment, update': sketchAccess,
 			full: (level) => ({ OR: [sketchAccess(level), { teamspace: { is: isOwner } }] }),
@@ -276,7 +290,7 @@ const levelsFrom = (action: string) => ACCESS_LEVELS.slice(ACCESS_LEVELS.indexOf
  * the way up from any page, it gives the whole branch to its creator; a subpage someone else adds to it
  * is not "theirs" (it owns nothing for its author).
  */
-const privateOf = { parentId: null, teamspaceId: null, createdById: { actor: 'userId' } } as const;
+const privateOf = { ...withUser, parentId: null, teamspaceId: null, createdById: { actor: 'userId' } } as const;
 
 /** A share on the page or an ancestor, matched in ONE flat condition against the actor's share keys. */
 const sharedWithActor = (levels: readonly string[]) =>
@@ -289,8 +303,8 @@ const compactActions = { read: [], comment: [], update: [], full: [], create: []
  *
  * 1. The level is DATA, not a copy of the rule. A share or teamspace default holds `action` when its
  *    level is `action` or higher (`level in [..]`), and the actions declare no implications between
- *    themselves, so viborm does not OR four copies of the body for `read` (only its built-in "update
- *    grants read" edge remains).
+ *    themselves, so viborm does not OR four copies of the body for `read` (a declared graph implies only what
+ *    it lists: since 1.14.0 not even "update grants read"; `read`'s own body already covers every level).
  * 2. The OR over the four share kinds is one flat `subjectKey in actor.subjects`; the Worker puts
  *    `workspace`, `user:<id>`, `public:<token>` and `teamspace:<id>` into `subjects` per request.
  *

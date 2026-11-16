@@ -16,6 +16,14 @@ safely, and what to do when one goes wrong.
 
 ## Additive means
 
+> **Estate frozen under viborm 1.14.0 (2026-11-16).** viborm 1.14.0's drift check misreads a schema that holds a `WITHOUT ROWID`
+> table: every Workspace DO has five (the clustered EAV tables, converted by `ensureEavLayout`), and re-applying the estate over them
+> reports false drift on every foreign key and unique constraint, so it fails closed. Production is unaffected while the estate is
+> unchanged (`estate_head` matches, the apply is skipped), but **do not regenerate the estate or change `workspace.schema.ts`** until a
+> viborm release fixes it (`tests/workers/eav/eav.test.ts` "layout" and `tests/workers/objects/estate-lazy.test.ts` are `.fails` and turn
+> red then). Declaring `.withoutRowid()` on those models is not a way out: the new state would be applied over tables that already
+> differ from the shipped snapshot, and fail the same way on every existing object. Use `RAW_STEPS` meanwhile.
+
 Allowed: new tables (today through raw `ensure*` / `RAW_STEPS`, not the viborm estate: see the second row of the table above), new nullable columns or columns with a default, new indexes, new `meta` keys, new `RAW_STEPS` entries.
 Never in one release: dropping or renaming a table or column, changing a type or a default the old code relies on, adding
 `NOT NULL` without a default, tightening a constraint, rewriting data in place that old code reads differently. When a real

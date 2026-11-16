@@ -152,7 +152,7 @@ export interface CommitAccess {
 
 export class AccessService {
 	readonly #sql: SqlStorage;
-	/** `policy(db)` is typed by an enormous generic; the runtime surface is `$as(facts)`. */
+	/** `db.$extends(policy)` is typed by an enormous generic; the runtime surface is `$as(facts)`. */
 	readonly #governed: { $as(facts: PolicyActor): Governed };
 	readonly #entries = new Map<string, Entry>();
 	readonly #inflight = new Map<string, Promise<void>>();
@@ -166,7 +166,7 @@ export class AccessService {
 
 	constructor(host: AccessHost) {
 		this.#sql = host.sql;
-		this.#governed = (policy as unknown as (db: WorkspaceClient) => { $as(facts: PolicyActor): Governed })(host.db);
+		this.#governed = (host.db as unknown as { $extends(e: typeof policy): { $as(facts: PolicyActor): Governed } }).$extends(policy);
 	}
 
 	// ───────────────────────── facts and governed clients ─────────────────────────

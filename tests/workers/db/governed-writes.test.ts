@@ -11,7 +11,7 @@ import { createMigrationClient } from 'viborm/migrations';
 import { createDurableObjectSqliteClient } from '../../../src/server/db/driver/client';
 import { actorFacts, policy } from '../../../src/server/db/policy';
 import { WORKSPACE_TABLES, workspaceSchema } from '../../../src/server/db/workspace.schema';
-import { canRead, orExplain } from '../../../src/server/objects/workspace/governed';
+import { can, canRead, orExplain } from '../../../src/server/objects/workspace/governed';
 import { notFound, WorkspaceError } from '../../../src/server/objects/workspace/errors';
 import { testEnv } from '../helpers';
 
@@ -43,7 +43,7 @@ async function world<T>(fn: (ctx: { base: Any; alice: Any; bob: Any; guest: Any 
 		await base.grant.create({ data: { id: 'gw', pageId: 'W', subjectKind: 'user', subjectId: 'alice', subjectKey: 'user:alice', level: 'update', createdBy: 'bob' } });
 		const facts = (userId: string, role: 'member' | 'guest', memberships: { teamspaceId: string; role: string }[]) =>
 			actorFacts({ userId, role, memberships, teamspaces: LEVELS });
-		const governed = (policy as Any)(base);
+		const governed = base.$extends(policy);
 		return fn({
 			base,
 			alice: governed.$as(facts('alice', 'member', [{ teamspaceId: 'ts0', role: 'member' }])),
@@ -112,12 +112,12 @@ test('only updateMany and deleteMany answer { count: 0 } when the policy lets no
 	});
 });
 
-test("`can` tells a hidden row from a readable one: the pre-check Flarion keeps for the 404 / 403 split", async () => {
+test("`$access` tells a hidden row from a readable one: the read Flarion keeps for the 404 / 403 split", async () => {
 	await world(async ({ alice }) => {
-		expect(await alice.page.can('read', { id: 'R' })).toBe(true);
-		expect(await alice.page.can('update', { id: 'R' })).toBe(false);
-		expect(await alice.page.can('read', { id: 'H' })).toBe(false);
-		expect(await alice.page.can('read', { id: 'NOPE' })).toBe(false);
+		expect(await can(alice.page, 'read', { id: 'R' })).toBe(true);
+		expect(await can(alice.page, 'update', { id: 'R' })).toBe(false);
+		expect(await can(alice.page, 'read', { id: 'H' })).toBe(false);
+		expect(await can(alice.page, 'read', { id: 'NOPE' })).toBe(false);
 	});
 });
 

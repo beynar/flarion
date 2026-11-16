@@ -33,7 +33,7 @@ export function globalClient(database: D1Database): GlobalClient {
  * record `actorId` in `deletedById`. A transaction has one actor, so derive one client per request.
  */
 export function createDirectoryClient(database: D1Database, actorId?: string) {
-	return softDelete({ models: SOFT_DELETE_MODELS, ...(actorId ? { actorId } : {}) })(globalClient(database));
+	return globalClient(database).$extends(softDelete({ models: SOFT_DELETE_MODELS, ...(actorId ? { actorId } : {}) }));
 }
 
 export type DirectoryClient = ReturnType<typeof createDirectoryClient>;

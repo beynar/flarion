@@ -61,6 +61,7 @@ import {
 import { aiDone, aiFailed, flushAi, markAiPages, prepareAi, readAiMarkers, type AiMarker, type AiPrepare } from './eav/ai';
 import { validateFilter, type FilterGroup } from '../../../lib/shared/filter-ast';
 import { invalid, notFound, WorkspaceError } from './errors';
+import { accessTo } from './governed';
 import type { IngestResult } from './ingest';
 import { LiveHub, fanOutPerf, resetFanOutPerf, unitEvaluations, type CommitInfo } from './live';
 import { OptionIndex, type Drift } from '../../bitmaps/option-index';
@@ -2194,10 +2195,10 @@ export class WorkspaceDO extends DurableObject<Env> {
 		const row = this.ctx.storage.sql
 			.exec<{ deleted_at: string | null; trash_root: string | null }>('SELECT deleted_at, trash_root FROM page WHERE id = ?', pageId)
 			.toArray()[0];
-		const can = row ? await (gov.page as unknown as { can(level: 'read' | 'full', where: { id: string }): Promise<boolean> }).can('read', { id: pageId }) : false;
-		if (!row || !can) throw notFound(`Page "${pageId}"`);
+		const held = row ? await accessTo(gov.page, { id: pageId }, ['read', 'full'] as const) : null;
+		if (!row || !held?.read) throw notFound(`Page "${pageId}"`);
 		if (!row.deleted_at || row.trash_root !== pageId) throw invalid('/id', 'not_in_trash', 'Only a page that was moved to the trash can be deleted forever');
-		if (!(await (gov.page as unknown as { can(level: 'full', where: { id: string }): Promise<boolean> }).can('full', { id: pageId }))) {
+		if (!held.full) {
 			throw new WorkspaceError('FORBIDDEN', 'You do not have access to delete this page');
 		}
 		// Everything below it goes, whichever entry of the trash it was in.
