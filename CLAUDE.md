@@ -7,7 +7,7 @@ Product name is **Flarion** (never use Notion's name, logo or fonts in the UI).
 ## Stack (pinned — do not upgrade)
 - SvelteKit 3.1 + Svelte 5 runes, Vite 8, `sveltekit-cloudflare-worker` (a GitHub commit, `github:beynar/sveltekit-cloudflare-worker#<full sha>`: pnpm cannot resolve a short sha that is not a branch tip; source/docs at `/Users/arnaud/code/sveltekit-cloudflare-worker`).
 - edytor 7.0.4 (editor, Yjs-v14-style CRDT, `edytor/cloudflare` attachRoom/routeDocumentSocket). Docs: https://edytor.dev/docs , source at `/Users/arnaud/code/edytor`.
-- viborm 1.14.0 (ORM; `viborm/permissions`, `viborm/soft-delete`, `viborm/ordering`, `viborm/d1`, `viborm/driver`). Docs: https://viborm.dev/docs , source at `/Users/arnaud/code/viborm` (may lag npm; trust `node_modules/viborm/dist` types first).
+- viborm 1.14.2 (ORM; `viborm/permissions`, `viborm/soft-delete`, `viborm/ordering`, `viborm/d1`, `viborm/driver`). Docs: https://viborm.dev/docs , source at `/Users/arnaud/code/viborm` (may lag npm; trust `node_modules/viborm/dist` types first).
 - entasis 0.16.0 (UI). Docs: https://entasis.beynar.workers.dev/docs ; types in `node_modules/entasis/dist`.
 - oRPC **v1** (1.16.2) — decided in P0. Hibernation via `@orpc/server/hibernation`. Do not use v2 beta.
 - better-auth 1.7.18 + `@better-auth/passkey`. Valibot for schemas (Standard Schema).
@@ -33,7 +33,7 @@ Product name is **Flarion** (never use Notion's name, logo or fonts in the UI).
   driver per storage; interactive tx = `storage.transaction`; never await I/O inside a tx; never call raw
   `ctx.storage.sql` while a tx is open), `src/server/db/driver/client.ts`, `driver/migrate.ts` (`migrateOnWake`).
   Policy in `src/server/db/policy.ts` uses actor *facts* (`actorFacts()`: subjects, teamspaces) to stay under
-  100 bound params — read `docs/spikes/p0-policy-limits.md`. viborm 1.14.0: extensions are applied with `client.$extends(policy)` /
+  100 bound params — read `docs/spikes/p0-policy-limits.md`. viborm 1.14 (since 1.14.0): extensions are applied with `client.$extends(policy)` /
   `$extends(softDelete(...))`; there is no `can`/`assert` (use `accessTo`/`can`/`canRead` from `objects/workspace/governed.ts`, which read
   `$access`); a rule alternative that reads an optional actor value (`userId`, `shareToken`) needs its `$if` guard (`withUser`), or a
   public-link visitor loses the whole permission; a model with an action outside create/read/update/delete declares its `actions` graph.

@@ -69,8 +69,8 @@ importers:
         specifier: 1.5.0
         version: 1.5.0(typescript@6.0.3)
       viborm:
-        specifier: 1.14.0
-        version: 1.14.0(@cloudflare/workers-types@5.20261107.1)
+        specifier: 1.14.2
+        version: 1.14.2(@cloudflare/workers-types@5.20261107.1)
     devDependencies:
       '@axe-core/playwright':
         specifier: 4.11.0
@@ -2295,8 +2295,8 @@ packages:
   vfile@6.0.3:
     resolution: {integrity: sha512-KzIbH/9tXat2u30jf+smMwFCsno4wHVdNmzFyL+T/L3UGqqk6JKfVqOFOZEpZSHADH1k40ab6NUIXZq422ov3Q==}
 
-  viborm@1.14.0:
-    resolution: {integrity: sha512-zvEhkCqd9AHQVrB1ql0JiFqdJVmwx5GWJr7yfqt5V6j90PjhToJ6d4kb07mxUGlrUXOMpvYYMJaokQYaGbVsbQ==}
+  viborm@1.14.2:
+    resolution: {integrity: sha512-3Za/JJehTiP97hRuAOxY5IumMkWXD06V+Fx3PvYWN65aZ89jSfbCwIvsujtT8ZvZBL+qNFOeHu5SWPqOJO1TeA==}
     engines: {node: '>=22'}
     hasBin: true
     peerDependencies:
@@ -4471,7 +4471,7 @@ snapshots:
       '@types/unist': 3.0.3
       vfile-message: 4.0.4
 
-  viborm@1.14.0(@cloudflare/workers-types@5.20261107.1):
+  viborm@1.14.2(@cloudflare/workers-types@5.20261107.1):
     dependencies:
       '@clack/prompts': 0.7.0
       '@standard-schema/spec': 1.1.0

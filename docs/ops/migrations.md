@@ -19,7 +19,8 @@ safely, and what to do when one goes wrong.
 > **Estate frozen under viborm 1.14.0 (2026-11-16).** viborm 1.14.0's drift check misreads a schema that holds a `WITHOUT ROWID`
 > table: every Workspace DO has five (the clustered EAV tables, converted by `ensureEavLayout`), and re-applying the estate over them
 > reports false drift on every foreign key and unique constraint, so it fails closed. Production is unaffected while the estate is
-> unchanged (`estate_head` matches, the apply is skipped), but **do not regenerate the estate or change `workspace.schema.ts`** until a
+> unchanged (`estate_head` matches, the apply is skipped). Still present in 1.14.2 (2026-11-17: 1.14.1 and 1.14.2 only fix SurrealDB Cloud
+> pushes; the two `.fails` tests below still fail). **Do not regenerate the estate or change `workspace.schema.ts`** until a
 > viborm release fixes it (`tests/workers/eav/eav.test.ts` "layout" and `tests/workers/objects/estate-lazy.test.ts` are `.fails` and turn
 > red then). Declaring `.withoutRowid()` on those models is not a way out: the new state would be applied over tables that already
 > differ from the shipped snapshot, and fail the same way on every existing object. Use `RAW_STEPS` meanwhile.
