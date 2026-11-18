@@ -216,9 +216,9 @@ Read together with `docs/spikes/p4-scale.md` (the profile this run is the stagin
 `LOAD_TEST_KEY` (24+ characters) in `.dev.vars`:
 
 ```sh
-echo 'LOAD_TEST_KEY=local-load-test-key-0123456789abcdef' >> .dev.vars
+echo 'LOAD_TEST_KEY=<your-local-load-test-key>' >> .dev.vars
 pnpm exec vite dev --port 5981 &
-pnpm load:smoke --base http://localhost:5981 --key local-load-test-key-0123456789abcdef
+pnpm load:smoke --base http://localhost:5981 --key <your-local-load-test-key>
 ```
 
 Local numbers share one machine between the server, the object and the script, and the dev proxy is not the
